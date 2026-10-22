@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Jolu installer header</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 150px;
+    height: 57px;
+    overflow: hidden;
+  }
+
+  body {
+    /* MUI2 表头背景是纯白，这里必须同色才能无缝 */
+    background: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 13px;
+  }
+
+  /* Jolu 人物图标，与 sidebar 同一母版 */
+  .icon {
+    width: 44px;
+    height: 44px;
+    object-fit: contain;
+  }
+</style>
+</head>
+<body>
+  <img class="icon" src="{{iconUrl}}" alt="" />
+</body>
+</html>
