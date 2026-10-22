@@ -1067,9 +1067,7 @@ async fn cleanup_history(app: tauri::AppHandle, db: State<'_, Db>, days: u32) ->
 
 /// 导出 / 导入备份的核心逻辑，由 `data_files` 的文件导出、导入命令调用
 async fn export_data(db: State<'_, DbRead>, platform: Option<String>) -> Result<String, String> {
-    if platform.as_deref().is_some_and(|value| !platforms::known(value)) {
-        return Err("导出范围必须是全部、Claude 或 Codex".into());
-    }
+    data_files::valid_export_scope(platform.as_deref())?;
     with_reader(db.0.clone(), move |conn| db::export_backup(conn, platform.as_deref())).await
 }
 

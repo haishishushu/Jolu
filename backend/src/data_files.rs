@@ -40,9 +40,15 @@ pub async fn import_data_file(app: tauri::AppHandle, db: State<'_, super::Db>) -
     }
 }
 
+/// 导出范围校验：不传表示全部；传入时必须是平台目录里的已知平台
+pub(crate) fn valid_export_scope(platform: Option<&str>) -> Result<(), String> {
+    if platform.is_some_and(|p| !super::platforms::known(p)) { return Err("导出范围无效".into()); }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn export_data_file(app: tauri::AppHandle, db: State<'_, super::DbRead>, platform: Option<String>) -> Result<Option<String>, String> {
-    if platform.as_deref().is_some_and(|p| !matches!(p, "claude" | "codex")) { return Err("导出范围无效".into()); }
+    valid_export_scope(platform.as_deref())?;
     let window = app.get_webview_window(super::MAIN).ok_or("请从主面板导出数据")?;
     let name = format!("jolu-{}-{}.json", platform.as_deref().unwrap_or("all"), chrono::Local::now().format("%Y-%m-%d"));
     let dialog = app.dialog().file().set_parent(&window).set_title("导出统计备份").add_filter("JSON 备份", &["json"]).set_file_name(name);
@@ -91,5 +97,18 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn export_scope_accepts_every_known_platform() {
+        // 直接读随程序打包的平台目录，新增平台时自动覆盖
+        let catalog: Vec<serde_json::Value> = serde_json::from_str(include_str!("../../frontend/src/lib/platformCatalog.json")).unwrap();
+        assert!(!catalog.is_empty());
+        for platform in &catalog {
+            let id = platform["id"].as_str().unwrap();
+            assert_eq!(valid_export_scope(Some(id)), Ok(()), "{id} 应允许导出");
+        }
+        assert_eq!(valid_export_scope(None), Ok(()));
+        assert_eq!(valid_export_scope(Some("unknown")), Err("导出范围无效".to_string()));
     }
 }
