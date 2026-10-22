@@ -1,0 +1,643 @@
+import { useEffect, useMemo, useState, type ReactNode } from "react"
+import * as Dialog from "@radix-ui/react-dialog"
+import * as Menu from "@radix-ui/react-dropdown-menu"
+import { AlertTriangle, Check, ChevronDown, LoaderCircle, Pencil, Plus, RefreshCw, Search, Ticket, Trash2, X } from "lucide-react"
+import { api, isTauri, type QuotaWindowDto } from "@/lib/api"
+import { cn } from "@/lib/utils"
+import { PROVIDERS, providerEntry, validateConnectionName } from "@/lib/providerCatalog"
+import { filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle } from "@/lib/accountDisplay"
+import { remainingPercent } from "@/lib/quota"
+import { useConnections } from "@/hooks/useConnections"
+import { useSettings } from "@/hooks/useSettings"
+import { useBalance, useQuota, type BalanceResult, type QuotaResult } from "@/hooks/useQuota"
+import { SelectField } from "@/components/ui/SelectField"
+import { PlatformLogo } from "@/components/brand/PlatformLogo"
+import { JoluButton } from "@/components/ui/JoluButton"
+import { Tip } from "@/components/ui/Tip"
+import { useToast } from "@/components/ui/Toast"
+import type { Connection, PlatformId } from "@/types"
+
+/** 「设为当前」只对能写入本机 CLI 配置的平台开放 */
+const CLI_PLATFORMS: readonly PlatformId[] = ["claude", "codex"]
+/** 筛选栏直接露出的供应商，其余收进「更多供应商」（画板 07 / 09） */
+const QUICK_FILTERS: readonly PlatformId[] = ["claude", "codex"]
+
+type Conn = ReturnType<typeof useConnections>
+
+/**
+ * 账号管理（Jolu.pen 画板 07–10、23、25）：订阅账号看额度，API Key 账号看余额与消费。
+ * 「当前使用」以本机 CLI 实际在用的凭证为准，按供应商分别设置。
+ */
+export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
+  conn: Conn
+  onConnect: (platform: PlatformId) => void
+  onBrowseProviders: () => void
+}) {
+  const toast = useToast()
+  const cfg = useSettings()
+  const [platform, setPlatform] = useState<PlatformId | null>(null)
+  const [query, setQuery] = useState("")
+  const [current, setCurrent] = useState<string[]>([])
+  const [removing, setRemoving] = useState<Connection | null>(null)
+  const [promoting, setPromoting] = useState<Connection | null>(null)
+  const [editing, setEditing] = useState<Connection | null>(null)
+
+  useEffect(() => {
+    if (!isTauri) return
+    let stopped = false
+    void api.currentConnections().then((ids) => { if (!stopped) setCurrent(ids) }).catch(() => { if (!stopped) setCurrent([]) })
+    return () => { stopped = true }
+  }, [conn.connections])
+
+  const accounts = conn.connections
+  const visible = useMemo(() => filterAccounts(accounts, platform, query), [accounts, platform, query])
+  const currentCount = accounts.filter((a) => current.includes(a.id)).length
+
+  if (!conn.loading && !conn.error && !accounts.length) {
+    return (
+      <>
+        <Header total={0} current={0} onAdd={onBrowseProviders} />
+        <EmptyState title="还没有账号" desc="连接供应商后，账号的额度、余额与消费会显示在这里。" action={<JoluButton variant="primary" onClick={onBrowseProviders}><Plus aria-hidden className="!text-[#071B10]" />连接供应商</JoluButton>} />
+      </>
+    )
+  }
+
+  return (
+    <>
+      <Header total={accounts.length} current={currentCount} onAdd={onBrowseProviders} />
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex h-[34px] w-[258px] items-center gap-2 rounded-lg border border-jolu-border px-3 focus-within:border-jolu-accent">
+          <Search aria-hidden className="size-4 shrink-0 text-jolu-muted" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户名、邮箱、连接名称" aria-label="搜索账号" className="min-w-0 flex-1 bg-transparent text-xs text-jolu-text outline-none placeholder:text-jolu-muted" />
+        </label>
+        <FilterChip active={platform === null} onClick={() => setPlatform(null)}>全部供应商</FilterChip>
+        {QUICK_FILTERS.map((id) => (
+          <FilterChip key={id} active={platform === id} onClick={() => setPlatform(id)}>{providerEntry(id).name}</FilterChip>
+        ))}
+        <MoreFilter accounts={accounts} value={platform} onChange={setPlatform} />
+      </div>
+
+      {conn.error && (
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-[10px] bg-jolu-danger-soft px-4 py-2.5 text-xs text-jolu-danger">
+          <span>账号列表读取失败：{conn.error}</span>
+          <JoluButton size="sm" variant="danger-soft" onClick={() => void conn.reload()}>重新读取</JoluButton>
+        </div>
+      )}
+      {conn.loading && !accounts.length && <p role="status" className="text-xs text-jolu-muted">正在读取账号…</p>}
+
+      {visible.length ? (
+        <div className="grid grid-cols-2 gap-4">
+          {visible.map((account) => (
+            <AccountCard
+              key={`${account.id}:${account.status}`}
+              account={account}
+              current={current.includes(account.id)}
+              onRemove={() => setRemoving(account)}
+              onPromote={() => setPromoting(account)}
+              onEdit={() => setEditing(account)}
+              onResume={() => {
+                void conn.setPaused(account.id, false)
+                  .then(() => toast.success(`已恢复 ${account.baseName} 的查询`))
+                  .catch((reason) => toast.danger("恢复查询失败", String(reason)))
+              }}
+            />
+          ))}
+        </div>
+      ) : accounts.length > 0 && (
+        <EmptyState
+          title="没有找到匹配的账号"
+          desc="试试其他供应商，或清除搜索条件。"
+          action={<>
+            <JoluButton variant="neutral" onClick={() => { setQuery(""); setPlatform(null) }}>清除筛选</JoluButton>
+            <JoluButton variant="soft" onClick={() => platform ? onConnect(platform) : onBrowseProviders()}><Plus aria-hidden />添加账号</JoluButton>
+          </>}
+        />
+      )}
+      <p className="text-[11px] text-jolu-muted">额度显示剩余量；「未提供」表示服务未返回，不能视为 0。当前账号按供应商分别设置。</p>
+
+      {removing && (
+        <RemoveDialog
+          account={removing}
+          current={current.includes(removing.id)}
+          alternatives={accounts.filter((a) => a.platformId === removing.platformId && a.id !== removing.id)}
+          islandUsers={islandUsers(removing.id, cfg.settings)}
+          onClose={() => setRemoving(null)}
+          onConfirm={async (replacement) => {
+            await conn.remove(removing.id)
+            if (replacement) await api.enableConnection(replacement)
+            toast.success(`已删除 ${removing.baseName}`, replacement ? "已切换到替代账号；历史统计保留" : "配置与凭据已移除，历史统计保留")
+            setRemoving(null)
+            await conn.reload()
+          }}
+        />
+      )}
+      {promoting && (
+        <PromoteDialog
+          account={promoting}
+          onClose={() => setPromoting(null)}
+          onConfirm={async () => {
+            const note = await api.enableConnection(promoting.id)
+            toast.success(`已将「${promoting.baseName}」设为当前账号`, note)
+            setPromoting(null)
+            await conn.reload()
+          }}
+        />
+      )}
+      {editing && (
+        <EditDialog
+          account={editing}
+          others={accounts.filter((a) => a.id !== editing.id)}
+          onClose={() => setEditing(null)}
+          onSave={async (name, secret) => {
+            if (name !== editing.baseName) await conn.rename(editing.id, name)
+            if (secret) await conn.replaceApiKey(editing.id, secret)
+            toast.success(`已保存 ${name}`, secret ? "密钥已更换并通过验证" : undefined)
+            setEditing(null)
+          }}
+        />
+      )}
+    </>
+  )
+}
+
+function islandUsers(id: string, settings: ReturnType<typeof useSettings>["settings"]): string[] {
+  const users: string[] = []
+  if (settings.island_connection_id === id) users.push("灵动岛本体")
+  settings.island_clones.forEach((clone, index) => { if (clone.connection_id === id) users.push(`灵动岛分身 ${index + 1}`) })
+  return users
+}
+
+function Header({ total, current, onAdd }: { total: number; current: number; onAdd: () => void }) {
+  return (
+    <div className="flex h-9 items-center justify-between">
+      <div className="flex items-baseline gap-3">
+        <h2 className="text-[22px] font-semibold text-jolu-text">账号管理</h2>
+        <span className="text-xs text-jolu-muted">{total} 个账号 · {current} 个当前使用</span>
+      </div>
+      <JoluButton variant="primary" onClick={onAdd}><Plus aria-hidden className="!text-[#071B10]" />添加账号</JoluButton>
+    </div>
+  )
+}
+
+function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "flex h-[34px] items-center gap-2 rounded-lg border px-3 text-[13px] font-medium outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
+        active ? "border-jolu-selected bg-jolu-selected text-jolu-on" : "border-jolu-border bg-jolu-bg text-jolu-text hover:bg-jolu-stage",
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** 「更多供应商」：全部选项三列网格，带账号数量；0 个账号的供应商仍可选（画板 25） */
+function MoreFilter({ accounts, value, onChange }: { accounts: readonly Connection[]; value: PlatformId | null; onChange: (platform: PlatformId | null) => void }) {
+  const count = (id: PlatformId) => accounts.filter((a) => a.platformId === id).length
+  const inMore = value !== null && !QUICK_FILTERS.includes(value)
+  const item = (key: string, label: string, selected: boolean, onSelect: () => void) => (
+    <Menu.Item
+      key={key}
+      onSelect={onSelect}
+      className={cn(
+        "flex h-8 cursor-default select-none items-center justify-center rounded-md border text-xs outline-none",
+        selected ? "border-jolu-accent bg-jolu-selected font-medium text-jolu-on" : "border-jolu-border text-jolu-text data-[highlighted]:bg-jolu-side",
+      )}
+    >
+      {label}
+    </Menu.Item>
+  )
+  return (
+    <Menu.Root modal={false}>
+      <Menu.Trigger
+        className={cn(
+          "flex h-[34px] items-center gap-2 rounded-lg border px-3 text-[13px] font-medium outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage",
+          inMore ? "border-jolu-selected bg-jolu-selected text-jolu-on" : "border-jolu-border bg-jolu-bg text-jolu-text hover:bg-jolu-stage",
+        )}
+      >
+        <ChevronDown aria-hidden className="size-4 text-jolu-muted" />
+        {inMore ? providerEntry(value).name : "更多供应商"}
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content align="start" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] grid w-[420px] grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover">
+          {item("all", `全部供应商 · ${accounts.length}`, value === null, () => onChange(null))}
+          {PROVIDERS.map((entry) => item(entry.id, `${entry.name} · ${count(entry.id)}`, value === entry.id, () => onChange(entry.id)))}
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu.Root>
+  )
+}
+
+function EmptyState({ title, desc, action }: { title: string; desc: string; action: ReactNode }) {
+  return (
+    <div className="flex flex-col items-start gap-3 rounded-xl border border-jolu-border p-6">
+      <span className="text-base font-semibold text-jolu-text">{title}</span>
+      <span className="text-xs text-jolu-muted">{desc}</span>
+      <div className="flex gap-2.5">{action}</div>
+    </div>
+  )
+}
+
+function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }: {
+  account: Connection
+  current: boolean
+  onRemove: () => void
+  onPromote: () => void
+  onEdit: () => void
+  onResume: () => void
+}) {
+  const entry = providerEntry(account.platformId)
+  const paused = account.status === "paused"
+  const canPromote = !current && CLI_PLATFORMS.includes(account.platformId)
+  // 两个查询都在卡片层发起：刷新按钮刷新的就是卡片正在显示的数据（画板 23）
+  const zcodeLocal = account.platformId === "zcode" && account.kind === "auth"
+  const quota = useQuota(account.kind === "auth" && !paused && !zcodeLocal ? account.id : null, zcodeLocal && !paused ? "zcode" : false)
+  const balance = useBalance(account.kind === "api" && account.baseUrl && !paused ? account.id : null)
+  const refresh = account.kind === "api" ? (account.baseUrl ? balance : null) : quota
+  return (
+    <article className={cn("flex min-w-0 flex-col gap-3 rounded-xl border bg-jolu-bg p-[18px]", current ? "border-jolu-accent" : "border-jolu-border")}>
+      <div className="flex min-h-[34px] items-center gap-2.5">
+        <span className="grid size-7 shrink-0 place-items-center"><PlatformLogo platform={account.platformId} size={22} /></span>
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="truncate text-sm font-semibold text-jolu-text" title={account.baseName}>{account.baseName}</span>
+          <span className="truncate text-[11px] text-jolu-muted">
+            {account.kind === "api" ? `${account.baseUrl ? "自定义 API" : "官方 API"} · 用于 ${entry.name}` : `${entry.name} 订阅账号`}
+          </span>
+        </div>
+        {current && <Badge tone="on">当前使用</Badge>}
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-jolu-text">{account.kind === "api" ? "按量计费" : entry.name}</span>
+        <Badge tone="muted">{account.kind === "api" ? "API Key" : "订阅授权"}</Badge>
+      </div>
+      {paused ? (
+        <div className="flex items-center gap-3 rounded-lg bg-jolu-side px-3 py-2.5 text-xs text-jolu-muted">
+          <span className="min-w-0 flex-1">此账号暂停查询，额度与余额不更新；配置、凭据与历史统计保留。</span>
+          <JoluButton size="sm" variant="soft" disabled={!isTauri} onClick={onResume}>恢复查询</JoluButton>
+        </div>
+      ) : account.kind === "api" ? <ApiMetrics account={account} balance={balance} /> : <SubscriptionMetrics account={account} quota={quota} />}
+      <span className="flex-1" />
+      <CardActions account={account} paused={paused} refresh={refresh} canPromote={canPromote} onPromote={onPromote} onEdit={onEdit} onRemove={onRemove} />
+    </article>
+  )
+}
+
+function Badge({ tone, children }: { tone: "on" | "muted" | "danger"; children: ReactNode }) {
+  return (
+    <span className={cn(
+      "shrink-0 rounded-[5px] px-2 py-[5px] text-[11px] leading-none",
+      tone === "on" ? "bg-jolu-selected text-jolu-on" : tone === "danger" ? "bg-jolu-danger-soft text-jolu-danger" : "bg-jolu-stage text-jolu-muted",
+    )}>{children}</span>
+  )
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone?: "danger" | "muted" }) {
+  return (
+    <div className="flex min-w-0 flex-1 flex-col gap-1">
+      <span className="text-[10px] text-jolu-muted">{label}</span>
+      <span className={cn("truncate text-xs font-medium", tone === "danger" ? "text-jolu-danger" : tone === "muted" ? "text-jolu-muted" : "text-jolu-text")}>{value}</span>
+    </div>
+  )
+}
+
+/** 订阅账号：套餐 / 订阅状态 / 到期时间 + 额度窗口 + 重置卡（画板 07、23） */
+function SubscriptionMetrics({ account, quota }: { account: Connection; quota: QuotaResult }) {
+  const state = quota.state
+  const unauthorized = state?.state === "unauthorized"
+  const plan = (state?.state === "ok" ? state.plan : null) ?? (account.label && account.label !== "本机来源" ? account.label : null)
+  return (
+    <>
+      <div className="flex gap-3">
+        <Stat label="等级 / 套餐" value={plan ?? "未获取"} tone={plan ? undefined : "muted"} />
+        <Stat label="订阅状态" value={unauthorized ? "未确认 · 授权过期" : "未获取"} tone={unauthorized ? "danger" : "muted"} />
+        <Stat label="到期时间" value="未获取" tone="muted" />
+      </div>
+      {state?.state === "ok" && state.windows.length > 0 ? (
+        <div className="grid grid-cols-2 gap-4">
+          {state.windows.slice(0, 2).map((window) => <QuotaBar key={window.key} window={window} />)}
+        </div>
+      ) : (
+        <div className="rounded-lg bg-jolu-side px-3 py-2.5 text-[11px] text-jolu-muted">
+          {quota.loading && !state ? "正在读取额度…" : state && state.state !== "ok" ? `额度 · ${unauthorized ? "账号认证已失效，重新登录后同步" : `未提供（${state.reason}）`}` : "额度 · 未提供"}
+        </div>
+      )}
+      {quota.stale && quota.failure && (
+        <p role="status" className="flex items-center gap-1.5 text-[11px] text-jolu-danger">
+          <AlertTriangle aria-hidden className="size-3.5" />刷新失败 · {formatSyncedAt(quota.fetchedAt).replace("同步", "数据")}
+        </p>
+      )}
+      <div className="flex h-8 items-center gap-2 rounded-[7px] bg-jolu-side px-2.5 text-[11px] text-jolu-muted">
+        <Ticket aria-hidden className="size-[15px] shrink-0" />
+        重置卡 · 暂不支持查询
+      </div>
+    </>
+  )
+}
+
+function QuotaBar({ window }: { window: QuotaWindowDto }) {
+  const remaining = window.used_percent === null ? null : remainingPercent(window.used_percent)
+  const reset = formatResetAt(window.resets_at)
+  return (
+    <div className="flex min-w-0 flex-col gap-[5px]">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="truncate text-jolu-muted">{quotaTitle(window.key, window.window_name)}</span>
+        <span className="font-semibold text-jolu-text">{remaining === null ? "未提供" : `剩余 ${Math.round(remaining)}%`}</span>
+      </div>
+      {/* 未知额度不用空进度条表示（画板 23） */}
+      {remaining !== null && (
+        <div className="h-[5px] overflow-hidden rounded-[3px] bg-jolu-track">
+          <div className="motion-quota-bar h-full rounded-[3px] bg-jolu-accent" style={{ width: `${remaining}%` }} />
+        </div>
+      )}
+      <span className="text-[10px] text-jolu-muted">{reset ?? "重置时间未提供"}</span>
+    </div>
+  )
+}
+
+/** API Key 账号：可用余额 + 消费 + 服务信息（画板 07、23「余额查询状态」） */
+function ApiMetrics({ account, balance }: { account: Connection; balance: BalanceResult }) {
+  const state = balance.state
+  return (
+    <>
+      <div className="flex flex-col gap-1 rounded-lg bg-jolu-selected px-3 py-2.5">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-jolu-on">可用余额</span>
+          <span className="text-[10px] text-jolu-muted">{state?.state === "ok" ? (balance.stale ? "刷新失败 · 显示上次金额" : "供应商返回") : ""}</span>
+        </div>
+        {state?.state === "ok" ? (
+          <div className="flex items-baseline gap-2">
+            <span className="tnum text-[26px] font-semibold text-jolu-text">{formatMoney(state.balance, state.currency)}</span>
+            <span className="text-[11px] text-jolu-muted">{state.currency}</span>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[26px] font-semibold text-jolu-muted">—</span>
+            <span className="text-[11px] text-jolu-muted">
+              {!account.baseUrl ? "官方直连不提供余额查询，不显示为 0。"
+                : balance.loading ? "正在获取余额…"
+                : state ? `此服务未提供可用的余额查询：${state.reason}` : "还没有余额数据。查询成功后显示金额和币种。"}
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="flex gap-3">
+        <Stat label="今日消费" value="未提供" tone="muted" />
+        <Stat label="累计消费" value={state?.state === "ok" && state.used !== null ? `${formatMoney(state.used, state.currency)} ${state.currency}` : "未提供"} tone={state?.state === "ok" && state.used !== null ? undefined : "muted"} />
+        <Stat label="累计充值" value="未提供" tone="muted" />
+      </div>
+      <div className="flex flex-col gap-[5px] text-[11px] text-jolu-muted">
+        <span className="truncate font-mono">{account.baseUrl ?? providerEntry(account.platformId).baseUrl?.value ?? "官方地址"}</span>
+        <span className="truncate">模型 {account.model ?? "未设置"}  ·  Key {account.masked || "未保存"}</span>
+      </div>
+    </>
+  )
+}
+
+function CardActions({ account, paused, refresh, canPromote, onPromote, onEdit, onRemove }: {
+  account: Connection
+  paused: boolean
+  refresh: QuotaResult | BalanceResult | null
+  canPromote: boolean
+  onPromote: () => void
+  onEdit: () => void
+  onRemove: () => void
+}) {
+  return (
+    <div className="flex h-[34px] items-center gap-2">
+      <span className="min-w-0 flex-1 truncate text-[10px] text-jolu-muted">
+        {paused ? "暂停查询" : refresh?.fetchedAt ? formatSyncedAt(refresh.fetchedAt, new Date(), account.kind === "api" ? "余额" : "") : account.lastSyncText}
+      </span>
+      {canPromote && <JoluButton size="sm" variant="soft" disabled={!isTauri} onClick={onPromote}><Check aria-hidden />设为当前</JoluButton>}
+      {refresh && <RefreshButton label={account.kind === "api" ? "刷新余额" : "刷新当前账号"} result={refresh} />}
+      {/* 编辑入口位置待确认：Jolu.pen 画板 27 有编辑弹窗，但账号卡片上未画入口 */}
+      <Tip label="编辑连接">
+        <button
+          type="button"
+          aria-label="编辑连接"
+          onClick={onEdit}
+          className="grid size-8 shrink-0 place-items-center rounded-lg bg-jolu-side text-jolu-muted outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent"
+        >
+          <Pencil aria-hidden className="size-4" />
+        </button>
+      </Tip>
+      <Tip label="删除账号">
+        <button
+          type="button"
+          aria-label="删除账号"
+          onClick={onRemove}
+          className="grid size-8 shrink-0 place-items-center rounded-lg bg-jolu-danger-soft text-jolu-danger outline-none hover:brightness-[0.98] active:bg-jolu-danger-pressed focus-visible:outline-2 focus-visible:outline-jolu-accent"
+        >
+          <Trash2 aria-hidden className="size-4" />
+        </button>
+      </Tip>
+    </div>
+  )
+}
+
+/** 刷新只影响当前卡片；请求中禁用防重复点击，结果直接体现在卡片上（画板 23「正在刷新」） */
+function RefreshButton({ label, result }: { label: string; result: QuotaResult | BalanceResult }) {
+  const [busy, setBusy] = useState(false)
+  const loading = busy || result.loading
+  return (
+    <JoluButton
+      size="sm"
+      variant="neutral"
+      disabled={loading || !isTauri}
+      onClick={() => {
+        setBusy(true)
+        void result.refresh().finally(() => setBusy(false))
+      }}
+    >
+      {loading ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}
+      {loading ? "正在刷新…" : label}
+    </JoluButton>
+  )
+}
+
+function ConfirmShell({ title, subtitle, children, footer, onClose, busy }: {
+  title: string
+  subtitle: string
+  children: ReactNode
+  footer: ReactNode
+  onClose: () => void
+  busy: boolean
+}) {
+  return (
+    <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose() }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
+        <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-1">
+              <Dialog.Title className="text-base font-semibold text-jolu-text">{title}</Dialog.Title>
+              <span className="truncate text-xs text-jolu-muted">{subtitle}</span>
+            </div>
+            <Dialog.Close asChild>
+              <button type="button" aria-label="关闭" disabled={busy} className="grid size-7 shrink-0 place-items-center rounded-md text-jolu-muted hover:bg-jolu-stage">
+                <X aria-hidden className="size-4" />
+              </button>
+            </Dialog.Close>
+          </div>
+          {children}
+          <div className="flex justify-end gap-2.5">{footer}</div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function useConfirm(onConfirm: () => Promise<void>) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    try { await onConfirm() } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
+  }
+  return { busy, error, run }
+}
+
+const NONE = "__none__"
+
+/** 删除账号：正在使用时需选择替代账号或暂不使用（画板 25） */
+function RemoveDialog({ account, current, alternatives, islandUsers, onClose, onConfirm }: {
+  account: Connection
+  current: boolean
+  alternatives: Connection[]
+  islandUsers: string[]
+  onClose: () => void
+  onConfirm: (replacement: string | null) => Promise<void>
+}) {
+  const entry = providerEntry(account.platformId)
+  const [replacement, setReplacement] = useState<string>(alternatives[0]?.id ?? "")
+  const confirm = useConfirm(() => onConfirm(current && replacement ? replacement : null))
+  return (
+    <ConfirmShell
+      title={current ? "删除正在使用的账号？" : account.kind === "api" ? "删除 API Key 账号？" : "删除订阅账号？"}
+      subtitle={`${entry.name} · ${account.baseName}`}
+      onClose={onClose}
+      busy={confirm.busy}
+      footer={<>
+        <JoluButton variant="outline" disabled={confirm.busy} onClick={onClose}>取消</JoluButton>
+        <JoluButton variant="danger" disabled={confirm.busy} onClick={() => void confirm.run()}>
+          {confirm.busy && <LoaderCircle aria-hidden className="animate-spin" />}
+          {current && replacement ? "删除并切换" : "删除账号"}
+        </JoluButton>
+      </>}
+    >
+      <p className="text-xs leading-relaxed text-jolu-text">
+        {current
+          ? `删除后，此账号将从 Jolu 移除。选择替代账号后，${entry.name} 会使用新的连接。`
+          : account.kind === "api"
+            ? "将移除本地连接配置及保存的凭据。远端 API Key 仍然有效，需要停用时请到供应商后台撤销。"
+            : "将从 Jolu 移除此连接及保存的凭据，不会注销远端账号。历史统计保留。"}
+      </p>
+      {current && (
+        <div className="flex flex-col gap-1.5">
+          <SelectField
+            label="替代账号"
+            value={replacement || NONE}
+            onValueChange={(value) => setReplacement(value === NONE ? "" : value)}
+            className="h-10 w-full rounded-lg border-jolu-border bg-jolu-bg px-3 text-jolu-text hover:bg-jolu-stage"
+            options={[
+              ...alternatives.map((a) => ({ value: a.id, label: `${a.baseName} · ${a.kind === "api" ? "API Key" : "订阅"}` })),
+              { value: NONE, label: `暂不使用 ${entry.name}` },
+            ]}
+          />
+          <span className="text-[11px] text-jolu-muted">也可选择「暂不使用 {entry.name}」。不会注销远端账号。</span>
+        </div>
+      )}
+      {islandUsers.length > 0 && (
+        <p className="rounded-lg bg-jolu-side px-3 py-2 text-[11px] text-jolu-muted">受影响：{islandUsers.join("、")}正在显示此账号，删除后需重新选择连接。</p>
+      )}
+      {confirm.error && <p role="alert" className="text-xs text-jolu-danger">{confirm.error}</p>}
+    </ConfirmShell>
+  )
+}
+
+/** 编辑已保存的连接（画板 27）：只改名称无需重新验证；密钥留空不覆盖，更换时由后端验证 */
+function EditDialog({ account, others, onClose, onSave }: {
+  account: Connection
+  others: Connection[]
+  onClose: () => void
+  onSave: (name: string, secret: string | null) => Promise<void>
+}) {
+  const entry = providerEntry(account.platformId)
+  const [name, setName] = useState(account.baseName)
+  const [replacing, setReplacing] = useState(false)
+  const [secret, setSecret] = useState("")
+  const nameError = validateConnectionName(name, others, account.platformId, account.kind)
+  const changed = name.trim() !== account.baseName || (replacing && secret.trim() !== "")
+  const confirm = useConfirm(() => onSave(name.trim(), replacing && secret.trim() ? secret.trim() : null))
+  return (
+    <ConfirmShell
+      title="编辑已保存的连接"
+      subtitle={`${entry.name} · ${account.kind === "api" ? "API Key" : "订阅授权"}`}
+      onClose={onClose}
+      busy={confirm.busy}
+      footer={<>
+        <JoluButton variant="outline" disabled={confirm.busy} onClick={onClose}>取消</JoluButton>
+        <JoluButton variant="primary" disabled={confirm.busy || !changed || Boolean(nameError)} onClick={() => void confirm.run()}>
+          {confirm.busy && <LoaderCircle aria-hidden className="animate-spin" />}
+          保存
+        </JoluButton>
+      </>}
+    >
+      <label className="flex flex-col gap-[7px]">
+        <span className="text-xs font-medium text-jolu-text">连接名称 *</span>
+        <input value={name} onChange={(event) => setName(event.target.value)} spellCheck={false} autoComplete="off" className="h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
+        {nameError && name !== account.baseName && <span className="text-[11px] text-jolu-danger">{nameError}</span>}
+      </label>
+      {account.kind === "api" && (
+        <div className="flex flex-col gap-[7px]">
+          <span className="text-xs font-medium text-jolu-text">API Key</span>
+          {replacing ? (
+            <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)} placeholder="粘贴新的 API Key" spellCheck={false} autoComplete="off" className="h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
+          ) : (
+            <div className="flex h-10 items-center justify-between rounded-lg border border-jolu-border bg-jolu-side px-3 text-[13px] text-jolu-muted">
+              <span>已保存 · {account.masked || "••••"}</span>
+              <JoluButton size="sm" variant="neutral" className="h-7" onClick={() => setReplacing(true)}>更换密钥</JoluButton>
+            </div>
+          )}
+          <span className="text-[11px] text-jolu-muted">留空不覆盖已保存密钥；仅改名称无需重新验证。</span>
+        </div>
+      )}
+      {confirm.error && <p role="alert" className="text-xs text-jolu-danger">{confirm.error}</p>}
+    </ConfirmShell>
+  )
+}
+
+function PromoteDialog({ account, onClose, onConfirm }: { account: Connection; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const entry = providerEntry(account.platformId)
+  const confirm = useConfirm(onConfirm)
+  return (
+    <ConfirmShell
+      title={`将「${account.baseName}」设为当前账号`}
+      subtitle={`仅更改 ${entry.name} 的当前账号`}
+      onClose={onClose}
+      busy={confirm.busy}
+      footer={<>
+        <JoluButton variant="outline" disabled={confirm.busy} onClick={onClose}>取消</JoluButton>
+        <JoluButton variant="primary" disabled={confirm.busy} onClick={() => void confirm.run()}>
+          {confirm.busy ? <LoaderCircle aria-hidden className="animate-spin" /> : <Check aria-hidden className="!text-[#071B10]" />}
+          设为当前
+        </JoluButton>
+      </>}
+    >
+      <div className="flex items-center gap-2 rounded-lg bg-jolu-side px-3 py-2.5 text-xs text-jolu-text">
+        <PlatformLogo platform={account.platformId} />
+        {account.baseName} · {account.kind === "api" ? "API Key" : "订阅授权"}
+      </div>
+      <p className="text-xs leading-relaxed text-jolu-text">
+        {account.kind === "api"
+          ? "新的连接可能按 API 用量计费。会写入本机 CLI 配置（原配置先备份）；已有会话是否支持切换取决于对应工具。"
+          : `切换后 ${entry.name} 使用此订阅账号，会写入本机 CLI 配置（原配置先备份）；已有会话是否支持切换取决于对应工具。`}
+      </p>
+      {confirm.error && <p role="alert" className="text-xs text-jolu-danger">{confirm.error}</p>}
+    </ConfirmShell>
+  )
+}

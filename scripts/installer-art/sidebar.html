@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Jolu installer sidebar</title>
+<style>
+  /* 字体与前端同源（frontend/public/fonts），不依赖本机是否装过 Inter */
+  @font-face {
+    font-family: "Inter";
+    src: url("{{interFontUrl}}") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: "JetBrains Mono";
+    src: url("{{monoFontUrl}}") format("woff2");
+    font-weight: 100 800;
+    font-style: normal;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 164px;
+    height: 314px;
+    overflow: hidden;
+  }
+
+  body {
+    /* 浅色主题变量取自 frontend/src/index.css：--bg / --surface-2 */
+    background: linear-gradient(180deg, #ffffff 0%, #ffffff 58%, #f7f7f8 100%);
+    /* 右边缘收边，让深浅交界贴住安装窗的白色内容区 */
+    box-shadow: inset -1px 0 0 #e8e8e8;
+    font-family: "Inter", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /* 图标背后的一层极淡绿雾，避免大面积白底显得空 */
+  .haze {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(116px 96px at 50% 33%, rgba(6, 193, 103, 0.13), rgba(6, 193, 103, 0) 70%);
+  }
+
+  .stack {
+    position: relative;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 44px 0 18px;
+  }
+
+  /* Jolu 人物图标：与桌面、任务栏图标同一母版（Jolu.pen 画板 107） */
+  .icon {
+    width: 92px;
+    height: 92px;
+    object-fit: contain;
+  }
+
+  /* Jolu 艺术字：路径与启动页（画板 109）一致，线宽 2.6 */
+  .wordmark {
+    margin-top: 18px;
+    width: 64px;
+    height: 26px;
+    stroke-width: 2.6px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .wordmark path { vector-effect: non-scaling-stroke; }
+  .wordmark .ink { stroke: #111111; }
+  .wordmark .loop { stroke: #06c167; }
+
+  .tagline {
+    margin-top: 9px;
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.2px;
+    color: #8a8a8a;
+  }
+
+  .spacer { flex: 1; }
+
+  .rule {
+    width: 108px;
+    height: 1px;
+    background: #e8e8e8;
+  }
+
+  .version {
+    margin-top: 11px;
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    color: #ababab;
+  }
+</style>
+</head>
+<body>
+  <div class="haze"></div>
+  <div class="stack">
+    <img class="icon" src="{{iconUrl}}" alt="" />
+    <svg class="wordmark" viewBox="0 0 67 27" preserveAspectRatio="none" fill="none" aria-hidden="true">
+      <path class="ink" d="M4 4h11v12c0 9-12 9-12 1" />
+      <path class="loop" d="M29 10c-9 0-11 13-3 13 9 0 12-13 3-13z" />
+      <path class="ink" d="M44 3l-4 15q-1 6 5 4" />
+      <path class="ink" d="M51 11l-2 7q-1 6 5 5 5-1 7-12m0 0l-2 10q0 3 4 1" />
+    </svg>
+    <div class="tagline">AI 编程工具管理器</div>
+    <div class="spacer"></div>
+    <div class="rule"></div>
+    <div class="version">v{{version}}</div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,109 @@
+[
+  {
+    "id": "claude",
+    "name": "Claude",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "api_connection",
+      "local_sessions",
+      "subscription_quota",
+      "organization_usage",
+      "gateway_balance",
+      "realtime_delta",
+      "cost_estimate"
+    ],
+    "limitation": null
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "api_connection",
+      "local_sessions",
+      "subscription_quota",
+      "organization_usage",
+      "gateway_balance",
+      "realtime_delta",
+      "cost_estimate"
+    ],
+    "limitation": null
+  },
+  {
+    "id": "gemini",
+    "name": "Gemini",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "api_connection",
+      "local_sessions",
+      "realtime_delta",
+      "cost_estimate"
+    ],
+    "limitation": "本机 Gemini CLI 留存会话；在线剩余额度未接入"
+  },
+  {
+    "id": "grok",
+    "name": "Grok",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "api_connection",
+      "subscription_quota"
+    ],
+    "limitation": "本机 OAuth 可查 SuperGrok 订阅剩余百分比；API 预付余额需独立管理授权"
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "availability": "not-integrated",
+    "capabilities": [],
+    "limitation": "待接入：先选模型服务，再用账号登录或套餐 Key 连接；当前程序尚未实现"
+  },
+  {
+    "id": "zcode",
+    "name": "Zcode",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "local_sessions",
+      "subscription_quota",
+      "realtime_delta"
+    ],
+    "limitation": "本机 ZCode BigModel Coding Plan API Key 可查套餐剩余；账号 OAuth 额度未接入"
+  },
+  {
+    "id": "qoder",
+    "name": "Qoder",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "local_sessions",
+      "credits"
+    ],
+    "limitation": "国内／国际版本分别采集本机消耗；在线剩余积分需 Qoder Agent SDK"
+  },
+  {
+    "id": "workbuddy",
+    "name": "Workbuddy",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "local_sessions",
+      "realtime_delta",
+      "credits"
+    ],
+    "limitation": "本机用量、缓存与已上报积分；在线个人剩余积分需开放平台授权"
+  },
+  {
+    "id": "trae",
+    "name": "Trae",
+    "availability": "available",
+    "capabilities": [
+      "auth_connection"
+    ],
+    "limitation": "只提供本机来源检测；企业成员额度需管理员授权，个人额度未验证"
+  }
+]

@@ -1,0 +1,114 @@
+/* 启动页（Jolu.pen 画板 109 / 110）：1280×720 无边框透明窗口，页面自绘 12 圆角底色；
+   正中 104×104 桌面图标，下方 20px 为 108×44 的 Jolu 艺术字（线宽 3.4，o 为强调色）。
+   颜色取自设计稿变量 jolu-text / jolu-accent 与画板底色；主题由后端经地址参数传入，
+   设好之前页面保持透明，避免深色主题先闪浅色。 */
+:root {
+  --bg: #fafafa;
+  --text: #111111;
+  --accent: #06c167;
+  --muted: #8a8a8a;
+  --border: #e3e3e6;
+  --hover: #f1f1f2;
+  --danger: #d66455;
+}
+
+:root[data-theme="dark"] {
+  --bg: #101211;
+  --text: #f4f4f5;
+  --accent: #28d07e;
+  --muted: #8e8e8e;
+  --border: #303030;
+  --hover: #1c1e1d;
+  --danger: #f26d6d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --bg: #101211;
+    --text: #f4f4f5;
+    --accent: #28d07e;
+    --muted: #8e8e8e;
+    --border: #303030;
+    --hover: #1c1e1d;
+    --danger: #f26d6d;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.startup {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  /* 画板中图标顶边在 274（720 高），比几何居中高 2px */
+  padding-bottom: 4px;
+  border-radius: 12px;
+  background: var(--bg);
+  opacity: 0;
+}
+.ready .startup { opacity: 1; animation: enter 0.32s ease-out both; }
+
+.brand { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+.icon { display: block; width: 104px; height: 104px; object-fit: contain; }
+.wordmark { display: block; stroke-width: 3.4px; stroke-linecap: round; stroke-linejoin: round; }
+.wordmark path { vector-effect: non-scaling-stroke; }
+.wordmark .ink { stroke: var(--text); }
+.wordmark .loop { stroke: var(--accent); }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* 失败态放在品牌组下方，品牌组保持居中不跳动 */
+.failure {
+  position: absolute;
+  top: calc(50% + 112px);
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 360px;
+  transform: translateX(-50%);
+  text-align: center;
+}
+.failure[hidden] { display: none; }
+.failure-title { margin: 0; color: var(--danger); font-size: 13px; font-weight: 600; }
+.failure-detail { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.actions { display: flex; gap: 8px; margin-top: 14px; }
+button {
+  min-width: 76px;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+button:hover { background: var(--hover); }
+button.primary { border-color: var(--accent); background: var(--accent); color: #071b10; }
+button.primary:hover { filter: brightness(0.95); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@keyframes enter { from { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .ready .startup { animation: none; }
+}

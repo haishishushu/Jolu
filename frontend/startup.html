@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jolu · 启动中</title>
+    <link rel="stylesheet" href="/src/startup.css" />
+  </head>
+  <body>
+    <!-- Jolu.pen 画板 109 / 110「Jolu 启动页」：居中留白，现有桌面图标 + Jolu 艺术字 -->
+    <main class="startup" role="status" aria-live="polite">
+      <div class="brand">
+        <img class="icon" src="/app-icon.png" width="104" height="104" alt="" draggable="false" />
+        <svg class="wordmark" viewBox="0 0 67 27" width="108" height="44" preserveAspectRatio="none" fill="none" aria-hidden="true">
+          <path class="ink" d="M4 4h11v12c0 9-12 9-12 1" />
+          <path class="loop" d="M29 10c-9 0-11 13-3 13 9 0 12-13 3-13z" />
+          <path class="ink" d="M44 3l-4 15q-1 6 5 4" />
+          <path class="ink" d="M51 11l-2 7q-1 6 5 5 5-1 7-12m0 0l-2 10q0 3 4 1" />
+        </svg>
+      </div>
+      <p class="sr-only" id="status">正在启动 Jolu</p>
+      <!-- 启动失败（设计稿未画，样式待确认）：保留原有的重试 / 退出 -->
+      <div class="failure" id="failure" hidden>
+        <p class="failure-title">Jolu 未能启动</p>
+        <p class="failure-detail" id="detail"></p>
+        <div class="actions">
+          <button id="quit" type="button">退出</button>
+          <button id="retry" class="primary" type="button">重试</button>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="/src/startup.ts"></script>
+  </body>
+</html>
