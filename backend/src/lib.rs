@@ -2770,6 +2770,9 @@ pub fn run() {
             net::set_network,
             net::diagnose_network,
             // 任务 2.3 结束
+            // 任务 3.3 开始
+            automation::automation_skills,
+            // 任务 3.3 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();

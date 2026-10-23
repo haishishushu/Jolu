@@ -2321,3 +2321,88 @@ mod tests {
         fs::remove_dir_all(&base).ok();
     }
 }
+
+// 任务 3.3 开始
+/* ───────────────────────── 自动化选择 Skills（D-08） ───────────────────────── */
+
+/// 自动化「Skills（可选）」的一个候选项
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct SkillOption {
+    pub name: String,
+    pub description: Option<String>,
+    /// global / project / system / synced（与 [`Scope`] 的序列化名一致）
+    pub scope: String,
+    /// 项目级 Skill 所在的项目目录
+    pub project: Option<String>,
+}
+
+/// 目标工具会加载的 Skills：全局目录 + `cwd` 下的项目目录。只列已启用、格式有效、名称合规的项，同名只保留第一份。
+/// 停用区里的副本不在扫描目录里，自然不出现；工具配置按名称 / 路径停用的项被过滤
+pub fn enabled_skills(platform: &str, cwd: Option<&Path>) -> Result<Vec<SkillOption>, String> {
+    enabled_skills_with(&homes()?, platform, cwd)
+}
+
+pub fn enabled_skills_with(h: &Homes, platform: &str, cwd: Option<&Path>) -> Result<Vec<SkillOption>, String> {
+    if !PLATFORMS.contains(&platform) {
+        return Err(format!("{platform} 暂未接入 Skills 管理"));
+    }
+    // 只扫描任务的工作目录：不读 skills.json 里的项目列表与忽略设置，原工具在该目录执行时总会加载其项目 Skills
+    let cfg = Config { projects: cwd.map(|p| vec![p.display().to_string()]).unwrap_or_default(), ..Config::default() };
+    let overview = overview_with(h, &cfg, platform)?;
+    let mut seen = HashSet::new();
+    Ok(overview
+        .items
+        .into_iter()
+        .filter(|i| i.enabled && i.status != "invalid" && valid_name(&i.name) && seen.insert(i.name.clone()))
+        .map(|i| SkillOption {
+            scope: serde_json::to_value(i.scope).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+            name: i.name,
+            description: i.description,
+            project: i.project,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod task_3_3_tests {
+    use super::*;
+
+    fn skill(root: &Path, name: &str, body: &str) {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SKILL_FILE), body).unwrap();
+    }
+
+    #[test]
+    fn enabled_skills_lists_global_and_cwd_project() {
+        let base = std::env::temp_dir().join(format!("jolu-skills-enabled-{}-{}", std::process::id(), stamp()));
+        let h = Homes { claude: base.join(".claude"), codex: base.join(".codex"), user: base.clone() };
+        let global = h.claude.join("skills");
+        let body = |n: &str| format!("---\nname: {n}\ndescription: {n} 描述\n---\n");
+        skill(&global, "api-review", &body("api-review"));
+        skill(&global, "no-desc", "---\nname: no-desc\n---\n");
+        skill(&global, "Upper", "---\ndescription: 目录名不合规\n---\n");
+        skill(&global, "turned-off", &body("turned-off"));
+        fs::write(h.claude.join("settings.json"), r#"{"skillOverrides":{"turned-off":"off"}}"#).unwrap();
+        let project = base.join("proj");
+        skill(&project.join(".claude").join("skills"), "test-check", &body("test-check"));
+        skill(&project.join(".claude").join("skills"), "api-review", &body("api-review"));
+        let other = base.join("other");
+        skill(&other.join(".claude").join("skills"), "elsewhere", &body("elsewhere"));
+
+        let names = |list: Vec<SkillOption>| list.into_iter().map(|o| (o.name, o.scope, o.project.is_some())).collect::<Vec<_>>();
+        assert_eq!(
+            names(enabled_skills_with(&h, "claude", Some(&project)).unwrap()),
+            vec![("api-review".into(), "global".into(), false), ("test-check".into(), "project".into(), true)],
+            "只列已启用、有效、名称合规的；同名只留一份；不扫描其他项目",
+        );
+        assert_eq!(names(enabled_skills_with(&h, "claude", None).unwrap()), vec![("api-review".into(), "global".into(), false)]);
+        let first = enabled_skills_with(&h, "claude", Some(&project)).unwrap().remove(0);
+        assert_eq!(first.description.as_deref(), Some("api-review 描述"));
+        assert!(enabled_skills_with(&h, "codex", Some(&project)).unwrap().is_empty(), "按工具区分");
+        assert!(enabled_skills_with(&h, "all", None).is_err());
+        assert!(enabled_skills_with(&h, "gemini", None).is_err());
+        fs::remove_dir_all(&base).ok();
+    }
+}
+// 任务 3.3 结束

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   blockBanner, canDeleteTask, clock, countByFilter, dayTime, durationText, filterTasks, launchLabel, nextFire, quotaTip, runCode, runTokens,
-  sessionTaskName, taskCode, taskStatus, untilText, validateForm,
+  sessionTaskName, skillSummary, taskCode, taskStatus, untilText, usableSkills, validateForm,
 } from "./automation.ts"
 
 const now = new Date(2026, 9, 22, 16, 48).getTime()
@@ -104,4 +104,18 @@ test("删除任务：运行中不可删除，其余状态可以", () => {
   assert.equal(canDeleteTask("running"), false)
   assert.equal(canDeleteTask("paused"), true)
   for (const status of ["queued", "waiting", "attention", "completed", "failed", "cancelled", "active", "finished"]) assert.equal(canDeleteTask(status), true)
+})
+
+test("Skills 选择摘要（画板 60）", () => {
+  assert.equal(skillSummary([]), "")
+  assert.equal(skillSummary(["项目约定", "测试检查"]), "已选择 2 项 · 项目约定、测试检查")
+  assert.equal(skillSummary(["a"]), "已选择 1 项 · a")
+  assert.equal(skillSummary(["a", "b", "c"]), "已选择 3 项 · a、b 等")
+})
+
+test("切换工具或工作目录后去掉已经无效的 Skills", () => {
+  const options = [{ name: "api-review", description: null, scope: "global", project: null }, { name: "test-check", description: null, scope: "project", project: "D:/p" }]
+  assert.deepEqual(usableSkills(["test-check", "gone", "api-review"], options), ["test-check", "api-review"])
+  assert.deepEqual(usableSkills([], options), [])
+  assert.deepEqual(usableSkills(["a"], []), [])
 })

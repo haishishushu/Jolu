@@ -71,7 +71,7 @@ export interface RunDto {
   connection_id: string
   source: RunSource
   status: RunStatus
-  /** quota / quota_unknown / check_failed / reauth / unsupported / timeout / account_mismatch / tool_missing / cwd_missing / resume_unsupported / interrupted */
+  /** quota / quota_unknown / check_failed / reauth / unsupported / timeout / account_mismatch / tool_missing / cwd_missing / resume_unsupported / interrupted / skill_missing */
   block_kind: string | null
   reason: string | null
   resets_at: number | null
@@ -193,6 +193,16 @@ export interface ToolInfoDto {
   found: boolean
 }
 
+/** 「Skills（可选）」的候选项：目标工具已启用的全局 Skills + 工作目录下的项目 Skills（D-08） */
+export interface SkillOptionDto {
+  name: string
+  description: string | null
+  /** global / project / system / synced */
+  scope: string
+  /** 项目级 Skill 所在的项目目录 */
+  project: string | null
+}
+
 /** 后端在任务或运行状态变化后发出 */
 export const AUTOMATION_CHANGED = "automation-changed"
 
@@ -211,4 +221,6 @@ export const automationApi = {
   pickDir: () => invoke<string | null>("automation_pick_dir"),
   /** 删除任务及其运行记录与事件，用量统计保留；执行中的任务后端拒绝（任务 2.9） */
   deleteTask: (taskId: number) => invoke<void>("automation_delete", { taskId }),
+  /** 目标工具已启用的 Skills；`cwd` 为空时只列全局（任务 3.3） */
+  skills: (platform: AutomationPlatform, cwd: string | null) => invoke<SkillOptionDto[]>("automation_skills", { platform, cwd }),
 }

@@ -409,6 +409,9 @@ pub fn validate(input: &TaskInput, now: i64) -> Result<(), String> {
     }
     if input.prompt.trim().is_empty() { return Err("请填写执行内容".into()); }
     if input.prompt.chars().count() > 20_000 { return Err("执行内容不能超过 20000 个字符".into()); }
+    if input.skills.len() > MAX_SKILLS { return Err(format!("最多选择 {MAX_SKILLS} 个 Skills")); }
+    if let Some(bad) = input.skills.iter().find(|s| !crate::skills::valid_name(s)) { return Err(format!("Skill 名称无效：{bad}")); }
+    if input.skills.iter().collect::<HashSet<_>>().len() != input.skills.len() { return Err("Skills 不能重复选择".into()); }
     match input.launch.as_str() {
         "now" | "quota" => {}
         "schedule" => {
@@ -543,11 +546,11 @@ fn day_start(now: i64) -> i64 {
         .unwrap_or(now)
 }
 
-/// 同账号排在前面的排队任务数；关闭排队的任务不挡排队任务，不计入（D-09）
+/// 同账号排在前面的排队任务数；关闭排队的任务不挡排队任务，不计入（D-09）。口径同 [`startable`]：排队与等待只看启用中的任务
 fn queue_ahead(conn: &Connection, run: &Run) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE t.connection_id = ?1 AND t.state != 'paused' AND t.serial_queue = 1 AND r.id != ?2
+         WHERE t.connection_id = ?1 AND (t.state = 'active' OR r.status = 'running') AND t.serial_queue = 1 AND r.id != ?2
            AND r.status IN ('queued','waiting','running')
            AND (r.status = 'running' OR r.created_at < ?3 OR (r.created_at = ?3 AND r.id < ?2))",
         params![run.connection_id, run.id, run.created_at],
@@ -620,7 +623,7 @@ pub fn task_detail(conn: &Connection, id: i64) -> Result<TaskDetail, String> {
     let item = task_item(conn, task).map_err(e)?;
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, r.status FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE t.connection_id = ?1 AND t.state != 'paused' AND t.serial_queue = 1 AND r.status IN ('queued','waiting','running')
+         WHERE t.connection_id = ?1 AND (t.state = 'active' OR r.status = 'running') AND t.serial_queue = 1 AND r.status IN ('queued','waiting','running')
          ORDER BY CASE r.status WHEN 'running' THEN 0 ELSE 1 END, r.created_at, r.id",
     ).map_err(e)?;
     let queue = stmt.query_map([&item.task.connection_id], |r| Ok(QueueItem { task_id: r.get(0)?, name: r.get(1)?, status: r.get(2)? }))
@@ -1125,6 +1128,46 @@ pub fn build_args(platform: &str, model: Option<&str>, session: Option<&str>) ->
     args
 }
 
+/* ─────────────────────────── Skills（D-08） ─────────────────────────── */
+
+/// 一个任务最多选择的 Skills 数
+const MAX_SKILLS: usize = 10;
+
+/// 提示词前缀：Codex 在提示词里识别 `$名称`；Claude Code 的 `-p` 模式一次只加载第一个 `/skill`，改用自然语言点名
+pub fn skill_prefix(platform: &str, names: &[String]) -> String {
+    if names.is_empty() { return String::new(); }
+    if platform == "codex" {
+        let list: Vec<String> = names.iter().map(|n| format!("${n}")).collect();
+        format!("{}\n\n", list.join(" "))
+    } else {
+        format!("本任务请使用以下 Skills：{}\n\n", names.join("、"))
+    }
+}
+
+/// 写入执行器标准输入的提示词：首次运行为「前缀 + 任务内容」，续跑为「前缀 + 续跑指令」
+pub fn run_prompt(platform: &str, skills: &[String], prompt: &str, resume: bool) -> String {
+    let body = if resume { RESUME_PROMPT } else { prompt };
+    format!("{}{body}", skill_prefix(platform, skills))
+}
+
+/// 任务选中、但目标工具当前没有启用的 Skills，按选择顺序
+pub fn missing_skills(selected: &[String], available: &[crate::skills::SkillOption]) -> Vec<String> {
+    selected.iter().filter(|s| !available.iter().any(|o| &o.name == *s)).cloned().collect()
+}
+
+fn missing_reason(missing: &[String]) -> String {
+    let names: Vec<String> = missing.iter().map(|n| format!("「{n}」")).collect();
+    format!("Skill{}已停用或不存在", names.join("、"))
+}
+
+/// 执行前（首次运行与续跑都经过这里）检查选中的 Skills 仍然启用；缺失时转为「需要处理」并返回 false，不启动进程
+pub fn skills_ready(conn: &Connection, run_id: i64, selected: &[String], available: &[crate::skills::SkillOption], now: i64) -> rusqlite::Result<bool> {
+    let missing = missing_skills(selected, available);
+    if missing.is_empty() { return Ok(true); }
+    set_attention(conn, run_id, "skill_missing", &missing_reason(&missing), now)?;
+    Ok(false)
+}
+
 /* ─────────────────────────── 运行生命周期 ─────────────────────────── */
 
 pub fn finish(conn: &Connection, run_id: i64, outcome: &Outcome, p: &Progress, now: i64) -> rusqlite::Result<()> {
@@ -1147,6 +1190,19 @@ pub fn finish(conn: &Connection, run_id: i64, outcome: &Outcome, p: &Progress, n
         params![run_id, exec_add, input, cache, output, serde_json::to_string(&files).unwrap_or_else(|_| "[]".into()), session, p.result.as_deref().map(|r| clip(r, 4000))],
     )?;
     let auto_resume = task.as_ref().is_some_and(|t| t.auto_resume);
+    // 任务已不是启用状态（执行中被取消）：会让运行继续挂着的结果（等待额度、需要处理）一律按已取消收尾，
+    // 不留下等待 / 排队的孤儿运行；完成与失败是真实结果，照常记录
+    let inactive = task.as_ref().is_none_or(|t| t.state != "active");
+    let lingering = match outcome {
+        Outcome::Limit { .. } => auto_resume,
+        Outcome::Reauth(_) | Outcome::UntrustedDir(_) => true,
+        _ => false,
+    };
+    if inactive && lingering {
+        conn.execute("UPDATE automation_runs SET status='cancelled', ended_at=?2, resume_pending=0, block_kind=NULL, reason=NULL WHERE id=?1", params![run_id, now])?;
+        add_event(conn, run_id, now, "stop", "任务已取消，运行结束", Some("任务不再启用，不进入等待或需要处理"))?;
+        return Ok(());
+    }
     match outcome {
         Outcome::Completed => {
             conn.execute("UPDATE automation_runs SET status='completed', ended_at=?2, resume_pending=0, block_kind=NULL, reason=NULL WHERE id=?1", params![run_id, now])?;
@@ -1221,7 +1277,8 @@ fn cwd_key(path: &str) -> String {
     path.trim().replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
-/// 按账号决定本轮可以启动的运行（D-09），暂停的任务不占队列：
+/// 按账号决定本轮可以启动的运行（D-09）。排队与等待的运行只看启用中的任务（与 [`claim_run`] 一致，暂停、取消、
+/// 完成的任务不占队列，也不会被反复放行又认领失败）；执行中的运行无论任务状态都计入工作目录与并行数：
 /// ③ 账号下任一运行在等待额度时，整个账号不再启动新任务（正在运行的跑完当前这一轮）；
 /// 排队任务（serial）一次一个，先放行排队队首，再按顺序放行关闭排队的任务；
 /// ① 与任何账号正在运行（或本轮已放行）的任务工作目录相同则不放行；② 同账号运行数不超过上限
@@ -1229,7 +1286,7 @@ pub fn startable(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
     struct Row { id: i64, status: String, cwd: String, serial: bool }
     let mut stmt = conn.prepare(
         "SELECT r.id, r.status, t.connection_id, t.cwd, t.serial_queue FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status IN ('queued','waiting','running') AND t.state != 'paused'
+         WHERE r.status IN ('queued','waiting','running') AND (t.state = 'active' OR r.status = 'running')
          ORDER BY r.created_at, r.id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1300,7 +1357,7 @@ pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>,
     }
     let mut stmt = conn.prepare(
         "SELECT t.connection_id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status = 'waiting' AND t.state != 'paused' AND (r.next_check_at IS NULL OR r.next_check_at <= ?1)
+         WHERE r.status = 'waiting' AND t.state = 'active' AND (r.next_check_at IS NULL OR r.next_check_at <= ?1)
          GROUP BY t.connection_id ORDER BY MIN(r.created_at), MIN(r.id)",
     )?;
     let due = stmt.query_map([now], |r| r.get(0))?.collect::<Result<_, _>>()?;
@@ -1614,6 +1671,17 @@ fn start_run(app: &AppHandle, run_id: i64) {
             format!("{name} 不是 {} 当前登录的账号；Jolu 不会自动切换账号，请在供应商页启用该账号后重试。", display_name(&task.platform)),
         );
     }
+    // D-08：首次运行与续跑前都检查选中的 Skills 仍然启用，不在了就转为需要处理
+    if !task.skills.is_empty() {
+        let available = match crate::skills::enabled_skills(&task.platform, Some(Path::new(&task.cwd))) {
+            Ok(list) => list,
+            Err(error) => return attention("skill_missing", format!("无法读取 Skills：{error}")),
+        };
+        if !matches!(with_conn(&db, |conn| skills_ready(conn, run_id, &task.skills, &available, now).map_err(|e| e.to_string())), Ok(true)) {
+            emit(app);
+            return;
+        }
+    }
     // 先认领再拉起进程：认领之后删除会被拒绝（运行中），认领之前被删除或取消则不启动
     engine().procs.lock().unwrap_or_else(|p| p.into_inner()).clear_stop(run_id);
     match with_conn(&db, |conn| claim_run(conn, run_id).map_err(|e| e.to_string())) {
@@ -1621,7 +1689,7 @@ fn start_run(app: &AppHandle, run_id: i64) {
         _ => return,
     }
     let session = run.session_id.clone();
-    let prompt = if run.resume_pending { RESUME_PROMPT.to_string() } else { task.prompt.clone() };
+    let prompt = run_prompt(&task.platform, &task.skills, &task.prompt, run.resume_pending);
     let args = build_args(&task.platform, task.model.as_deref(), session.as_deref());
     let mut command = Command::new(&exe);
     command.args(&args).current_dir(&task.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1843,6 +1911,16 @@ pub async fn automation_quota(app: AppHandle, connection_id: String, force: bool
         Ok(state) => verdict(&state),
         Err(error) => QuotaVerdict::simple("unknown", error),
     })
+}
+
+/// 「Skills（可选）」候选（D-08）：目标工具已启用的全局 Skills + 工作目录下的项目 Skills
+#[tauri::command]
+pub async fn automation_skills(_app: AppHandle, platform: String, cwd: Option<String>) -> Result<Vec<crate::skills::SkillOption>, String> {
+    if tool_name(&platform).is_none() { return Err("该工具尚未接入执行器".into()); }
+    tauri::async_runtime::spawn_blocking(move || {
+        let cwd = cwd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && Path::new(c).is_dir());
+        crate::skills::enabled_skills(&platform, cwd.as_deref().map(Path::new))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[derive(Debug, Serialize)]
@@ -2518,5 +2596,171 @@ mod tests {
         procs.clear_stop(9);
         assert!(!procs.register(9, 6161));
         assert!(!procs.exited(9));
+    }
+
+    /* ── 任务 3.3：自动化选择 Skills（D-08） ── */
+
+    fn option(name: &str) -> crate::skills::SkillOption {
+        crate::skills::SkillOption { name: name.into(), description: None, scope: "global".into(), project: None }
+    }
+
+    #[test]
+    fn skill_prefix_formats() {
+        let names = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(skill_prefix("codex", &names), "$a $b\n\n");
+        assert_eq!(skill_prefix("claude", &names), "本任务请使用以下 Skills：a、b\n\n");
+        assert_eq!(skill_prefix("claude", &[]), "");
+        assert_eq!(skill_prefix("codex", &[]), "");
+    }
+
+    #[test]
+    fn validate_rejects_too_many_skills() {
+        let now = 1_000_000;
+        let mut i = input("now");
+        i.skills = (0..11).map(|n| format!("skill-{n}")).collect();
+        assert_eq!(validate(&i, now).unwrap_err(), "最多选择 10 个 Skills");
+        i.skills.truncate(10);
+        assert_eq!(validate(&i, now), Ok(()));
+        i.skills = vec!["Bad Name".into()];
+        assert_eq!(validate(&i, now).unwrap_err(), "Skill 名称无效：Bad Name");
+    }
+
+    #[test]
+    fn run_blocks_when_skill_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let mut i = input("now");
+        i.skills = vec!["x".into(), "y".into()];
+        let task = create_task(&conn, &i, now).unwrap();
+        let run = active_run(&conn, task).unwrap().unwrap().id;
+        let selected = load_task(&conn, task).unwrap().unwrap().skills;
+        assert_eq!(selected, vec!["x".to_string(), "y".to_string()], "选择随任务保存");
+        let available = vec![option("y"), option("z")];
+        assert_eq!(missing_skills(&selected, &available), vec!["x".to_string()]);
+        assert!(missing_skills(&selected, &[option("x"), option("y")]).is_empty());
+
+        assert!(!skills_ready(&conn, run, &selected, &available, now + 1).unwrap(), "缺少 Skill 时不放行");
+        let r = load_run(&conn, run).unwrap().unwrap();
+        assert_eq!((r.status.as_str(), r.block_kind.as_deref(), r.reason.as_deref()), ("attention", Some("skill_missing"), Some("Skill「x」已停用或不存在")));
+        assert_eq!(r.started_at, None, "没有启动进程");
+        assert!(!claim_run(&conn, run).unwrap(), "需要处理的运行不会被认领拉起");
+
+        // 续跑前同样检查：重新排队后 Skill 仍缺失，再次转为需要处理
+        act(&conn, task, "retry", now + 2).unwrap();
+        assert!(!skills_ready(&conn, run, &selected, &[option("y")], now + 3).unwrap());
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "attention");
+        act(&conn, task, "retry", now + 4).unwrap();
+        assert!(skills_ready(&conn, run, &selected, &[option("x"), option("y")], now + 5).unwrap(), "Skill 都在时放行");
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "queued");
+        assert_eq!(missing_reason(&["x".into(), "z".into()]), "Skill「x」、「z」已停用或不存在");
+    }
+
+    /// 控制方裁决：挂在已取消 / 已完成任务下的排队运行不再放行（与 `claim_run` 的 `state = 'active'` 一致）。
+    /// 孤儿运行按旧库遗留数据直接写库构造（修复后 `finish` 不再产生它们）
+    #[test]
+    fn startable_skips_runs_of_inactive_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let a = queued(&conn, "c1", r"D:\work\a", true, now);
+        let task_a = load_run(&conn, a).unwrap().unwrap().task_id;
+        conn.execute("UPDATE automation_tasks SET state='cancelled' WHERE id=?1", [task_a]).unwrap();
+        set_status(&conn, a, "waiting");
+        let b = queued(&conn, "c1", r"D:\work\b", true, now + 3);
+        assert_eq!(startable(&conn).unwrap(), vec![b], "已取消任务的等待运行不挡同账号");
+        set_status(&conn, a, "queued");
+        assert_eq!(startable(&conn).unwrap(), vec![b], "已取消任务的排队运行不放行");
+        assert_eq!(queue_ahead(&conn, &load_run(&conn, b).unwrap().unwrap()).unwrap(), 0, "队列位置不计已取消任务");
+        let task_b = load_run(&conn, b).unwrap().unwrap().task_id;
+        let queue: Vec<i64> = task_detail(&conn, task_b).unwrap().queue.into_iter().map(|q| q.task_id).collect();
+        assert_eq!(queue, vec![task_b], "同账号队列不列已取消任务");
+
+        let c = queued(&conn, "c2", r"D:\work\c", true, now + 4);
+        let task_c = load_run(&conn, c).unwrap().unwrap().task_id;
+        conn.execute("UPDATE automation_tasks SET state='finished' WHERE id=?1", [task_c]).unwrap();
+        assert_eq!(startable(&conn).unwrap(), vec![b], "已完成任务的排队运行不放行");
+
+        // 取消后进程还没退出的运行仍占着工作目录
+        let d = queued(&conn, "c3", r"D:\work\d", true, now + 5);
+        let task_d = load_run(&conn, d).unwrap().unwrap().task_id;
+        set_status(&conn, d, "running");
+        act(&conn, task_d, "cancel", now + 6).unwrap();
+        let _e = queued(&conn, "c4", r"D:\work\d", true, now + 7);
+        assert_eq!(startable(&conn).unwrap(), vec![b], "同一工作目录仍串行");
+
+        // 也仍计入同账号并行上限：3 个执行中（其中 1 个所属任务已取消）时第 4 个不放行
+        let mut running = Vec::new();
+        for i in 0..3 {
+            let r = queued(&conn, "c5", &format!(r"D:\work\cap{i}"), false, now + 10 + i);
+            set_status(&conn, r, "running");
+            running.push(r);
+        }
+        act(&conn, load_run(&conn, running[0]).unwrap().unwrap().task_id, "cancel", now + 20).unwrap();
+        let fourth = queued(&conn, "c5", r"D:\work\cap3", false, now + 21);
+        assert!(!startable(&conn).unwrap().contains(&fourth), "已取消但仍在执行的运行占用并行名额");
+    }
+
+    #[test]
+    fn finish_on_cancelled_task_ends_as_cancelled() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let p = Progress { session_id: Some("s-1".into()), ..Default::default() };
+        let cases = [
+            Outcome::Limit { resets_at: Some(now + 60_000), message: "usage limit".into() },
+            Outcome::Reauth("401".into()),
+            Outcome::UntrustedDir("Not inside a trusted directory".into()),
+        ];
+        for (i, outcome) in cases.iter().enumerate() {
+            let run = queued(&conn, "c1", &format!(r"D:\work\f{i}"), false, now + i as i64);
+            let task = load_run(&conn, run).unwrap().unwrap().task_id;
+            conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run, now]).unwrap();
+            act(&conn, task, "cancel", now + 1).unwrap();
+            assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "running", "取消时执行中的运行等进程结束");
+            finish(&conn, run, outcome, &p, now + 5_000).unwrap();
+            let r = load_run(&conn, run).unwrap().unwrap();
+            assert_eq!((r.status.as_str(), r.ended_at, r.resume_pending, r.block_kind), ("cancelled", Some(now + 5_000), false, None), "{outcome:?} 按已取消收尾");
+            assert_eq!((r.exec_ms, r.session_id.as_deref()), (5_000, Some("s-1")), "执行时长与会话照常记录");
+        }
+        assert!(due_checks(&conn, now + 10_000).unwrap().0.is_empty(), "不会对它们做额度检查");
+
+        // 完成是真实结果：照常记为完成，任务保持已取消
+        let run = queued(&conn, "c1", r"D:\work\done", false, now + 10);
+        let task = load_run(&conn, run).unwrap().unwrap().task_id;
+        conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run, now]).unwrap();
+        act(&conn, task, "cancel", now + 11).unwrap();
+        finish(&conn, run, &Outcome::Completed, &p, now + 12).unwrap();
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "completed");
+        assert_eq!(load_task(&conn, task).unwrap().unwrap().state, "cancelled");
+    }
+
+    #[test]
+    fn due_checks_skip_cancelled_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let orphan_task = create_task(&conn, &input("quota"), now).unwrap();
+        conn.execute("UPDATE automation_tasks SET state='cancelled' WHERE id=?1", [orphan_task]).unwrap();
+        let mut other = input("quota");
+        other.connection_id = "c2".into();
+        create_task(&conn, &other, now + 1).unwrap();
+        assert_eq!(due_checks(&conn, now + 10).unwrap().0, vec!["c2".to_string()], "已取消任务遗留的等待运行不再触发额度检查");
+    }
+
+    #[test]
+    fn run_prompt_adds_prefix_for_first_run_and_resume() {
+        let skills = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(run_prompt("claude", &skills, "完善表单", false), "本任务请使用以下 Skills：a、b\n\n完善表单");
+        assert_eq!(run_prompt("codex", &skills, "完善表单", true), format!("$a $b\n\n{RESUME_PROMPT}"));
+        assert_eq!(run_prompt("claude", &[], "完善表单", false), "完善表单");
+        assert_eq!(run_prompt("codex", &[], "完善表单", true), RESUME_PROMPT);
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_skills() {
+        let mut i = input("now");
+        i.skills = vec!["a".into(), "b".into(), "a".into()];
+        assert_eq!(validate(&i, 1_000_000).unwrap_err(), "Skills 不能重复选择");
     }
 }

@@ -20,6 +20,7 @@ import { demoSessions } from "@/mock/sessionThreads"
 import { Tip } from "@/components/ui/Tip"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { Notice } from "./automationParts"
+import { SkillPicker } from "./SkillPicker"
 
 export interface TaskDialogRequest {
   mode: "create" | "edit"
@@ -43,7 +44,7 @@ function initialForm(req: TaskDialogRequest): TaskForm {
   const today = dateKey(new Date())
   const base: TaskForm = {
     name: "", platform: "claude", connectionId: "", model: "", cwd: "", sessionId: null, prompt: "", launch: "now",
-    freq: "daily", time: "09:00", weekday: 1, date: today, timezone: localZone(), autoResume: true, deadline: "", serialQueue: true,
+    freq: "daily", time: "09:00", weekday: 1, date: today, timezone: localZone(), autoResume: true, deadline: "", serialQueue: true, skills: [],
   }
   if (req.task) {
     const t = req.task
@@ -52,7 +53,7 @@ function initialForm(req: TaskDialogRequest): TaskForm {
     return {
       ...base, name: t.name, platform: t.platform, connectionId: t.connection_id, model: t.model ?? "", cwd: t.cwd, sessionId: t.session_id,
       prompt: t.prompt, launch: t.launch, freq: t.schedule?.freq ?? "daily", time: t.schedule?.time ?? "09:00", weekday: t.schedule?.weekday ?? 1,
-      date: t.schedule?.date ?? today, autoResume: t.auto_resume, deadline, serialQueue: t.serial_queue,
+      date: t.schedule?.date ?? today, autoResume: t.auto_resume, deadline, serialQueue: t.serial_queue, skills: t.skills,
     }
   }
   if (req.session) {
@@ -133,7 +134,7 @@ function Checkbox({ checked, disabled, onChange, title, note }: { checked: boole
 
 /**
  * 新建 / 编辑任务弹窗（画板 60、70、72）：居中弹窗，标题与底部操作栏固定、表单区单独滚动；执行工具与账号、模型与项目、执行会话、执行内容、
- * Skills（待接入）、启动方式与定时 / 额度提示、自动续跑与高级设置。
+ * Skills（可选）、启动方式与定时 / 额度提示、自动续跑与高级设置。
  */
 export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
   request: TaskDialogRequest
@@ -152,6 +153,7 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
   const [quotaLoading, setQuotaLoading] = useState(false)
   const [advanced, setAdvanced] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [skillsOpen, setSkillsOpen] = useState(false)
   /** 会话下拉挂在弹窗根节点上定位，不被表单滚动区裁切 */
   const [root, setRoot] = useState<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -209,7 +211,7 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
     if (Object.keys(e).length) return
     const input: TaskInputDto = {
       name: form.name.trim(), platform: form.platform, connection_id: form.connectionId, model: form.model || null, cwd: form.cwd.trim(),
-      session_id: form.sessionId, prompt: form.prompt.trim(), skills: [], launch: form.launch,
+      session_id: form.sessionId, prompt: form.prompt.trim(), skills: form.skills, launch: form.launch,
       schedule: form.launch === "schedule" ? toSchedule(form) : null, auto_resume: form.autoResume,
       wait_deadline: form.deadline ? new Date(form.deadline).getTime() : null, serial_queue: form.serialQueue,
     }
@@ -334,14 +336,16 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
               />
             </Field>
 
-            <Field label="Skills（可选）">
-              <Tip label="Skills 选择待接入">
-                <button type="button" disabled className={cn(INPUT, "justify-between text-left disabled:cursor-not-allowed")}>
-                  <span className="truncate text-jolu-muted">选择需要使用的 Skills（可选）</span>
-                  <span className="flex items-center gap-2"><span className="rounded-[4px] bg-jolu-side px-1.5 text-[10px] text-jolu-muted">待接入</span><ChevronDown aria-hidden className="size-[15px] text-jolu-muted" /></span>
-                </button>
-              </Tip>
-            </Field>
+            <SkillPicker
+              platform={form.platform}
+              cwd={form.cwd}
+              value={form.skills}
+              onChange={(names) => set("skills", names)}
+              open={skillsOpen}
+              onOpenChange={setSkillsOpen}
+              root={root}
+              scroller={scrollRef.current}
+            />
 
             <Field label="启动方式" error={errors.launch}>
               <div role="radiogroup" aria-label="启动方式" className="grid grid-cols-3 gap-2">

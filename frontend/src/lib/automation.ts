@@ -3,7 +3,7 @@
  * Token 与时间缺失一律显示「—」，不以 0 代替（画板 64 底部说明）。
  */
 import type {
-  AutomationPlatform, LaunchMode, QuotaVerdictDto, QuotaWindowDto, RunDto, RunSource, RunStatus, ScheduleDto, TaskItemDto,
+  AutomationPlatform, LaunchMode, QuotaVerdictDto, QuotaWindowDto, RunDto, RunSource, RunStatus, ScheduleDto, SkillOptionDto, TaskItemDto,
 } from "./automationApi.ts"
 
 export const DASH = "—"
@@ -330,6 +330,8 @@ export interface TaskForm {
   deadline: string
   /** 同账号排队（D-09） */
   serialQueue: boolean
+  /** 选中的 Skills 名称（D-08），最多 10 个 */
+  skills: string[]
 }
 
 export type FormErrors = Partial<Record<"name" | "connectionId" | "cwd" | "prompt" | "time" | "deadline" | "launch", string>>
@@ -390,3 +392,19 @@ export const RUN_STATUSES: { value: RunStatus; label: string }[] = [
   { value: "failed", label: "失败" },
   { value: "cancelled", label: "已取消" },
 ]
+
+/* ─────────────────────────── Skills（D-08） ─────────────────────────── */
+
+/** 一个任务最多选择的 Skills 数，与后端 `MAX_SKILLS` 一致 */
+export const MAX_SKILLS = 10
+
+/** 「Skills（可选）」字段的摘要（画板 60）：「已选择 2 项 · 项目约定、测试检查」，超过 2 项写「a、b 等」 */
+export function skillSummary(names: string[]): string {
+  if (!names.length) return ""
+  return `已选择 ${names.length} 项 · ${names.slice(0, 2).join("、")}${names.length > 2 ? " 等" : ""}`
+}
+
+/** 切换工具或工作目录后，只保留仍在候选里的选择，顺序不变 */
+export function usableSkills(selected: readonly string[], options: readonly SkillOptionDto[]): string[] {
+  return selected.filter((name) => options.some((o) => o.name === name))
+}

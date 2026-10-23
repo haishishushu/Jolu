@@ -3,7 +3,7 @@
  * 桌面端读取失败时不得回落到这里。
  */
 import type {
-  AutomationAccountDto, AutomationOverviewDto, AutomationPlatform, QuotaVerdictDto, RunDetailDto, RunDto, RunPageDto, TaskDetailDto, TaskItemDto,
+  AutomationAccountDto, AutomationOverviewDto, AutomationPlatform, QuotaVerdictDto, RunDetailDto, RunDto, RunPageDto, SkillOptionDto, TaskDetailDto, TaskItemDto,
 } from "@/lib/automationApi"
 
 const MIN = 60_000
@@ -149,4 +149,12 @@ export function demoQuota(now: number): QuotaVerdictDto {
 export const DEMO_MODELS: Record<AutomationPlatform, string[]> = {
   claude: ["claude-sonnet-4-5", "claude-opus-4-1"],
   codex: ["gpt-5-codex", "gpt-5"],
+}
+
+/** 「Skills（可选）」候选示例：名称沿用画板 60 的「项目约定」「测试检查」；填了工作目录才带出项目级 */
+export function demoSkills(platform: AutomationPlatform, cwd: string | null): SkillOptionDto[] {
+  const global: SkillOptionDto[] = platform === "claude"
+    ? [{ name: "测试检查", description: "修改后运行相关测试并汇总结果", scope: "global", project: null }, { name: "api-review", description: "核对接口契约与错误码", scope: "global", project: null }]
+    : [{ name: "测试检查", description: "修改后运行相关测试并汇总结果", scope: "global", project: null }]
+  return cwd ? [...global, { name: "项目约定", description: "遵守仓库的目录、命名与提交约定", scope: "project", project: cwd }] : global
 }
