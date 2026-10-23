@@ -73,6 +73,8 @@ export interface ConnectionInfo {
 
 /** 连接（§6.3）。**后端刻意不返回凭证原值**，只有 masked */
 export interface ConnectionDto {
+  account_email?: string | null
+
   id: string
   platform: string
   kind: "auth" | "api"

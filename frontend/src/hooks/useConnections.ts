@@ -24,6 +24,7 @@ export type FetchOutcome =
 function toConnection(d: ConnectionDto): Connection {
   return {
     id: d.id,
+    accountEmail: d.account_email ?? null,
     platformId: d.platform as PlatformId,
     kind: d.kind as ConnectionKind,
     // API 连接把脱敏标识并进名称，便于区分同平台多个 Key

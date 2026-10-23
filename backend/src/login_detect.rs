@@ -28,6 +28,37 @@ pub fn detect(platform: &str) -> LoginDetection {
     }
 }
 
+/// 仅从与已保存连接完全匹配的本机凭证快照提取展示邮箱；令牌不离开后端。
+pub(crate) fn account_for_secret(platform: &str, expected: &str) -> Option<String> {
+    if crate::validation::isolated() { return None; }
+    match platform {
+        "codex" => {
+            let dir = std::env::var_os("CODEX_HOME").map(PathBuf::from)
+                .or_else(|| crate::creds::home().map(|h| h.join(".codex")))?;
+            let auth = read_json(dir.join("auth.json"))?;
+            account_from_snapshot(platform, expected, &auth, None)
+        }
+        "claude" => {
+            let home = crate::creds::home()?;
+            let auth = read_json(home.join(".claude").join(".credentials.json"))?;
+            let profile = read_json(home.join(".claude.json"));
+            account_from_snapshot(platform, expected, &auth, profile.as_ref())
+        }
+        _ => None,
+    }
+}
+
+fn account_from_snapshot(platform: &str, expected: &str, auth: &Value, profile: Option<&Value>) -> Option<String> {
+    if expected.is_empty() { return None; }
+    let (actual, detection) = match platform {
+        "codex" => (str_at(auth, &["tokens", "access_token"]), parse_codex(Some(auth))),
+        "claude" => (str_at(auth, &["claudeAiOauth", "accessToken"]), parse_claude(Some(auth), profile)),
+        _ => return None,
+    };
+    if actual.as_deref() != Some(expected) { return None; }
+    detection.account.filter(|value| value.len() <= 320 && !value.chars().any(char::is_control))
+}
+
 fn read_json(path: PathBuf) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -166,5 +197,44 @@ mod tests {
         assert_eq!(base64url_decode("aGk").unwrap(), b"hi");
         assert_eq!(base64url_decode("aGVsbG8_").unwrap(), b"hello?");
         assert!(base64url_decode("a*b").is_none());
+    }
+}
+
+#[cfg(test)]
+mod account_identity_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn identity_requires_exact_credentials_and_never_uses_masked_suffix() {
+        let auth = json!({"claudeAiOauth":{"accessToken":"synthetic-a-1234"}});
+        let profile = json!({"oauthAccount":{"emailAddress":"person@example.test"}});
+        assert_eq!(account_from_snapshot("claude", "synthetic-a-1234", &auth, Some(&profile)).as_deref(), Some("person@example.test"));
+        assert_eq!(account_from_snapshot("claude", "synthetic-b-1234", &auth, Some(&profile)), None);
+        assert_eq!(account_from_snapshot("claude", "", &auth, Some(&profile)), None);
+        assert_eq!(account_from_snapshot("claude", "synthetic-a-1234", &auth, None), None);
+        assert_eq!(account_from_snapshot("unsupported", "synthetic-a-1234", &auth, Some(&profile)), None);
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod account_isolation_tests {
+    #[test]
+    fn isolated_account_lookup_does_not_read_local_identity() {
+        const CHILD: &str = "JOLU_ACCOUNT_EMAIL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(super::account_for_secret("claude", "synthetic-identity"), None);
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("jolu-account-email-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::write(root.join(".acceptance-profile"), "test").unwrap();
+        std::fs::write(root.join(".claude/.credentials.json"), r#"{"claudeAiOauth":{"accessToken":"synthetic-identity"}}"#).unwrap();
+        std::fs::write(root.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"private@example.test"}}"#).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "login_detect::account_isolation_tests::isolated_account_lookup_does_not_read_local_identity"])
+            .env(CHILD, "1").env("JOLU_TEST_DIR", &root).env("USERPROFILE", &root).env("HOME", &root)
+            .output().unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(output.status.success(), "isolated account lookup failed");
     }
 }

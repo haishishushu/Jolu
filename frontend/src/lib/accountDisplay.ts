@@ -37,6 +37,7 @@ export function formatMoney(amount: number, currency: string): string {
 }
 
 export interface AccountLike {
+  accountEmail?: string | null
   platformId: string
   baseName: string
   name: string
@@ -48,5 +49,11 @@ export function filterAccounts<T extends AccountLike>(accounts: readonly T[], pl
   const q = query.trim().toLowerCase()
   return accounts.filter((account) =>
     (!platform || account.platformId === platform) &&
-    (!q || [account.baseName, account.name, account.label].some((field) => field.toLowerCase().includes(q))))
+    (!q || [account.baseName, account.name, account.label, account.accountEmail ?? ""].some((field) => field.toLowerCase().includes(q))))
+}
+
+/** 错误正文仍可阅读，只遮蔽其中可能回显的邮箱及地址。 */
+export function redactAccountMessage(message: string): string {
+  return message.replace(/https?:\/\/[^\s，。；）)]+/gi, "[地址已隐藏]")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+/gi, "[账号已隐藏]")
 }

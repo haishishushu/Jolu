@@ -42,7 +42,7 @@ export function ProvidersView({ initialTab = "connect" }: { initialTab?: Provide
         <TabButton active={tab === "accounts"} icon={<UsersRound aria-hidden className="size-[17px]" />} onClick={() => setTab("accounts")}>账号管理</TabButton>
       </div>
 
-      <ContentTransition identity={`${tab}-${conn.loading && !conn.connections.length}`} >
+      <ContentTransition identity={`${tab}-${conn.loading && !conn.connections.length}`} className="flex flex-col gap-4">
       {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface layout={tab === "connect" ? "providers" : "cards"} label="正在读取供应商连接" /> : tab === "connect" ? (
         <ConnectGrid counts={countByPlatform(conn.connections)} loading={conn.loading} error={conn.error} onConnect={setConnecting} onRetry={() => void conn.reload()} />
       ) : (
