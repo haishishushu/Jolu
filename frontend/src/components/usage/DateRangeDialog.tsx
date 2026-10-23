@@ -10,8 +10,10 @@ const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
  * 选择日期范围（画板 36）：双月日历点选开始与结束，确认后才生效；取消保持原筛选。
  * 允许同一天；缺日期或开始晚于结束时确认不可用；今天之后的日期不可选（画板 38）。
  */
-export function DateRangeDialog({ value, onConfirm, onClose }: {
+export function DateRangeDialog({ value, currentLabel, onConfirm, onClose }: {
   value: DateRange
+  /** 「当前筛选」的文案；导出弹窗未选日期时传「全部日期」，不传则按 value 显示 */
+  currentLabel?: string
   onConfirm: (range: DateRange) => void
   onClose: () => void
 }) {
@@ -49,7 +51,7 @@ export function DateRangeDialog({ value, onConfirm, onClose }: {
               </button>
             </Dialog.Close>
           </div>
-          <p className="text-xs text-jolu-muted">当前筛选：{rangeLabel(value)} · 以下日期为待确认范围</p>
+          <p className="text-xs text-jolu-muted">当前筛选：{currentLabel ?? rangeLabel(value)} · 以下日期为待确认范围</p>
           <div className="flex gap-4">
             <DateBox label="开始日期" value={draft.start} active={editing === "start"} />
             <DateBox label="结束日期" value={draft.end} active={editing === "end"} />

@@ -1,5 +1,8 @@
+# -Executable: optional jolu.exe path (see README). Keep this file ASCII: Windows PowerShell 5.1 reads it as ANSI.
+param([string]$Executable)
 $ErrorActionPreference = "Stop"
 $workspace = (Resolve-Path "$PSScriptRoot/../..").Path
+if ($Executable) { $Executable = (Resolve-Path $Executable).Path } else { $Executable = Join-Path $workspace "backend/target/debug/jolu.exe" }
 $profile = Join-Path $workspace ("output/acceptance/profile/" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $profile | Out-Null
 New-Item -ItemType File -Force -Path (Join-Path $profile ".acceptance-profile") | Out-Null
@@ -12,7 +15,7 @@ try {
     $env:JOLU_TEST_DIR = $profile
     $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile "webview"
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9337"
-    $app = Start-Process (Join-Path $workspace "backend/target/debug/jolu.exe") -WorkingDirectory $workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput "$workspace/output/acceptance/app.log" -RedirectStandardError "$workspace/output/acceptance/app-error.log"
+    $app = Start-Process $Executable -WorkingDirectory $workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput "$workspace/output/acceptance/app.log" -RedirectStandardError "$workspace/output/acceptance/app-error.log"
     $gateway = Start-Process python -ArgumentList @("scripts/acceptance/gateway.py") -WorkingDirectory $workspace -WindowStyle Hidden -PassThru
     @{app=$app.Id;gateway=$gateway.Id;profile=$profile} | ConvertTo-Json | Set-Content "$workspace/output/acceptance/processes.json" -Encoding UTF8
     Write-Output "Isolated app PID: $($app.Id); gateway PID: $($gateway.Id)"
