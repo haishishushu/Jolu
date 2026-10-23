@@ -267,11 +267,11 @@ export function MainPanelWindow({
               {page === "skills" && <SkillsView active={panelActive} />}
             </div>
           </div>
-          {/* 视口放在内容区内：落在页头下方居中 */}
-          <ToastViewport className="top-16" />
         </main>
       </div>
 
+      {/* 提示相对整个主窗口上方居中，不随侧栏宽度偏移。 */}
+      <ToastViewport className="top-16" />
       {aboutPresence.rendered && <AboutDialog version={aboutPresence.rendered} exiting={aboutPresence.exiting} onClose={() => setAbout(null)} />}
       <UpdateDialog />
     </div>
