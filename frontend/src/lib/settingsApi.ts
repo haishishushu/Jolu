@@ -1,6 +1,7 @@
 import { invoke, isTauri, type AppSettings } from "./api"
 import type { DefaultPage, MainPage } from "./mainNavigation"
 import type { Density } from "./appearance"
+import type { NetworkDiagnosisDto, NetworkMode } from "./networkSettings"
 
 /** 设置 · 数据与存储（画板 92）：请求记录与会话索引的条数 */
 export interface StorageCountsDto {
@@ -23,4 +24,8 @@ export const settingsApi = {
   /** 设置 · 外观（画板 88）：界面缩放、列表密度、减少动效；缩放由后端应用到主窗口 */
   setAppearancePreferences: (zoom: number, density: Density, reduceMotion: boolean) =>
     invoke<AppSettings>("set_appearance_preferences", { zoom, density, reduceMotion }),
+  /** 设置 · 网络与代理（画板 90 / 102）：保存应用联网方式；非手动代理传 null 保留上次的代理地址 */
+  setNetwork: (mode: NetworkMode, proxyUrl: string | null) => invoke<AppSettings>("set_network", { mode, proxyUrl }),
+  /** 用草稿参数做连接诊断，不保存设置；不发模型请求、不带凭证 */
+  diagnoseNetwork: (mode: NetworkMode, proxyUrl: string | null) => invoke<NetworkDiagnosisDto>("diagnose_network", { mode, proxyUrl }),
 }

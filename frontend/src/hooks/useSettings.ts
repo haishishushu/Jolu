@@ -3,6 +3,7 @@ import { api, isTauri, listenEvent, type AppSettings } from "@/lib/api"
 import type { DefaultPage } from "@/lib/mainNavigation"
 import { settingsApi } from "@/lib/settingsApi"
 import { normalizeDensity } from "@/lib/appearance"
+import type { NetworkMode } from "@/lib/networkSettings"
 
 /**
  * 持久化设置（§2.6 / §7.3）
@@ -41,6 +42,8 @@ const DEFAULTS: AppSettings = {
   main_zoom: 100,
   list_density: "comfortable",
   reduce_motion: false,
+  network_mode: "system",
+  network_proxy_url: null,
 }
 
 interface SharedSettings {
@@ -142,9 +145,15 @@ export function useSettings() {
     const next = { ...await api.getSettings(), ...patch }
     return settingsApi.setAppearancePreferences(next.main_zoom, normalizeDensity(next.list_density), next.reduce_motion)
   }), [save])
+  /** 成功返回保存后的设置（手动代理地址已由后端规整），失败返回 null */
+  const setNetwork = useCallback(async (mode: NetworkMode, proxyUrl: string | null) => {
+    let saved = null as AppSettings | null
+    const ok = await save(async () => (saved = await settingsApi.setNetwork(mode, proxyUrl)))
+    return ok ? saved : null
+  }, [save])
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance }
+  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork }
 }
 

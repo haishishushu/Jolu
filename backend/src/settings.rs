@@ -92,6 +92,13 @@ pub struct Settings {
     /// 减少动效开关；系统开启「减少动画」时主窗口同样减少，与本值无关。
     #[serde(default)]
     pub reduce_motion: bool,
+    /// 应用联网方式（画板 90 / D-24）：`system` 跟随系统、`direct` 直连、`manual` 手动代理。
+    /// 只作用于 Jolu 自己的出站请求，CLI 本地代理的上游不跟随。
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+    /// 手动代理地址（仅 http:// / https://，带端口）；切到其他方式时保留，便于切回。
+    #[serde(default)]
+    pub network_proxy_url: Option<String>,
 }
 
 fn default_kind() -> String { "api".into() }
@@ -164,6 +171,8 @@ impl Default for Settings {
             main_zoom: default_main_zoom(),
             list_density: default_list_density(),
             reduce_motion: false,
+            network_mode: default_network_mode(),
+            network_proxy_url: None,
         }
     }
 }
@@ -360,6 +369,11 @@ mod tests {
 /// 主窗口界面缩放档位（画板 88 / D-21）。
 pub const MAIN_ZOOM_STEPS: [u16; 6] = [80, 90, 100, 110, 125, 150];
 
+/// 盘上的缩放值可能被手工改坏：不在档位里就按 100% 处理，与前端 `normalizeZoom` 一致。
+pub fn normalize_zoom(zoom: u16) -> u16 {
+    if MAIN_ZOOM_STEPS.contains(&zoom) { zoom } else { 100 }
+}
+
 pub fn validate_appearance(zoom: u16, density: &str) -> Result<(), String> {
     if !MAIN_ZOOM_STEPS.contains(&zoom) {
         return Err("界面缩放须为 80/90/100/110/125/150%".into());
@@ -389,6 +403,16 @@ mod appearance_tests {
     }
 
     #[test]
+    fn saved_zoom_outside_steps_falls_back_to_standard() {
+        for zoom in [80, 90, 100, 110, 125, 150] {
+            assert_eq!(super::normalize_zoom(zoom), zoom);
+        }
+        for zoom in [0, 75, 115, 300, u16::MAX] {
+            assert_eq!(super::normalize_zoom(zoom), 100, "{zoom}% 不在档位里，按 100% 处理");
+        }
+    }
+
+    #[test]
     fn old_settings_default_to_standard_appearance() {
         let settings: Settings = serde_json::from_str(r#"{"island_platform":"claude","dnd":false,"island_visible":true}"#).unwrap();
         assert_eq!((settings.main_zoom, settings.list_density.as_str(), settings.reduce_motion), (100, "comfortable", false));
@@ -397,3 +421,6 @@ mod appearance_tests {
     }
 }
 // 任务 2.2 结束
+// 任务 2.3 开始
+fn default_network_mode() -> String { "system".into() }
+// 任务 2.3 结束

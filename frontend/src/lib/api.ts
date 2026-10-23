@@ -297,6 +297,10 @@ export interface AppSettings {
   list_density: string
   /** 减少动效开关；系统开启「减少动画」时同样生效 */
   reduce_motion: boolean
+  /** 应用联网方式：system 跟随系统、direct 直连、manual 手动代理 */
+  network_mode: string
+  /** 手动代理地址；切到其他方式时保留 */
+  network_proxy_url: string | null
 }
 
 export interface ProxyStatusDto {

@@ -115,7 +115,7 @@ pub fn validate(platform: &str, secret: &str, base: Option<&str>) -> Result<(), 
     } else {
         "https://generativelanguage.googleapis.com/v1beta/openai/models"
     };
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::net::blocking_builder()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build()
