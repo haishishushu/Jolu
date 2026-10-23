@@ -36,7 +36,7 @@ const ACTION_DONE: Partial<Record<TaskAction, string>> = {
 
 /**
  * 自动化（Jolu.pen 模块 E，画板 58–73）：任务列表、新建 / 编辑任务、等待额度详情、运行记录与运行详情。
- * 任务在本机用 Claude Code / Codex 的非交互模式执行；Skills 选择待接入。
+ * 任务在本机用 Claude Code / Codex 的非交互模式执行；所选 Skills 在执行前检查并写入提示词前缀（D-08）。
  */
 export function AutomationView({ active, prefill, onOpenSession, onOpenProviders }: {
   active: boolean
