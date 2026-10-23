@@ -596,8 +596,8 @@ export function ModelPicker({ models, value, onChange }: { models: string[]; val
         <ChevronDown aria-hidden className={cn("size-4 shrink-0 text-jolu-muted transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="absolute inset-x-0 top-full z-10 mt-1 flex flex-col gap-0.5 rounded-lg border border-jolu-border bg-jolu-bg p-[5px] shadow-[0_4px_12px_#00000012]">
-          <label className="flex h-7 items-center gap-2 px-2">
+        <div className="motion-popover absolute inset-x-0 top-full z-10 mt-1.5 flex flex-col gap-1.5 rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
+          <label className="flex h-8 items-center gap-2 rounded-md bg-jolu-side px-2">
             <Search aria-hidden className="size-3.5 shrink-0 text-jolu-muted" />
             <input
               autoFocus
@@ -625,7 +625,7 @@ export function ModelPicker({ models, value, onChange }: { models: string[]; val
                 onMouseEnter={() => setActive(index)}
                 onClick={() => pick(item)}
                 className={cn(
-                  "flex h-7 cursor-default items-center gap-2 rounded-[5px] px-2 font-mono text-xs",
+                  "flex min-h-[34px] cursor-default items-center gap-2 rounded-[7px] px-2 py-1.5 font-mono text-xs",
                   item === value ? "bg-jolu-selected text-jolu-on" : index === active ? "bg-jolu-side text-jolu-text" : "text-jolu-text",
                 )}
               >

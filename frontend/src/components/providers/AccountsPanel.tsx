@@ -262,7 +262,7 @@ function MoreFilter({ accounts, value, onChange }: { accounts: readonly Connecti
         {inMore ? providerEntry(value).name : "更多供应商"}
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="start" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] grid w-[420px] grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover">
+        <Menu.Content align="start" sideOffset={6} collisionPadding={12} style={{ maxHeight: "var(--radix-dropdown-menu-content-available-height)" }} className="motion-popover z-[100] grid w-[420px] max-w-[calc(100vw-24px)] overflow-y-auto grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover">
           {item("all", `全部供应商 · ${accounts.length}`, value === null, () => onChange(null))}
           {PROVIDERS.map((entry) => item(entry.id, `${entry.name} · ${count(entry.id)}`, value === entry.id, () => onChange(entry.id)))}
         </Menu.Content>

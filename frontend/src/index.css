@@ -642,3 +642,83 @@ html.reduce-motion .skeleton-bar { animation: none; background-image: none; }
 html.reduce-motion .motion-button:not(:disabled):active { transform: none; }
 
 .motion-dialog[data-state="closed"] { transition-duration: 140ms; }
+
+/* 主窗口统一滚动条；透明轨道不形成分隔线，8px 命中区内绘制 4px 圆角滑块。 */
+html:not(.island-window) { --scroll-thumb: #72727752; --scroll-thumb-hover: #72727785; }
+html.dark:not(.island-window) { --scroll-thumb: #92929852; --scroll-thumb-hover: #92929885; }
+html:not(.island-window), html:not(.island-window) * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+/* Chromium/WebView2 使用伪元素，避免标准属性覆盖圆角与尺寸。 */
+@supports selector(::-webkit-scrollbar) {
+  html:not(.island-window), html:not(.island-window) * { scrollbar-width: auto; scrollbar-color: auto; }
+  html:not(.island-window)::-webkit-scrollbar,
+  html:not(.island-window) *::-webkit-scrollbar { width: 8px; height: 8px; }
+  html:not(.island-window)::-webkit-scrollbar-track,
+  html:not(.island-window) *::-webkit-scrollbar-track { background: transparent; }
+  html:not(.island-window)::-webkit-scrollbar-thumb,
+  html:not(.island-window) *::-webkit-scrollbar-thumb {
+    min-height: 32px;
+    min-width: 32px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: var(--scroll-thumb);
+    background-clip: padding-box;
+  }
+  html:not(.island-window)::-webkit-scrollbar-thumb:hover,
+  html:not(.island-window) *::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+  html:not(.island-window)::-webkit-scrollbar-thumb:active,
+  html:not(.island-window) *::-webkit-scrollbar-thumb:active { background-color: var(--jolu-muted); }
+  html:not(.island-window)::-webkit-scrollbar-button,
+  html:not(.island-window) *::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+  html:not(.island-window)::-webkit-scrollbar-corner,
+  html:not(.island-window) *::-webkit-scrollbar-corner { background: transparent; }
+}
+
+/* 共享选择器在主窗口跟随 Jolu 主题，浮动灵动岛继续使用独立主题。 */
+html:not(.island-window) .jolu-select-trigger {
+  border-color: var(--jolu-border);
+  background: var(--jolu-bg);
+  color: var(--jolu-text);
+}
+html:not(.island-window) .jolu-select-trigger:not(:disabled):hover { background: var(--jolu-side); }
+html:not(.island-window) .jolu-select-trigger:is(:focus-visible, [data-state="open"]) {
+  border-color: var(--jolu-accent);
+  box-shadow: 0 0 0 2px var(--jolu-selected);
+}
+html:not(.island-window) .jolu-select-trigger svg { color: var(--jolu-muted); }
+html:not(.island-window) .jolu-select-menu {
+  border-color: var(--jolu-border);
+  background: var(--jolu-bg);
+  color: var(--jolu-text);
+  padding: 2px;
+}
+html:not(.island-window) .jolu-select-menu [title] { color: var(--jolu-muted); }
+/* 各模块保留自身布局，单选/多选共享选中、焦点和边界反馈。 */
+html:not(.island-window) [role="menu"] {
+  border-radius: 12px;
+  overscroll-behavior: contain;
+  box-shadow: 0 8px 24px #00000012, 0 2px 6px #00000008;
+}
+html.dark:not(.island-window) [role="menu"] { box-shadow: 0 8px 24px #00000045, 0 2px 6px #00000026; }
+html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"]) {
+  min-height: 34px;
+  border-radius: 7px;
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+}
+html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"])[data-highlighted]:not([data-disabled]) {
+  background: var(--jolu-side);
+}
+html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"])[data-state="checked"] {
+  background: var(--jolu-selected);
+  color: var(--jolu-on);
+}
+html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"])[data-state="checked"][data-highlighted] {
+  background: var(--jolu-pressed);
+}
+html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"])[data-disabled] { cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) {
+  html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"]) { transition: none; }
+}
+html.reduce-motion :is([role="menuitemradio"], [role="menuitemcheckbox"]) { transition: none; }
