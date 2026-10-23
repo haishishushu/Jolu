@@ -18,7 +18,7 @@ const THEMES: { value: Theme; label: string; icon: LucideIcon; bg: string; side:
 /** 外观（画板 88）：界面主题、界面缩放、列表密度与减少动效；后三项只作用于主窗口 */
 export function AppearanceSection({ cfg }: { cfg: Cfg }) {
   const theme = cfg.settings.theme as Theme
-  const disabled = !cfg.ready || cfg.saving
+  const disabled = !cfg.ready
   const zoom = normalizeZoom(cfg.settings.main_zoom)
   const density = normalizeDensity(cfg.settings.list_density)
   const motionHint = reduceMotionHint(useSystemReducedMotion())
@@ -36,7 +36,7 @@ export function AppearanceSection({ cfg }: { cfg: Cfg }) {
                 type="button"
                 role="radio"
                 aria-checked={active}
-                disabled={disabled}
+                disabled={disabled || cfg.isSaving("theme")}
                 onClick={() => void cfg.setTheme(t.value)}
                 className={cn(
                   "flex min-w-0 flex-col gap-2.5 rounded-[10px] border p-2.5 text-left outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed",
@@ -71,7 +71,7 @@ export function AppearanceSection({ cfg }: { cfg: Cfg }) {
               label="界面缩放"
               value={String(zoom)}
               options={ZOOM_STEPS.map((step) => ({ value: String(step), label: `${step}%` }))}
-              disabled={disabled}
+              disabled={disabled || cfg.isSaving("main_zoom")}
               onChange={(value) => void cfg.setAppearance({ main_zoom: Number(value) })}
             />
           }
@@ -83,7 +83,7 @@ export function AppearanceSection({ cfg }: { cfg: Cfg }) {
             <Segmented<Density>
               label="列表密度"
               value={density}
-              disabled={disabled}
+              disabled={disabled || cfg.isSaving("list_density")}
               onChange={(value) => void cfg.setAppearance({ list_density: value })}
               items={[{ value: "comfortable", label: DENSITY_LABEL.comfortable }, { value: "compact", label: DENSITY_LABEL.compact }]}
             />
@@ -115,7 +115,7 @@ export function AppearanceSection({ cfg }: { cfg: Cfg }) {
               {motionHint && <span className="mt-1 block">{motionHint}</span>}
             </>
           }
-          control={<Switch label="减少动效" on={cfg.settings.reduce_motion} disabled={disabled} onChange={(on) => void cfg.setAppearance({ reduce_motion: on })} />}
+          control={<Switch label="减少动效" on={cfg.settings.reduce_motion} disabled={disabled || cfg.isSaving("reduce_motion")} onChange={(on) => void cfg.setAppearance({ reduce_motion: on })} />}
         />
       </SettingsGroup>
     </>

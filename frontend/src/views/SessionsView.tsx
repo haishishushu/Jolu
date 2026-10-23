@@ -185,7 +185,7 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
         </label>
         <span className="flex-1" />
         <span className="text-[11px] text-jolu-muted">{minutes < 1 ? "刚刚同步" : `${minutes} 分钟前同步`}</span>
-        <ToolButton icon={<RefreshCw />} busy={scanning || query.loading} disabled={scanning || query.loading} onClick={() => void rescan()}>刷新</ToolButton>
+        <ToolButton icon={<RefreshCw />} busy={scanning || query.refreshing} disabled={scanning || query.refreshing} onClick={() => void rescan()}>刷新</ToolButton>
       </div>
 
       <div className="flex h-[34px] items-center gap-2">

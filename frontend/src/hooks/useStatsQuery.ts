@@ -10,7 +10,7 @@ export type StatsQuery<T> = LiveQuery<T>
  */
 export function useStatsQuery<T>(key: string, load: () => Promise<T>, demo: () => T, platform: string | null, enabled = true): StatsQuery<T> {
   const query = useLiveQuery(key, load, demo, enabled)
-  const { refresh } = query
+  const { revalidate: refresh } = query
 
   useEffect(() => {
     if (!enabled || !isTauri) return

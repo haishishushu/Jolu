@@ -36,7 +36,7 @@ export function NetworkSection({ cfg, setDirty }: { cfg: Cfg; setDirty: SetDirty
   useEffect(() => { setDirty("network-proxy", draft) }, [draft, setDirty])
   useEffect(() => () => setDirty("network-proxy", false), [setDirty])
   const urlError = mode === "manual" && urlDraft.trim() !== "" ? proxyUrlError(urlDraft) : null
-  const disabled = !cfg.ready || cfg.saving
+  const disabled = !cfg.ready || cfg.isSaving("network")
 
   const choose = (next: NetworkMode) => {
     setMode(next)

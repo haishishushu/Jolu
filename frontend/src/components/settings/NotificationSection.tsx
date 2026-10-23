@@ -14,7 +14,7 @@ type SetDirty = (key: string, dirty: boolean) => void
 export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: SetDirty }) {
   const toast = useToast()
   const s = cfg.settings
-  const disabled = !cfg.ready || cfg.saving
+  const disabled = !cfg.ready
   const saved = s.balance_alert_threshold
   const [amount, setAmount] = useState(saved == null ? "5.00" : saved.toFixed(2))
   const [currency, setCurrency] = useState(s.balance_alert_currency)
@@ -61,7 +61,7 @@ export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: Set
           className="min-h-[72px]"
           title="启用免打扰"
           desc="与系统托盘菜单共用同一设置。"
-          control={<Switch label="启用免打扰" on={s.dnd} disabled={disabled} onChange={(on) => void cfg.setDnd(on)} />}
+          control={<Switch label="启用免打扰" on={s.dnd} disabled={disabled || cfg.isSaving("dnd")} onChange={(on) => void cfg.setDnd(on)} />}
         />
       </SettingsGroup>
 
@@ -98,13 +98,13 @@ export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: Set
           className="min-h-[72px]"
           title="额度恢复与任务继续"
           desc="额度重新确认可用并恢复执行后提醒。"
-          control={<Switch label="额度恢复与任务继续" on={s.notify_task_resumed} disabled={disabled} onChange={(on) => void cfg.setTaskNotify({ resumed: on })} />}
+          control={<Switch label="额度恢复与任务继续" on={s.notify_task_resumed} disabled={disabled || cfg.isSaving("notify_task_resumed")} onChange={(on) => void cfg.setTaskNotify({ resumed: on })} />}
         />
         <SettingsRow
           className="min-h-[72px]"
           title="任务完成与失败"
           desc="提供查看任务入口，失败显示简短原因。"
-          control={<Switch label="任务完成与失败" on={s.notify_task_finished} disabled={disabled} onChange={(on) => void cfg.setTaskNotify({ finished: on })} />}
+          control={<Switch label="任务完成与失败" on={s.notify_task_finished} disabled={disabled || cfg.isSaving("notify_task_finished")} onChange={(on) => void cfg.setTaskNotify({ finished: on })} />}
         />
       </SettingsGroup>
 

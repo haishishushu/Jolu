@@ -452,7 +452,7 @@ function CardActions({ account, paused, refresh, canPromote, onPromote, onEdit, 
 /** 刷新只影响当前卡片；请求中禁用防重复点击，结果直接体现在卡片上（画板 23「正在刷新」） */
 function RefreshButton({ label, result }: { label: string; result: QuotaResult | BalanceResult }) {
   const [busy, setBusy] = useState(false)
-  const loading = busy || result.loading
+  const loading = busy
   return (
     <JoluButton
       size="sm"
