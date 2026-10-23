@@ -37,6 +37,8 @@ export interface TaskInputDto {
   schedule: ScheduleDto | null
   auto_resume: boolean
   wait_deadline: number | null
+  /** 同账号排队（D-09），默认开启；关闭后可与同账号任务并行 */
+  serial_queue: boolean
 }
 
 export interface TaskDto {
@@ -58,6 +60,7 @@ export interface TaskDto {
   missed_at: number | null
   created_at: number
   updated_at: number
+  serial_queue: boolean
 }
 
 export interface RunDto {
