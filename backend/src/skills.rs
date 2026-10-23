@@ -1227,6 +1227,7 @@ pub fn import_scan_with(h: &Homes, cfg: &Config, source: &str, platform: &str, s
             let (status, issue) = match invalid {
                 Some(reason) => ("invalid", Some(format!("{reason}，需先修复"))),
                 None if root.path.join(&name).exists() => ("conflict", Some("目标已有同名 Skill".to_string())),
+                None if parked_copy(cfg, platform, &root.path.join(&name)).is_some() => ("conflict", Some("目标已有同名 Skill（已停用）".to_string())),
                 None => ("ok", None),
             };
             ImportItem { name, path: dir.display().to_string(), description: front.ok().and_then(|f| f.description), status, issue }
@@ -1249,6 +1250,16 @@ pub struct ImportResult {
     pub failed: Vec<ScanError>,
 }
 
+/// 停用区里原位置是 `target` 的那一份（有多份时取最近停用的）
+fn parked_copy(cfg: &Config, platform: &str, target: &Path) -> Option<PathBuf> {
+    cfg.disabled
+        .iter()
+        .rev()
+        .filter(|e| e.platform == platform && same_path(&e.original, target))
+        .map(|e| PathBuf::from(&e.stored))
+        .find(|stored| stored.join(SKILL_FILE).is_file())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn import_with(h: &Homes, cfg: &mut Config, source: &str, platform: &str, scope: Scope, project: Option<&str>, choices: Vec<ImportChoice>, enable: bool, data: &Path) -> Result<ImportResult, String> {
     let scan = import_scan_with(h, cfg, source, platform, scope, project)?;
@@ -1267,24 +1278,31 @@ pub fn import_with(h: &Homes, cfg: &mut Config, source: &str, platform: &str, sc
                 continue;
             }
             (_, "invalid") => Err(item.issue.clone().unwrap_or_else(|| "格式异常".into())),
-            ("import", "ok") => fs::create_dir_all(&root.path).map_err(|e| e.to_string()).and_then(|_| copy_dir(Path::new(&item.path), &target)),
+            ("import", "ok") => fs::create_dir_all(&root.path)
+                .map_err(|e| e.to_string())
+                .and_then(|_| copy_dir(Path::new(&item.path), &target))
+                .map(|_| (target.clone(), true)),
+            // 覆盖写到同名 Skill 当前所在的位置（原目录，或 Claude 停用区里的那一份），启停状态保持不变
             ("overwrite", "conflict") => (|| {
-                ensure_writable(&root, &target)?;
-                backup_dir_tree(&target, platform, &data.join("skill-backups").join("overwritten"))?;
-                fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
-                copy_dir(Path::new(&item.path), &target)
+                let dest = if target.exists() { target.clone() } else { parked_copy(cfg, platform, &target).ok_or("目标已不存在，请重新扫描")? };
+                ensure_writable(&root, &dest)?;
+                backup_dir_tree(&dest, platform, &data.join("skill-backups").join("overwritten"))?;
+                fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+                copy_dir(Path::new(&item.path), &dest)?;
+                Ok((dest, false))
             })(),
             ("import", "conflict") => Err("目标已有同名 Skill，请选择跳过或覆盖".into()),
             _ => Err("不支持的导入方式".into()),
         };
         match outcome {
-            Ok(()) => {
-                let path = target.display().to_string();
+            Ok((dest, is_new)) => {
+                // 来源按原位置登记：停用区里的副本也按原位置判断来源
                 if !cfg.imported.iter().any(|p| same_path(p, &target)) {
-                    cfg.imported.push(path.clone());
+                    cfg.imported.push(target.display().to_string());
                 }
-                let mut final_path = path;
-                if !enable {
+                let mut final_path = dest.display().to_string();
+                // 「导入后启用」只作用于新导入的 Skill
+                if is_new && !enable {
                     match set_enabled_impl(h, cfg, &root, &target, &skill_name(&target), false, data) {
                         Ok(p) => final_path = p,
                         Err(reason) => result.failed.push(ScanError { path: item.name.clone(), reason: format!("已导入，但未能设为停用：{reason}") }),
@@ -1524,7 +1542,9 @@ fn scan_clone(h: &Homes, cfg: &Config, repo: &Path, platform: &str, scope: Scope
     match fs::symlink_metadata(&git) {
         Ok(meta) if meta.is_dir() => remove_tree(&git)?,
         Ok(_) => fs::remove_file(&git).map_err(|e| format!("无法删除 {}：{e}", git.display()))?,
-        Err(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 拒绝访问等情况无法确认 .git 已不在，中止导入（调用方会删除临时目录）
+        Err(e) => return Err(format!("无法确认 .git 已删除：{e}")),
     }
     import_scan_with(h, cfg, &git_import_source(repo).display().to_string(), platform, scope, project)
 }
@@ -2109,6 +2129,130 @@ mod tests {
         let scan = scan_clone(&h, &cfg, &odd, "claude", Scope::Global, None).unwrap();
         assert_eq!(scan.items[0].status, "invalid");
         assert!(scan.items[0].issue.as_deref().unwrap().contains("目录名不符合 Skill 名称规则"));
+        fs::remove_dir_all(&base).ok();
+    }
+
+    fn new_body(name: &str) -> String {
+        format!("---\nname: {name}\ndescription: 新版内容\n---\n")
+    }
+
+    fn overwrite(name: &str) -> Vec<ImportChoice> {
+        vec![ImportChoice { name: name.into(), action: "overwrite".into() }]
+    }
+
+    #[test]
+    fn overwrite_keeps_enabled_state() {
+        let base = temp("ow-enabled");
+        let h = homes_at(&base);
+        let data = base.join("data");
+        let mut cfg = Config::default();
+        let source = base.join("downloads");
+        skill(&source, "api-review", &new_body("api-review"));
+        let src = source.display().to_string();
+
+        // Claude：启用中的 Skill 被覆盖后仍在原位置启用，「导入后启用」关闭也不停用
+        let target = skill(&h.claude.join("skills"), "api-review", &body("api-review"));
+        let result = import_with(&h, &mut cfg, &src, "claude", Scope::Global, None, overwrite("api-review"), false, &data).unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert!(same_path(&result.imported[0], &target));
+        assert_eq!(fs::read_to_string(target.join(SKILL_FILE)).unwrap(), new_body("api-review"), "内容已更新");
+        assert!(cfg.disabled.is_empty() && !data.join("skills-disabled").exists(), "没有移进停用区");
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        assert_eq!(o.items.iter().find(|i| i.name == "api-review").unwrap().status, "enabled");
+
+        // Codex：启用中的 Skill 被覆盖后 config.toml 不出现停用条目
+        let codex_target = skill(&base.join(".agents").join("skills"), "api-review", &body("api-review"));
+        let result = import_with(&h, &mut cfg, &src, "codex", Scope::Global, None, overwrite("api-review"), false, &data).unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(fs::read_to_string(codex_target.join(SKILL_FILE)).unwrap(), new_body("api-review"));
+        assert!(!h.codex.join("config.toml").exists(), "不写停用条目");
+        let o = overview_with(&h, &cfg, "codex").unwrap();
+        assert_eq!(o.items.iter().find(|i| i.name == "api-review").unwrap().disabled_by, None);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn overwrite_keeps_disabled_state() {
+        let base = temp("ow-disabled");
+        let h = homes_at(&base);
+        let data = base.join("data");
+        let mut cfg = Config::default();
+        let source = base.join("downloads");
+        skill(&source, "api-review", &new_body("api-review"));
+        let src = source.display().to_string();
+
+        // Claude：停用区里的 Skill 算作同名冲突，覆盖写到停用区里那一份，不在原位置再放一份
+        let original = skill(&h.claude.join("skills"), "api-review", &body("api-review"));
+        let (root, dir) = locate(&h, &cfg, &original.display().to_string()).unwrap();
+        let stored = set_enabled_impl(&h, &mut cfg, &root, &dir, "api-review", false, &data).unwrap();
+        let registry = serde_json::to_string(&load_config(&data).disabled).unwrap();
+        let scan = import_scan_with(&h, &cfg, &src, "claude", Scope::Global, None).unwrap();
+        assert_eq!(scan.items[0].status, "conflict", "停用区里的同名 Skill 也是冲突");
+        let result = import_with(&h, &mut cfg, &src, "claude", Scope::Global, None, overwrite("api-review"), true, &data).unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert!(same_path(&result.imported[0], Path::new(&stored)));
+        assert!(!original.exists(), "原位置没有第二份");
+        assert_eq!(fs::read_to_string(Path::new(&stored).join(SKILL_FILE)).unwrap(), new_body("api-review"), "停用区里的内容已更新");
+        assert_eq!(serde_json::to_string(&cfg.disabled).unwrap(), registry, "停用登记不变");
+        assert!(fs::read_dir(data.join("skill-backups").join("overwritten")).unwrap().count() == 1, "覆盖前已备份");
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        let items: Vec<_> = o.items.iter().filter(|i| i.name == "api-review").collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!((items[0].status, items[0].disabled_by), ("disabled", Some("parked")));
+        // 停用区里的同名 Skill 选「导入」也要报冲突，不能在原位置再放一份
+        let choices = vec![ImportChoice { name: "api-review".into(), action: "import".into() }];
+        let result = import_with(&h, &mut cfg, &src, "claude", Scope::Global, None, choices, true, &data).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert!(!original.exists());
+
+        // Codex：按路径停用的 Skill 被覆盖后仍停用，config.toml 原样
+        let codex_target = skill(&base.join(".agents").join("skills"), "api-review", &body("api-review"));
+        let (root, dir) = locate(&h, &cfg, &codex_target.display().to_string()).unwrap();
+        set_enabled_impl(&h, &mut cfg, &root, &dir, "api-review", false, &data).unwrap();
+        let config = fs::read_to_string(h.codex.join("config.toml")).unwrap();
+        let result = import_with(&h, &mut cfg, &src, "codex", Scope::Global, None, overwrite("api-review"), true, &data).unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(fs::read_to_string(codex_target.join(SKILL_FILE)).unwrap(), new_body("api-review"));
+        assert_eq!(fs::read_to_string(h.codex.join("config.toml")).unwrap(), config, "config.toml 不变");
+        let o = overview_with(&h, &cfg, "codex").unwrap();
+        assert_eq!(o.items.iter().find(|i| i.name == "api-review").unwrap().disabled_by, Some("path"));
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn enable_after_import_only_for_new() {
+        let base = temp("ow-new");
+        let h = homes_at(&base);
+        let data = base.join("data");
+        let mut cfg = Config::default();
+        let source = base.join("downloads");
+        skill(&source, "fresh-one", &body("fresh-one"));
+        skill(&source, "kept-on", &new_body("kept-on"));
+        let existing = skill(&h.claude.join("skills"), "kept-on", &body("kept-on"));
+        let choices = vec![
+            ImportChoice { name: "fresh-one".into(), action: "import".into() },
+            ImportChoice { name: "kept-on".into(), action: "overwrite".into() },
+        ];
+        let result = import_with(&h, &mut cfg, &source.display().to_string(), "claude", Scope::Global, None, choices, false, &data).unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        let state = |name: &str| o.items.iter().find(|i| i.name == name).map(|i| (i.status, i.disabled_by)).unwrap();
+        assert_eq!(state("fresh-one"), ("disabled", Some("parked")), "新导入的按开关停用");
+        assert_eq!(state("kept-on"), ("enabled", None), "覆盖的保持原状态");
+        assert_eq!(fs::read_to_string(existing.join(SKILL_FILE)).unwrap(), new_body("kept-on"));
+        assert_eq!(cfg.disabled.len(), 1);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn scan_clone_stops_when_git_removal_unconfirmed() {
+        let base = temp("git-unknown");
+        let h = homes_at(&base);
+        let cfg = Config::default();
+        // 路径里的 NUL 让 symlink_metadata 返回 InvalidInput（不是 NotFound），无法确认 .git 是否还在
+        let repo = base.join("bad\0repo");
+        let err = scan_clone(&h, &cfg, &repo, "claude", Scope::Global, None).unwrap_err();
+        assert!(err.starts_with("无法确认 .git 已删除："), "{err}");
         fs::remove_dir_all(&base).ok();
     }
 
