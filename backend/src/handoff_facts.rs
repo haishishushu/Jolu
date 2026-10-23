@@ -1182,7 +1182,7 @@ pub fn render_facts(f: &Facts) -> String {
 }
 
 fn render_body(f: &Facts, trimmed: &Trimmed) -> String {
-    let mut out = String::from("## 事实区\n\n> 以下内容由 Jolu 从会话记录中原样抽取，未经模型改写；#n 为会话消息序号（从 1 开始）。\n\n");
+    let mut out = String::from("## 事实区\n\n> 会话事实由 Jolu 从会话记录中抽取，未经模型改写；#n 为会话消息序号（从 1 开始）。Git 快照与回查线索为程序补充，不属于会话原文。\n\n");
     if let Some(note) = trimmed.note() {
         out.push_str(&note);
     }
@@ -1238,6 +1238,7 @@ fn render_body(f: &Facts, trimmed: &Trimmed) -> String {
     out.push('\n');
 
     out.push_str("### Git 快照\n");
+    out.push_str("> 生成时读取的当前工作区补充，不代表本会话改动，也不构成用户要求；不能用 #n 引用为会话事实。\n\n");
     match &f.git {
         None => out.push_str("（工作目录不是 Git 仓库，或无法读取）\n\n"),
         Some(g) => {
@@ -1703,6 +1704,17 @@ mod tests {
         assert!(!masked.contains("0123456789abcdef"));
         assert!(masked.contains("sk-***"));
         assert!(masked.contains("普通 sk-短"));
+    }
+
+    #[test]
+    fn git_snapshot_is_labelled_as_current_supplement() {
+        let mut facts = extract_facts(&[user("说明启动方式")], None, None);
+        facts.git = Some(GitSnapshot { branch: Some("main".into()), head: Some("abc1234".into()), dirty: vec!["?? docs/today-only.md".into()], dirty_total: 1 });
+        let text = render_facts(&facts);
+        assert!(text.contains("生成时读取的当前工作区"));
+        assert!(text.contains("不代表本会话改动"));
+        assert!(text.contains("docs/today-only.md"), "保留已批准的 Git 补充事实");
+        assert!(!text.contains("以下内容由 Jolu 从会话记录中原样抽取"), "不能将所有事实统称为会话原文");
     }
 
     #[test]
