@@ -57,3 +57,4 @@
 - [x] V-2 前端 `node --test` 130 通过、`tsc`、`vite build` 通过
 - [x] V-3 真实桌面端（隔离目录 + CDP 驱动，`scripts/acceptance/island-clones.e2e.mjs`）：仅本体时总数 1、销毁禁用 → 开两个分身总数 3、位置落盘 → 销毁本体由第一个分身接任、本体窗口保留 → 重启后分身按同一 id 与位置重建、总数 2 → 销毁后设置清空。隔离目录无连接，未覆盖“各选不同连接”的真机点选；该逻辑由后端 `apply_connection` 单测与前端 `islandProfile` 单测覆盖
 - [ ] V-4 鼠鼠在安装版上实际用两个不同连接各开一个分身，确认额度各自显示
+  - [x] 2026-10-23 隔离开发版先行验证（任务 1.3）：合成网关两条 Claude API Key 连接，本体显示「网关 A · 12.50 USD」、分身显示「网关 B · 0.00 USD」，`settings.json` 里本体与分身的 `connection_id` 各自落盘。详见 `docs/verification/2026-10-22-desktop-acceptance.md` 步骤 3。安装版 + 真实账号仍待鼠鼠确认
