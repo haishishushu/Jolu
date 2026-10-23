@@ -1047,6 +1047,24 @@ fn set_retention_days(app: tauri::AppHandle, days: Option<u32>) -> Result<settin
     Ok(next)
 }
 
+// 任务 2.1 开始
+#[tauri::command]
+fn set_default_page(app: tauri::AppHandle, page: String) -> Result<settings::Settings, String> {
+    settings::validate_default_page(&page)?;
+    let next = app.state::<Cfg>().0.try_update(|settings| settings.default_page = page)?;
+    let _ = app.emit("settings-changed", next.clone());
+    Ok(next)
+}
+
+/// 只记录上次访问的页面；切页很频繁，不广播 settings-changed，托盘打开时读快照即可。
+#[tauri::command]
+fn remember_page(app: tauri::AppHandle, page: String) -> Result<(), String> {
+    settings::validate_last_page(&page)?;
+    app.state::<Cfg>().0.try_update(|settings| settings.last_page = Some(page))?;
+    Ok(())
+}
+// 任务 2.1 结束
+
 #[tauri::command]
 async fn cleanup_preview(db: State<'_, DbRead>, days: u32) -> Result<db::CleanupPreview, String> {
     let cutoff = retention_cutoff(days)?;
@@ -1065,16 +1083,10 @@ async fn cleanup_history(app: tauri::AppHandle, db: State<'_, Db>, days: u32) ->
     Ok(result)
 }
 
-/// 导出 / 导入备份的核心逻辑，由 `data_files` 的文件导出、导入命令调用
-async fn export_data(db: State<'_, DbRead>, platform: Option<String>) -> Result<String, String> {
-    data_files::valid_export_scope(platform.as_deref())?;
-    with_reader(db.0.clone(), move |conn| db::export_backup(conn, platform.as_deref())).await
-}
-
-async fn import_data(app: tauri::AppHandle, db: State<'_, Db>, json: String) -> Result<db::ImportSummary, String> {
-    let result = with_database(db.0.clone(), move |conn| db::import_backup(conn, &json)).await?;
-    let _ = app.emit("refresh-requested", ());
-    Ok(result)
+/// 导出备份的核心逻辑，由 `data_files` 的文件导出命令调用；日期区间左闭右开
+async fn export_data(db: State<'_, DbRead>, platform: Option<String>, start_ms: Option<i64>, end_ms: Option<i64>) -> Result<String, String> {
+    data_files::valid_export_scope(platform.as_deref(), start_ms, end_ms)?;
+    with_reader(db.0.clone(), move |conn| db::export_backup(conn, platform.as_deref(), start_ms, end_ms)).await
 }
 
 #[tauri::command]
@@ -2631,7 +2643,6 @@ pub fn run() {
             detect_local_login,
             current_connections,
             read_local_connections,
-            data_files::import_data_file,
             data_files::export_data_file,
             data_files::export_calls_csv,
             stats_overview,
@@ -2701,9 +2712,22 @@ pub fn run() {
             quit_startup,
             take_main_intent,
             fetch_remote_models,
+            // 任务 2.4 开始
+            data_files::preview_import_file,
+            data_files::confirm_import,
+            data_files::discard_import,
+            // 任务 2.4 结束
             updater::check_app_update_available,
             updater::download_app_update,
-            updater::install_downloaded_update_and_restart
+            updater::install_downloaded_update_and_restart,
+            // 任务 2.1 开始
+            set_default_page,
+            remember_page,
+            // 任务 2.1 结束
+            // 任务 2.7 开始
+            skills::skills_import_git,
+            skills::skills_import_git_cleanup,
+            // 任务 2.7 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();

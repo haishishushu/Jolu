@@ -1,7 +1,8 @@
 import { useContentMotion, useExitPresence } from "@/lib/motion"
 import { useEffect, useId, useRef, useState } from "react"
 import { api, isTauri, listenEvent, openUrl, type MainIntentDto } from "@/lib/api"
-import { pageForIntent, pageLabel, readSidebarCollapsed, writeSidebarCollapsed, type MainPage } from "@/lib/mainNavigation"
+import { pageForIntent, pageLabel, readSidebarCollapsed, resolveOpenPage, writeSidebarCollapsed, type MainPage } from "@/lib/mainNavigation"
+import { settingsApi } from "@/lib/settingsApi"
 import { AppIcon } from "@/components/brand/AppIcon"
 import { ToastProvider, ToastViewport } from "@/components/ui/Toast"
 import { TipProvider } from "@/components/ui/Tip"
@@ -45,6 +46,14 @@ export function MainPanelWindow({
   const [usageRequest, setUsageRequest] = useState<UsageRequest | null>(null)
   const [opening, setOpening] = useState(embedded && isTauri)
   const readySent = useRef(false)
+  /** 桌面主窗口：首次挂载按「默认打开页面」定页，定好后才通知后端显示窗口，避免先闪一下灵动岛页 */
+  const desktop = embedded && isTauri
+  const [pageResolved, setPageResolved] = useState(!desktop)
+  const initialPending = useRef(desktop)
+  /** 「上次访问的页面」：切页后延迟 1 秒写入，期间再切换就重新计时 */
+  const rememberTimer = useRef<number | null>(null)
+  const pendingPage = useRef<MainPage | null>(null)
+  const savedPage = useRef<string | null>(null)
   /** 各页面的滚动位置：切换模块再回来时保持原位（画板 104） */
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollPositions = useRef(new Map<MainPage, number>())
@@ -62,35 +71,79 @@ export function MainPanelWindow({
   }, [page])
 
   useEffect(() => {
-    if (!embedded || !isTauri || readySent.current) return
+    if (!embedded || !isTauri || !pageResolved || readySent.current) return
     readySent.current = true
     void api.mainPanelReady().then(() => setOpening(false)).catch((error) => {
       console.error("主面板就绪通知失败", error)
     })
-  }, [embedded])
+  }, [embedded, pageResolved])
+
+  useEffect(() => {
+    if (!desktop || !pageResolved) return
+    if (rememberTimer.current !== null) window.clearTimeout(rememberTimer.current)
+    rememberTimer.current = null
+    if (page === savedPage.current) {
+      pendingPage.current = null
+      return
+    }
+    pendingPage.current = page
+    rememberTimer.current = window.setTimeout(() => {
+      rememberTimer.current = null
+      void settingsApi.rememberPage(page).then(() => {
+        savedPage.current = page
+        if (pendingPage.current === page) pendingPage.current = null
+      }).catch((error) => console.error("记录上次访问的页面失败", error))
+    }, 1000)
+  }, [desktop, page, pageResolved])
+
+  useEffect(() => () => {
+    if (rememberTimer.current !== null) window.clearTimeout(rememberTimer.current)
+  }, [])
 
   // 托盘菜单可以直接把主面板带到指定位置
   useEffect(() => {
     const offs: Array<() => void> = []
     let stopped = false
+    const finishInitial = () => {
+      initialPending.current = false
+      if (!stopped) setPageResolved(true)
+    }
     const applyIntent = (intent: MainIntentDto | null) => {
       if (!intent || stopped) return
       if (intent.kind === "about") {
         setAbout(intent.version)
         return
       }
+      initialPending.current = false
       setAbout(null)
-      setPage(pageForIntent(intent))
+      if (intent.kind === "overview") {
+        // 后端快照里的 last_page 可能还没写入最近一次切页（1 秒延迟内），以前端记录为准
+        const lastPage = pendingPage.current ?? intent.settings.last_page
+        if (intent.settings.last_page) savedPage.current = intent.settings.last_page
+        setPage(pageForIntent({ kind: "overview", settings: { default_page: intent.settings.default_page, last_page: lastPage } }))
+      } else setPage(pageForIntent(intent))
       if (intent.kind === "settings") setSettingsSection(intent.section)
       if (intent.kind !== "overview") setNavigationRequest((value) => value + 1)
     }
     const consumeIntent = () => void api.takeMainIntent().then(applyIntent).catch(() => {})
+    /** 首次挂载：有托盘 / 第二实例留下的跳转意图就按意图打开，否则（含「关于」）读设置决定打开哪一页 */
+    const consumeInitial = () => void api.takeMainIntent().then(async (intent) => {
+      applyIntent(intent)
+      if (!initialPending.current) return
+      const settings = await api.getSettings()
+      savedPage.current = settings.last_page
+      if (!stopped && initialPending.current) setPage(resolveOpenPage(settings.default_page, settings.last_page))
+    }).catch((error) => console.error("读取默认打开页面失败", error)).finally(finishInitial)
     void listenEvent("main-intent", consumeIntent).then((un) => {
       if (stopped) un()
       else {
         offs.push(un)
-        consumeIntent()
+        if (initialPending.current) consumeInitial()
+        else consumeIntent()
       }
+    }).catch((error) => {
+      console.error("主面板跳转监听失败", error)
+      finishInitial()
     })
     return () => {
       stopped = true

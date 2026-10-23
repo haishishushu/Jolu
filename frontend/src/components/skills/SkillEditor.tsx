@@ -1,17 +1,60 @@
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { useMemo, useState } from "react"
-import { Check, ChevronDown, CircleAlert, CircleCheck, FileText, GitCompare, Square, SquareCheck } from "lucide-react"
+import { Check, ChevronDown, CircleAlert, CircleCheck, FileText, GitCompare, LoaderCircle, Square, SquareCheck } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { lineDiff } from "@/lib/textDiff"
 import { isTauri } from "@/lib/api"
 import { SKILL_EXTERNAL_CHANGE, skillsApi, type SkillDetailDto, type SkillItemDto, type SkillScope } from "@/lib/skillsApi"
 import {
   SKILL_PLATFORMS, frontField, hasNameConflict, projectLabel, setFrontField, skillTemplate, targetDirHint, validSkillName,
 } from "@/lib/skillsManager"
 import { JoluButton } from "@/components/ui/JoluButton"
-import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
 import { providerName } from "@/components/usage/usageControls"
 import { DialogShell, Field, FieldSelect, INPUT_CLASS, MarkdownPreview, Tag } from "./skillParts"
+
+/** 差异弹窗读取到的磁盘版本 */
+type DiskVersion = { text: string; modified: number | null; truncated: boolean }
+
+/**
+ * 查看差异（D-17；画板 84 · 05 只画了入口，弹窗样式待确认）：按行对比「磁盘版本」与「当前草稿」。
+ * 只在磁盘版本里的行标删除（jolu-danger 浅底），只在草稿里的行标新增（jolu-on 浅底）。
+ */
+function DiffDialog({ disk, draft, onUseDisk, onKeepDraft, onClose }: {
+  disk: DiskVersion
+  draft: string
+  onUseDisk: () => void
+  onKeepDraft: () => void
+  onClose: () => void
+}) {
+  const lines = useMemo(() => lineDiff(disk.text, draft), [disk.text, draft])
+  const removed = lines.filter((l) => l.kind === "del").length
+  const added = lines.filter((l) => l.kind === "add").length
+  return (
+    <DialogShell width={760} title="查看差异" onClose={onClose}>
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-jolu-muted">
+        <span className="rounded bg-jolu-danger-soft px-1.5 py-0.5 font-mono text-jolu-danger">- 磁盘版本</span>
+        <span className="rounded bg-jolu-selected px-1.5 py-0.5 font-mono text-jolu-on">+ 当前草稿</span>
+        <span className="flex-1" />
+        <span>{removed || added ? `删除 ${removed} 行 · 新增 ${added} 行` : "两个版本内容相同"}</span>
+      </div>
+      {disk.truncated && <p role="alert" className="rounded-lg bg-jolu-danger-soft px-3 py-2 text-[11px] text-jolu-danger">磁盘上的文件超过 512 KB，只对比了前 512 KB；为避免丢失内容，不能直接使用磁盘版本。</p>}
+      <div className="max-h-[420px] min-h-[160px] overflow-auto rounded-lg border border-jolu-border bg-jolu-bg py-1 font-mono text-[11px] leading-5">
+        {lines.map((line, i) => (
+          <div key={i} className={cn("flex min-w-max whitespace-pre px-3", line.kind === "del" && "bg-jolu-danger-soft text-jolu-danger", line.kind === "add" && "bg-jolu-selected text-jolu-on", line.kind === "same" && "text-jolu-text")}>
+            <span aria-hidden className="w-4 shrink-0 select-none">{line.kind === "del" ? "-" : line.kind === "add" ? "+" : " "}</span>
+            <span className="sr-only">{line.kind === "del" ? "删除：" : line.kind === "add" ? "新增：" : ""}</span>
+            {line.text || " "}
+          </div>
+        ))}
+      </div>
+      <div className="flex justify-end gap-2">
+        <JoluButton variant="outline" className="h-[34px]" disabled={disk.truncated} onClick={onUseDisk}>使用磁盘版本</JoluButton>
+        <JoluButton variant="primary" className="h-[34px]" onClick={onKeepDraft}>保留草稿</JoluButton>
+      </div>
+    </DialogShell>
+  )
+}
 
 export type EditorTarget =
   | { mode: "new"; platform: string }
@@ -38,6 +81,8 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
   const [external, setExternal] = useState(false)
   const [expected, setExpected] = useState<number | null>(editing ? target.item.modified_ms : null)
   const [leaving, setLeaving] = useState(false)
+  const [diff, setDiff] = useState<DiskVersion | null>(null)
+  const [loadingDiff, setLoadingDiff] = useState(false)
 
   const scope: SkillScope = scopeKey.startsWith("project:") ? "project" : (scopeKey as SkillScope)
   const project = scope === "project" ? scopeKey.slice("project:".length) : null
@@ -92,9 +137,11 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
     }
   }
 
-  /** 保留草稿：以磁盘上的最新版本为基准，下一次保存覆盖外部修改（覆盖前后端会先备份原文件） */
-  const keepDraft = async () => {
-    if (editing && isTauri) {
+  /** 保留草稿：以磁盘上的最新版本为基准，下一次保存覆盖外部修改（覆盖前后端会先备份原文件）。
+   *  已在差异弹窗里读过磁盘版本时直接用它的修改时间 */
+  const keepDraft = async (latestModified?: number | null) => {
+    if (latestModified !== undefined) setExpected(latestModified)
+    else if (editing && isTauri) {
       try {
         const latest = await skillsApi.detail(target.item.path)
         setExpected(latest.item.modified_ms)
@@ -103,7 +150,32 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
       }
     }
     setExternal(false)
+    setDiff(null)
     toast.info("已保留草稿", "再次保存将覆盖外部修改，原文件会先备份")
+  }
+
+  /** 查看差异（D-17）：读取磁盘上的最新 SKILL.md，与当前草稿按行对比 */
+  const openDiff = async () => {
+    if (!editing) return
+    if (!isTauri) return setDiff({ text: initialContent, modified: expected, truncated: false })
+    setLoadingDiff(true)
+    try {
+      const latest = await skillsApi.detail(target.item.path)
+      setDiff({ text: latest.content, modified: latest.item.modified_ms, truncated: latest.truncated })
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setLoadingDiff(false)
+    }
+  }
+
+  /** 使用磁盘版本：草稿替换为磁盘内容，并以它的修改时间作为下次保存的基准 */
+  const applyDisk = (disk: DiskVersion) => {
+    setContent(disk.text)
+    setExpected(disk.modified)
+    setExternal(false)
+    setDiff(null)
+    toast.info("已换成磁盘版本", "草稿中的修改已丢弃")
   }
 
   const cancel = () => (dirty ? setLeaving(true) : onCancel())
@@ -187,9 +259,9 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
           <Tag tone="danger">检测到外部修改</Tag>
           <p className="text-xs text-jolu-muted">文件已被其他程序修改。当前草稿已保留，查看差异后再决定如何合并。</p>
           <div className="flex gap-2">
-            <Tip label="查看差异待接入">
-              <span tabIndex={0}><JoluButton variant="soft" size="sm" disabled><GitCompare aria-hidden />查看差异</JoluButton></span>
-            </Tip>
+            <JoluButton variant="soft" size="sm" disabled={loadingDiff} onClick={() => void openDiff()}>
+              {loadingDiff ? <LoaderCircle aria-hidden className="animate-spin" /> : <GitCompare aria-hidden />}查看差异
+            </JoluButton>
             <JoluButton variant="neutral" size="sm" onClick={() => void keepDraft()}><FileText aria-hidden />保留草稿</JoluButton>
           </div>
         </section>
@@ -210,6 +282,8 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
           <span className="text-[11px] text-jolu-muted">（{platform === "claude" ? "不勾选时放入 Jolu 停用区，工具不会加载，同名副本不受影响" : "不勾选时按这份 SKILL.md 的路径写入 config.toml"}）</span>
         </button>
       )}
+
+      {diff && <DiffDialog disk={diff} draft={content} onUseDisk={() => applyDisk(diff)} onKeepDraft={() => void keepDraft(diff.modified)} onClose={() => setDiff(null)} />}
 
       {leaving && (
         <DialogShell width={420} title="离开编辑器？" onClose={() => setLeaving(false)}>

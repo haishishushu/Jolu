@@ -25,7 +25,7 @@ function errorText(reason: unknown): string {
 
 /**
  * Skills 管理（Jolu.pen 模块 F，画板 74–85）：按供应商浏览本机 Skills，查看详情与文件、新建 / 编辑、导入、复制、启停与移除。
- * 已核对目录规则的只有 Claude Code 与 Codex；其他供应商与 Git 仓库导入标「待接入」。
+ * 已核对目录规则的只有 Claude Code 与 Codex；其他供应商标「待接入」。导入支持本地目录与 Git 仓库（本机 git 浅克隆）。
  */
 export function SkillsView({ active }: { active: boolean }) {
   const toast = useToast()
