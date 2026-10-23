@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import {
-  blockBanner, clock, countByFilter, dayTime, durationText, filterTasks, launchLabel, nextFire, quotaTip, runCode, runTokens,
+  blockBanner, canDeleteTask, clock, countByFilter, dayTime, durationText, filterTasks, launchLabel, nextFire, quotaTip, runCode, runTokens,
   sessionTaskName, taskCode, taskStatus, untilText, validateForm,
 } from "./automation.ts"
 
@@ -98,4 +98,10 @@ test("表单校验", () => {
   assert.deepEqual(validateForm({ ...form, name: "a", connectionId: "c1", cwd: "D:/x", prompt: "b", launch: "now" }, now), {})
   assert.equal(validateForm({ ...form, name: "a", connectionId: "c1", cwd: "D:/x", prompt: "b", launch: "quota" }, now, "不支持读取额度").launch, "不支持读取额度")
   assert.equal(sessionTaskName("优化 Jolu 的会话界面"), "继续开发：优化 Jolu 的会话界面")
+})
+
+test("删除任务：运行中不可删除，其余状态可以", () => {
+  assert.equal(canDeleteTask("running"), false)
+  assert.equal(canDeleteTask("paused"), true)
+  for (const status of ["queued", "waiting", "attention", "completed", "failed", "cancelled", "active", "finished"]) assert.equal(canDeleteTask(status), true)
 })

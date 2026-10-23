@@ -209,4 +209,6 @@ export const automationApi = {
   quota: (connectionId: string, force: boolean) => invoke<QuotaVerdictDto>("automation_quota", { connectionId, force }),
   tools: () => invoke<ToolInfoDto[]>("automation_tools"),
   pickDir: () => invoke<string | null>("automation_pick_dir"),
+  /** 删除任务及其运行记录与事件，用量统计保留；执行中的任务后端拒绝（任务 2.9） */
+  deleteTask: (taskId: number) => invoke<void>("automation_delete", { taskId }),
 }
