@@ -49,7 +49,7 @@ function HeaderActions() {
   const desktopOnly = isTauri ? undefined : "（仅桌面端可用）"
 
   const onUpdate = () => {
-    if (update.info && (update.phase === "idle" || update.phase === "available")) {
+    if (update.info && (update.phase === "idle" || update.phase === "available" || update.phase === "downloaded")) {
       update.startDownload()
       return
     }
@@ -83,7 +83,7 @@ function HeaderActions() {
       <HeaderButton
         motion="update"
         label={UPDATES_ENABLED ? "检查更新" : "检查更新暂时停用"}
-        disabled={!UPDATES_ENABLED || update.phase === "checking"}
+        disabled={!UPDATES_ENABLED || update.phase === "checking" || update.phase === "downloading" || update.phase === "installing"}
         onClick={onUpdate}
       >
         <CircleFadingArrowUp aria-hidden className="size-5" />

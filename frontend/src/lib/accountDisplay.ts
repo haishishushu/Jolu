@@ -1,6 +1,43 @@
 /**
  * 账号管理卡片的显示规则（Jolu.pen 画板 07–10、23）。纯函数，便于 node --test 验证。
  */
+import type { AccountQuotaMetadata, QuotaWindowDto } from "./api"
+
+export function subscriptionDisplay(account?: AccountQuotaMetadata | null) {
+  const snapshot = account?.subscription_source === "local_snapshot"
+  const live = account?.subscription_source === "live"
+  const date = account?.expires_at ? new Date(account.expires_at) : null
+  const observed = account?.observed_at ? new Date(account.observed_at) : null
+  const recordedAt = observed && Number.isFinite(observed.getTime())
+    ? `最近记录：${observed.getFullYear()}-${pad(observed.getMonth() + 1)}-${pad(observed.getDate())} ${pad(observed.getHours())}:${pad(observed.getMinutes())}。` : ""
+  const expires = date && Number.isFinite(date.getTime())
+    ? `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` : "未提供"
+  return {
+    status: snapshot ? "待核实 · 本机记录" : live && account?.subscription_status === "active" ? "有效"
+      : live && account?.subscription_status === "expired" ? "已到期" : "未提供",
+    expires,
+    note: snapshot ? `${recordedAt}到期时间来自本机登录记录，续费后可能延迟更新，请以官网为准。` : null,
+  }
+}
+
+export function resetCreditsText(credits?: AccountQuotaMetadata["reset_credits"]) {
+  if (!credits) return "未提供"
+  const count = credits.available_count
+  const usable = credits.applicable_available_count
+  return `${count === null ? "总次数未提供" : `剩余 ${count} 次`} · ${usable === null ? "适用次数未提供" : `当前可用 ${usable} 次`}`
+}
+
+/** 官方订阅的两个主窗口保持固定顺序；缺失数据显式为空，额外模型窗口完整保留。 */
+export function accountQuotaWindows(platform: string, windows: readonly QuotaWindowDto[]): QuotaWindowDto[] {
+  if (platform !== "claude" && platform !== "codex") return [...windows]
+  const keys = ["5h", "7d"]
+  return [
+    ...keys.map(key => windows.find(window => window.key === key) ?? {
+      key, window_name: quotaTitle(key, key), used_percent: null, amount_text: null, resets_at: null,
+    }),
+    ...windows.filter(window => !keys.includes(window.key)),
+  ]
+}
 
 /** 额度窗口标题：5h →「5 小时额度」，7d →「周额度」，其余沿用来源给的名称 */
 export function quotaTitle(key: string, windowName: string): string {

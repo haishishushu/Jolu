@@ -6,12 +6,14 @@ import { UPDATES_ENABLED } from "@/lib/updateState"
 import { AppIcon } from "@/components/brand/AppIcon"
 import { Wordmark } from "@/components/brand/Wordmark"
 import { REPO_URL } from "@/components/panel/PageHeader"
+import { useSettings } from "@/hooks/useSettings"
 import { useUpdate } from "@/components/panel/UpdateContext"
 import { useToast } from "@/components/ui/Toast"
 import { ActionButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 
 /** 关于与更新（画板 96）：检查更新目前停用（UPDATES_ENABLED = false），如实显示停用状态 */
 export function AboutSection() {
+  const cfg = useSettings()
   const [version, setVersion] = useState<string | null>(null)
   useEffect(() => {
     let stopped = false
@@ -43,10 +45,12 @@ export function AboutSection() {
         <SettingsRow
           className="min-h-[72px]"
           title="自动检查更新"
-          desc={UPDATES_ENABLED ? "仅检查版本，下载和安装由你确认。" : "检查更新停用期间不会自动检查。"}
-          control={<Switch label="自动检查更新" on={UPDATES_ENABLED} disabled />}
+          desc={UPDATES_ENABLED ? "仅检查版本，下载和安装由你确认。" : "当前发布通道尚未开放，偏好会保留；启用更新后生效。"}
+          control={<Switch label="自动检查更新" on={cfg.settings.auto_check_updates} disabled={!cfg.ready || cfg.isSaving("auto_check_updates")} onChange={(on) => void cfg.setAutoCheckUpdates(on)} />}
         />
       </SettingsGroup>
+
+      {cfg.error && <p role="alert" className="text-xs text-jolu-danger">{cfg.error}</p>}
 
       <SettingsGroup title="帮助与项目" desc="反馈问题、查看更新记录与开源项目。">
         <SettingsRow
@@ -83,7 +87,7 @@ function UpdateRow({ versionText }: { versionText: string }) {
   const { phase, info, checkNow, startDownload } = useUpdate()
   const checking = phase === "checking"
   const busy = phase === "downloading" || phase === "installing"
-  const hasUpdate = !!info && (phase === "idle" || phase === "available")
+  const hasUpdate = !!info && (phase === "idle" || phase === "available" || phase === "downloaded")
   const check = () => {
     void checkNow()
       .then((available) => toast.success(available ? "发现新版本" : "已是最新版本"))
@@ -93,9 +97,9 @@ function UpdateRow({ versionText }: { versionText: string }) {
     <SettingsRow
       className="min-h-[72px]"
       title={`当前版本 ${versionText}`}
-      desc={hasUpdate && info ? `发现新版本 v${info.availableVersion}，点击下载后由你确认安装` : phase === "downloadError" ? "下载失败，可重试" : "仅检查版本，下载和安装由你确认。"}
+      desc={phase === "downloaded" ? "安装包已校验，可选择合适的时间安装" : hasUpdate && info ? `发现新版本 v${info.availableVersion}，点击下载后由你确认安装` : phase === "downloadError" ? "下载失败，可重试" : "仅检查版本，下载和安装由你确认。"}
       control={hasUpdate
-        ? <ActionButton tone="accent" onClick={startDownload}>下载 v{info?.availableVersion}</ActionButton>
+        ? <ActionButton tone="accent" onClick={startDownload}>{phase === "downloaded" ? "安装" : "下载"} v{info?.availableVersion}</ActionButton>
         : <ActionButton icon={<RefreshCw aria-hidden className="size-3.5" />} busy={checking || busy} onClick={check}>{checking ? "检查中…" : "检查更新"}</ActionButton>}
     />
   )

@@ -1642,17 +1642,9 @@ async fn blocking<T: Send + 'static>(app: &AppHandle, work: impl FnOnce(&Connect
 /// 本机 CLI 当前登录的连接；判断逻辑与 `current_connections` 一致，只比对、不返回凭证
 pub(crate) fn current_connection_ids(db: &Shared) -> Vec<String> {
     if crate::validation::isolated() { return vec![]; }
-    let mut local = Vec::new();
-    for platform in ["claude", "codex"] {
-        for kind in ["api", "auth"] {
-            if let Some(secret) = crate::creds::read_secret(platform, kind) { local.push((platform, kind, secret)); }
-        }
-    }
+    let local = crate::current_connection::read_local();
     let Ok(conn) = db.lock() else { return vec![] };
-    ["claude", "codex"].iter().filter_map(|platform| {
-        local.iter().filter(|(p, _, _)| p == platform)
-            .find_map(|(p, kind, secret)| crate::connections::find_by_secret(&conn, p, kind, secret).ok().flatten())
-    }).collect()
+    local.iter().filter_map(|local| crate::connections::find_current_local(&conn, local).ok().flatten()).collect()
 }
 
 /// 应用初始化后启动：建表、恢复中断的运行，然后每 30 秒（或有操作时）检查一次
@@ -2107,13 +2099,13 @@ mod tests {
         let w = |key: &str, used: Option<f64>, resets: Option<&str>| crate::quota::QuotaWindow {
             key: key.into(), window_name: format!("{key} 窗口"), used_percent: used, amount_text: None, remaining_text: None, resets_at: resets.map(str::to_string),
         };
-        let blocked = verdict(&QuotaState::Ok { windows: vec![w("5h", Some(100.0), Some("2026-10-22T10:30:00Z")), w("7d", Some(58.0), None)], plan: None });
+        let blocked = verdict(&QuotaState::Ok { windows: vec![w("5h", Some(100.0), Some("2026-10-22T10:30:00Z")), w("7d", Some(58.0), None)], plan: None, account: None });
         assert_eq!(blocked.state, "blocked");
         assert_eq!(blocked.resets_at, parse_reset("2026-10-22T10:30:00Z"));
         assert!(blocked.windows[0].blocking && !blocked.windows[1].blocking);
-        let unknown_reset = verdict(&QuotaState::Ok { windows: vec![w("7d", Some(100.0), None)], plan: None });
+        let unknown_reset = verdict(&QuotaState::Ok { windows: vec![w("7d", Some(100.0), None)], plan: None, account: None });
         assert_eq!((unknown_reset.state.as_str(), unknown_reset.resets_at), ("blocked", None));
-        assert_eq!(verdict(&QuotaState::Ok { windows: vec![w("5h", Some(40.0), None)], plan: None }).state, "available");
+        assert_eq!(verdict(&QuotaState::Ok { windows: vec![w("5h", Some(40.0), None)], plan: None, account: None }).state, "available");
         assert_eq!(verdict(&QuotaState::Failed { reason: "网络".into() }).state, "unknown");
         assert_eq!(verdict(&QuotaState::Unauthorized { reason: "过期".into() }).state, "reauth");
         assert_eq!(verdict(&QuotaState::Unsupported { reason: "API Key".into() }).state, "unsupported");

@@ -1,6 +1,37 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "./accountDisplay.ts"
+import { accountQuotaWindows, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "./accountDisplay.ts"
+
+test("订阅本机快照不能冒充实时状态，缺失和无效到期日不猜测", () => {
+  assert.equal(subscriptionDisplay(null).status, "未提供")
+  const snapshot = { subscription_status: "active", subscription_source: "local_snapshot", expires_at: "2026-10-25T10:00:00Z", observed_at: null, reset_credits: null }
+  assert.equal(subscriptionDisplay(snapshot).status, "待核实 · 本机记录")
+  assert.match(subscriptionDisplay(snapshot).expires, /2026-10-25/)
+  assert.match(subscriptionDisplay(snapshot).note, /官网/)
+  assert.equal(subscriptionDisplay({ ...snapshot, expires_at: "invalid" }).expires, "未提供")
+  assert.equal(subscriptionDisplay({ ...snapshot, subscription_source: "live" }).status, "有效")
+  assert.equal(subscriptionDisplay({ ...snapshot, subscription_source: "live", subscription_status: "expired" }).status, "已到期")
+})
+
+test("重置卡区分零、未知与适用次数，不推断可以使用", () => {
+  assert.equal(resetCreditsText(null), "未提供")
+  assert.equal(resetCreditsText({ available_count: 1, applicable_available_count: 0 }), "剩余 1 次 · 当前可用 0 次")
+  assert.equal(resetCreditsText({ available_count: 0, applicable_available_count: null }), "剩余 0 次 · 适用次数未提供")
+  assert.equal(resetCreditsText({ available_count: null, applicable_available_count: 1 }), "总次数未提供 · 当前可用 1 次")
+})
+
+test("订阅卡片固定展示五小时和周额度，缺失不冒充满额且额外窗口不丢失", () => {
+  const weekly = { key: "7d", window_name: "weekly", used_percent: 0, resets_at: null, amount_text: null }
+  const model = { ...weekly, key: "7d-sonnet", window_name: "Sonnet", used_percent: 42 }
+  const rows = accountQuotaWindows("codex", [model, weekly])
+  assert.deepEqual(rows.map(row => row.key), ["5h", "7d", "7d-sonnet"])
+  assert.equal(rows[0].used_percent, null)
+  assert.equal(rows[1].used_percent, 0)
+  assert.equal(rows[2].used_percent, 42)
+  assert.equal(rows[0].resets_at, null)
+  assert.deepEqual(accountQuotaWindows("claude", []).map(row => row.key), ["5h", "7d"])
+  assert.deepEqual(accountQuotaWindows("zcode", [model]), [model])
+})
 
 test("额度窗口标题", () => {
   assert.equal(quotaTitle("5h", "5 小时窗口"), "5 小时额度")

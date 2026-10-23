@@ -68,7 +68,7 @@ export function SkillsTable({ items, total, selected, busy, showPlatform, onSele
             <span className="min-w-0"><Tag title={item.project ?? undefined}>{scopeLabel(item)}</Tag></span>
             <span className="truncate text-[11px] text-jolu-muted">{sourceLabel(item.source)}</span>
             <span className="min-w-0">
-              <Tag tone={item.status === "enabled" ? "on" : item.status === "disabled" ? "muted" : "danger"} title={item.issue ?? undefined}>{statusLabel(item.status)}</Tag>
+              <Tag tone={item.status === "enabled" ? "on" : (item.status === "disabled" || item.status === "unknown") ? "muted" : "danger"} title={item.issue ?? undefined}>{statusLabel(item.status)}</Tag>
             </span>
             <span title={blocked ?? (item.disabled_by === "parked" ? "已移到 Jolu 停用区，启用时移回原位置" : undefined)}>
               <SkillSwitch

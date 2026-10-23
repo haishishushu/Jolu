@@ -444,12 +444,13 @@ export function DirectoryDialog({ platform, roots, projects, onClose: onDismiss,
   onSaved: () => void
 }) {
   const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
+  const [custom, setCustom] = useState(() => roots.filter(r=>r.platform==="custom").map(r=>r.path))
   const [manual, setManual] = useState(() => projects.filter((p) => p.source === "manual").map((p) => p.path))
   const [ignored, setIgnored] = useState(() => new Set(projects.filter((p) => p.ignored).map((p) => p.path)))
   const [drafts, setDrafts] = useState<Record<string, GlobalDraft>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const globals = roots.filter((r) => r.scope === "global")
+  const globals = roots.filter((r) => r.scope === "global" && r.platform!=="custom")
   const sessions = projects.filter((p) => p.source === "session")
   const known = (path: string) => projects.find((p) => p.path === path)
 
@@ -479,6 +480,7 @@ export function DirectoryDialog({ platform, roots, projects, onClose: onDismiss,
     try {
       await skillsApi.saveDirSettings({
         projects: manual,
+        custom_dirs: custom,
         ignore: sessions.filter((p) => p.ignored !== ignored.has(p.path)).map((p) => ({ path: p.path, ignored: ignored.has(p.path) })),
         globals: globalChanges(roots, drafts),
       })
@@ -545,6 +547,8 @@ export function DirectoryDialog({ platform, roots, projects, onClose: onDismiss,
       <p className="text-[11px] text-jolu-muted">供应商：{platform === "all" ? "全部" : providerName(platform)} · 全局目录可更换，只影响 Jolu 扫描和写入的位置，{GLOBAL_DIR_NOTE}；项目目录来自会话记录和手动添加</p>
       <div className="flex max-h-[400px] flex-col gap-2 overflow-y-auto">
         {globals.map(globalRow)}
+        {custom.map(p=>row(`c-${p}`,"自定义 · 只读扫描",p,null,<JoluButton variant="outline" size="sm" disabled={saving} onClick={()=>setCustom(custom.filter(x=>x!==p))}>移除</JoluButton>))}
+        <JoluButton variant="outline" size="sm" disabled={!isTauri||saving} onClick={()=>void skillsApi.pickFolder("添加自定义扫描目录").then(p=>{if(p&&!custom.includes(p))setCustom([...custom,p])}).catch(e=>setError(errorText(e)))}>添加自定义目录</JoluButton>
         {manual.map((p) => row(`m-${p}`, "项目目录 · 手动添加", p, skillDirs(p),
           <JoluButton variant="outline" size="sm" onClick={() => setManual(manual.filter((x) => x !== p))}><X aria-hidden />移除</JoluButton>,
         ))}

@@ -1,4 +1,6 @@
+import { SelectField } from "@/components/ui/SelectField"
 import { useDialogClose } from "@/hooks/useDialogClose"
+import { OPENCODE_SERVICES } from "@/lib/providerCatalog"
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
@@ -32,7 +34,7 @@ import type { Connection, PlatformId } from "@/types"
 export interface ConnectActions {
   connections: readonly Connection[]
   readLocal: (platform: string, kind: "auth" | "api", name?: string) => Promise<{ added: number; existing: number; warnings?: string[] }>
-  add: (input: { platform: string; kind: "auth" | "api"; name: string; secret?: string | null; base_url?: string | null; model?: string | null; protocol?: ApiProtocol | null }) => Promise<void>
+  add: (input: { platform: string; kind: "auth" | "api"; name: string; secret?: string | null; base_url?: string | null; model?: string | null; service?: string | null; protocol?: ApiProtocol | null }) => Promise<void>
 }
 
 /**
@@ -50,7 +52,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const toast = useToast()
   const [platform, setPlatform] = useState(initialPlatform)
   const entry = providerEntry(platform)
-  const [mode, setMode] = useState<ConnectMode>(defaultMode(entry))
+  const [service,setService]=useState<string>("opencode-go")
+  const [mode, setMode] = useState<ConnectMode>(initialPlatform==="opencode"?"apiKey":defaultMode(entry))
   const [name, setName] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -63,7 +66,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const [secretVisible, setSecretVisible] = useState(false)
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState("")
-  const [protocol, setProtocol] = useState<ApiProtocol>("openai")
+  const [protocol, setProtocol] = useState<ApiProtocol>(entry.baseUrlChoices?.[0].protocol ?? "openai")
   const [fetching, setFetching] = useState(false)
   /** 每次地址 / 密钥变化或重新获取都递增；旧请求回来时直接丢弃，防止串到新地址 */
   const modelRequest = useRef(0)
@@ -74,7 +77,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const [confirmDiscard, setConfirmDiscard] = useState(false)
 
   const custom = platform === "custom"
-  const tabs = showsModeTabs(entry)
+  const tabs = platform!=="opencode" && showsModeTabs(entry)
   const reason = singleModeReason(entry)
   const kind = mode === "subscription" ? "auth" : "api"
   const hasDraft = Boolean(name.trim() || secret.trim() || detection)
@@ -84,7 +87,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     // 更换平台不携带原平台的密钥与检测结果（画板 29）
     modelRequest.current++
     setPlatform(next)
-    setMode(defaultMode(nextEntry))
+    setMode(next==="opencode"?"apiKey":defaultMode(nextEntry))
+    setService("opencode-go")
     setName("")
     setDetection(null)
     setBaseUrl(nextEntry.baseUrl?.value ?? "")
@@ -92,7 +96,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     setSecretVisible(false)
     setModels([])
     setModel("")
-    setProtocol("openai")
+    setProtocol(nextEntry.baseUrlChoices?.[0].protocol ?? "openai")
     setManualModel(false)
     setModelError(null)
     setError(null)
@@ -131,7 +135,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     setFetching(true)
     setModelError(null)
     try {
-      const list = await api.fetchRemoteModels(platform, baseUrl.trim(), secret.trim(), custom ? protocol : null)
+      const list = await api.fetchRemoteModels(platform, baseUrl.trim(), secret.trim(), custom || platform === "zcode" ? protocol : null)
       if (request !== modelRequest.current) return
       setModels(list)
       setManualModel(false)
@@ -168,7 +172,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
         if (!summary.added && !summary.existing) throw new Error("未读取到可保存的登录，请重新检测")
         toast.success(summary.added ? `已连接 ${entry.name}` : "该账号已连接，无需重复添加", summary.warnings?.join("；"))
       } else {
-        await actions.add({ platform, kind: "api", name: name.trim(), secret: secret.trim(), base_url: baseUrl.trim(), model: model.trim(), protocol: custom ? protocol : null })
+        await actions.add({ platform, service:platform==="opencode"?service:null, kind: "api", name: name.trim(), secret: secret.trim(), base_url: baseUrl.trim(), model: model.trim(), protocol: custom || platform === "zcode" ? protocol : null })
         toast.success(`已连接 ${entry.name}`, custom
           ? (manualModel ? "模型 ID 为手动填写，未经模型接口验证；自定义供应商不查询余额" : "已通过模型接口验证；自定义供应商不查询余额")
           : "接口可达已验证；模型调用权限与额度分别展示")
@@ -255,6 +259,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
               )}
             </Field>
 
+            {platform==="opencode" && <label className="text-xs text-jolu-text">模型服务<SelectField label="模型服务" className="mt-2 h-10 w-full" value={service} options={OPENCODE_SERVICES.map(s=>({value:s.id,label:s.label}))} onValueChange={value=>{const selected=OPENCODE_SERVICES.find(s=>s.id===value)!;setService(selected.id);setMode(selected.mode);setBaseUrl(selected.baseUrl);setSecret("");setDetection(null);invalidateModels()}} /></label>}
             {mode === "subscription" ? (
               <SubscriptionSection
                 platform={platform}
@@ -277,12 +282,13 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                     }}
                   />
                 )}
+                {entry.baseUrlChoices && <label className="text-xs text-jolu-text">服务区域与协议<SelectField label="服务区域与协议" className="mt-2 h-10 w-full" value={baseUrl} options={entry.baseUrlChoices.map(c=>({value:c.value,label:c.label}))} onValueChange={value=>{const choice=entry.baseUrlChoices!.find(c=>c.value===value)!;setBaseUrl(choice.value);setProtocol(choice.protocol);invalidateModels()}} /></label>}
                 <Field label="Base URL *" hint={entry.baseUrl?.locked ? "该服务限定官方地址，不开放编辑。" : undefined} error={urlError}>
                   {(id) => (
                     <TextInput
                       id={id}
                       value={baseUrl}
-                      readOnly={entry.baseUrl?.locked}
+                      readOnly={platform==="opencode"?service!=="openai-compatible":entry.baseUrl?.locked}
                       onChange={(value) => { setBaseUrl(value); invalidateModels() }}
                       placeholder={`请输入完整地址，例如 ${custom ? protocolBaseUrlHint(protocol) : "https://api.example.com/v1"}`}
                       mono

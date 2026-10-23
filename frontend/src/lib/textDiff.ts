@@ -4,6 +4,8 @@ export type DiffLine = { kind: "same" | "add" | "del"; text: string }
 
 /** 裁掉公共前后缀后，中间部分超过这个行数时不做 LCS（O(n·m) 内存），退化为整段替换 */
 const MAX_LINES = 5000
+/** LCS 在界面线程执行；限制总单元格，矩阵最多约 2 MB。 */
+const MAX_LCS_CELLS = 1_000_000
 
 /** 统一换行符；末尾的单个换行只是行结束符，不算一个空行 */
 function splitLines(text: string): string[] {
@@ -30,7 +32,7 @@ export function lineDiff(a: string, b: string): DiffLine[] {
 }
 
 function middleDiff(left: string[], right: string[]): DiffLine[] {
-  if (left.length > MAX_LINES || right.length > MAX_LINES) {
+  if (left.length > MAX_LINES || right.length > MAX_LINES || (left.length + 1) * (right.length + 1) > MAX_LCS_CELLS) {
     return [...left.map((text): DiffLine => ({ kind: "del", text })), ...right.map((text): DiffLine => ({ kind: "add", text }))]
   }
   return lcsDiff(left, right)

@@ -4,17 +4,30 @@ version = "0.1.0"
 description = "Jolu — Windows 桌面 AI 编程工具管理器"
 authors = ["ning"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.90"
+default-run = "jolu"
 
 [lib]
 name = "jolu_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+handoff-eval = []
+
+[[bin]]
+name = "jolu"
+path = "src/main.rs"
+
+[[bin]]
+name = "handoff_eval"
+path = "src/bin/handoff_eval.rs"
+required-features = ["handoff-eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri = { version = "~2.12", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 # 应用自更新（updater.rs）：检查端点与公钥在 tauri.conf.json，发布时私钥签名
@@ -23,7 +36,7 @@ tauri-plugin-updater = "2"
 # 桌面端重复启动时把请求转给已运行实例
 tauri-plugin-single-instance = "2"
 # 系统通知（任务 2.5）：只在 Rust 端发，前端不加通知权限
-tauri-plugin-notification = "~2.4"
+tauri-plugin-notification = "~2.7"
 # 给 updater 注入系统代理地址（UpdaterBuilder::proxy 收 url::Url）
 url = "2"
 toml = "0.8"
@@ -61,3 +74,6 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

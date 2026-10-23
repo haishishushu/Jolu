@@ -52,10 +52,20 @@ body {
   /* 画板中图标顶边在 274（720 高），比几何居中高 2px */
   padding-bottom: 4px;
   border-radius: 12px;
-  background: var(--bg);
-  opacity: 0;
+  isolation: isolate;
+  visibility: hidden;
 }
-.ready .startup { opacity: 1; animation: enter 0.32s ease-out both; }
+.startup::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--bg);
+  pointer-events: none;
+}
+.ready .startup { visibility: visible; }
+.ready .startup::before { animation: background-enter 0.32s ease-out both; }
 
 .brand { display: flex; flex-direction: column; align-items: center; gap: 20px; }
 .icon { display: block; width: 104px; height: 104px; object-fit: contain; }
@@ -107,8 +117,9 @@ button.primary { border-color: var(--accent); background: var(--accent); color: 
 button.primary:hover { filter: brightness(0.95); }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-@keyframes enter { from { opacity: 0; } }
+/* 仅背景从半透明变为不透明，品牌图标与文字始终保持原有透明度。 */
+@keyframes background-enter { from { opacity: 0.5; } to { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .ready .startup { animation: none; }
+  .ready .startup::before { animation: none; }
 }

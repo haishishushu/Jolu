@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { ArrowLeft, ChevronRight, CircleAlert, CircleCheck, Clock3, Ellipsis, LoaderCircle, LogIn, Pause, Play, RefreshCw, RotateCcw, Square, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { isTauri } from "@/lib/api"
+import { observeActiveRequest } from "@/lib/activeRequest"
 import {
   accountText, blockBanner, clock, dayTime, launchLabel, projectOf, runningMs, shortId, taskCode, taskStatus, toolName, untilText, windowLabel,
 } from "@/lib/automation"
@@ -37,19 +38,22 @@ export function TaskDetail({ detail, now, account, onBack, onAction, onEdit, onC
   const last = item.last
   const status = taskStatus(item, now, zoneName(localZone()))
   const [busy, setBusy] = useState<TaskAction | null>(null)
-  const [quota, setQuota] = useState<QuotaVerdictDto | null>(null)
-  const [quotaError, setQuotaError] = useState<string | null>(null)
+  const [quotaResult, setQuotaResult] = useState<{ connectionId: string; quota: QuotaVerdictDto | null; error: string | null } | null>(null)
+  const quota = quotaResult?.connectionId === item.connection_id ? quotaResult.quota : null
+  const quotaError = quotaResult?.connectionId === item.connection_id ? quotaResult.error : null
   const accountName = account?.name ?? run?.account ?? "所选账号"
   const sessionId = run?.session_id ?? last?.session_id ?? item.session_id
 
   useEffect(() => {
     if (!isTauri) {
-      setQuota(demoQuota(Date.now()))
+      setQuotaResult({ connectionId: item.connection_id, quota: demoQuota(Date.now()), error: null })
       return
     }
-    let alive = true
-    automationApi.quota(item.connection_id, false).then((v) => alive && setQuota(v), (e: unknown) => alive && setQuotaError(String(e)))
-    return () => { alive = false }
+    return observeActiveRequest(
+      automationApi.quota(item.connection_id, false),
+      (value) => setQuotaResult({ connectionId: item.connection_id, quota: value, error: null }),
+      (reason) => setQuotaResult({ connectionId: item.connection_id, quota: null, error: String(reason) }),
+    )
   }, [item.connection_id, run?.last_check_at])
 
   const act = async (action: TaskAction) => {

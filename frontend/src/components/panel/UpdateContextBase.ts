@@ -9,6 +9,9 @@ import type { UpdateInfo, UpdatePhase, UpdateProgress } from "@/lib/updateState"
  * context 实例」导致消费方读到 null 的分裂问题。
  */
 export interface UpdateContextValue {
+  dialogOpen: boolean
+  closeDialog: () => void
+  cancelDownload: () => void
   phase: UpdatePhase
   info: UpdateInfo | null
   progress: UpdateProgress

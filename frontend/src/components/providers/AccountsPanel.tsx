@@ -5,8 +5,9 @@ import { AlertTriangle, Check, ChevronDown, CircleAlert, Eye, EyeOff, Globe, Loc
 import { api, isTauri, type QuotaWindowDto } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { PROVIDERS, editSaveState, fallsBackToManualModel, modelFetchErrorText, protocolLabel, providerEntry, requestGate, canStartVerify, modelBusyAfter, validateConnectionName, type ModelBusy } from "@/lib/providerCatalog"
-import { filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "@/lib/accountDisplay"
+import { accountQuotaWindows, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "@/lib/accountDisplay"
 import { remainingPercent } from "@/lib/quota"
+import { removeAccountWithReplacement } from "@/lib/accountActions"
 import { useConnections } from "@/hooks/useConnections"
 import { useSettings } from "@/hooks/useSettings"
 import { useBalance, useQuota, type BalanceResult, type QuotaResult } from "@/hooks/useQuota"
@@ -151,8 +152,7 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
           islandUsers={islandUsers(removing.id, cfg.settings)}
           onClose={() => setRemoving(null)}
           onConfirm={async (replacement) => {
-            await conn.remove(removing.id)
-            if (replacement) await api.enableConnection(replacement)
+            await removeAccountWithReplacement(removing.id, replacement, { enable: api.enableConnection, remove: conn.remove })
             toast.success(`已删除 ${removing.baseName}`, replacement ? "已切换到替代账号；历史统计保留" : "配置与凭据已移除，历史统计保留")
             setRemoving(null)
             await conn.reload()
@@ -350,23 +350,29 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "da
 /** 订阅账号：套餐 / 订阅状态 / 到期时间 + 额度窗口 + 重置卡（画板 07、23） */
 function SubscriptionMetrics({ account, quota }: { account: Connection; quota: QuotaResult }) {
   const hidden = useContext(PrivacyContext)
+  const [checkingCards, setCheckingCards] = useState(false)
   const state = quota.state
   const unauthorized = state?.state === "unauthorized"
   const plan = (state?.state === "ok" ? state.plan : null) ?? (account.label && account.label !== "本机来源" ? account.label : null)
+  const windows = accountQuotaWindows(account.platformId, state?.state === "ok" ? state.windows : [])
+  const metadata = state?.state === "ok" ? state.account : null
+  const subscription = subscriptionDisplay(metadata)
   return (
     <>
       <div className="flex flex-col gap-2">
         <Stat label="等级 / 套餐" value={plan ?? "未获取"} tone={plan ? undefined : "muted"} />
-        <Stat label="订阅状态" value={unauthorized ? "未确认 · 授权过期" : "未获取"} tone={unauthorized ? "danger" : "muted"} />
-        <Stat label="到期时间" value="未获取" tone="muted" />
+        <Stat label="订阅状态" value={unauthorized ? "未确认 · 授权过期" : subscription.status} tone={unauthorized ? "danger" : metadata?.subscription_source === "live" ? undefined : "muted"} />
+        <Stat label={metadata?.subscription_source === "local_snapshot" ? "到期时间 · 本机记录" : "到期时间"} value={subscription.expires} tone={subscription.expires === "未提供" ? "muted" : undefined} />
       </div>
-      {state?.state === "ok" && state.windows.length > 0 ? (
+      {subscription.note && <p className="text-[10px] leading-relaxed text-jolu-muted">{subscription.note}</p>}
+      {windows.length > 0 && (
         <div className="grid grid-cols-1 gap-3">
-          {state.windows.slice(0, 2).map((window) => <QuotaBar key={window.key} window={window} />)}
+          {windows.map((window) => <QuotaBar key={window.key} window={window} />)}
         </div>
-      ) : (
+      )}
+      {state?.state !== "ok" && (
         <div className="rounded-lg bg-jolu-side px-3 py-2.5 text-[11px] text-jolu-muted">
-          {quota.loading && !state ? "正在读取额度…" : state && state.state !== "ok" ? `额度 · ${unauthorized ? "账号认证已失效，重新登录后同步" : `未提供（${hidden ? redactAccountMessage(state.reason) : state.reason}）`}` : "额度 · 未提供"}
+          {quota.loading && !state ? "正在读取额度…" : state ? `额度 · ${unauthorized ? "账号认证已失效，重新登录后同步" : `未提供（${hidden ? redactAccountMessage(state.reason) : state.reason}）`}` : "额度 · 未提供"}
         </div>
       )}
       {quota.stale && quota.failure && (
@@ -374,9 +380,13 @@ function SubscriptionMetrics({ account, quota }: { account: Connection; quota: Q
           <AlertTriangle aria-hidden className="size-3.5" />刷新失败 · {formatSyncedAt(quota.fetchedAt).replace("同步", "数据")}
         </p>
       )}
-      <div className="flex h-8 items-center gap-2 rounded-[7px] bg-jolu-side px-2.5 text-[11px] text-jolu-muted">
+      <div className="flex min-h-10 items-center gap-2 rounded-[7px] bg-jolu-side px-2.5 py-2 text-[11px] text-jolu-muted">
         <Ticket aria-hidden className="size-[15px] shrink-0" />
-        重置卡 · 暂不支持查询
+        <div className="min-w-0 flex-1"><span className="block">重置卡</span><span className="block pt-1 text-[10px]">{account.platformId === "codex" ? resetCreditsText(metadata?.reset_credits) : "当前来源不支持查询"}</span></div>
+        {account.platformId === "codex" && <JoluButton size="sm" variant="soft" aria-label="查询重置卡" disabled={!isTauri || checkingCards || quota.loading} onClick={() => {
+          setCheckingCards(true)
+          void quota.refresh().finally(() => setCheckingCards(false))
+        }}>{checkingCards ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}查询</JoluButton>}
       </div>
     </>
   )
@@ -458,7 +468,7 @@ function CardActions({ account, paused, refresh, canPromote, onPromote, onEdit, 
       <span className="w-full truncate text-[10px] text-jolu-muted">
         {paused ? "暂停查询" : refresh?.fetchedAt ? formatSyncedAt(refresh.fetchedAt, new Date(), account.kind === "api" ? "余额" : "") : account.lastSyncText}
       </span>
-      {canPromote && <Tip label="设为当前"><JoluButton size="sm" variant="soft" className="!w-8 !px-0" aria-label="设为当前" disabled={!isTauri} onClick={onPromote}><Check aria-hidden /><span className="sr-only">设为当前</span></JoluButton></Tip>}
+      {canPromote && <Tip label="设置为使用"><JoluButton size="sm" variant="soft" className="!w-8 !px-0" aria-label="设置为使用" disabled={!isTauri} onClick={onPromote}><Check aria-hidden /><span className="sr-only">设置为使用</span></JoluButton></Tip>}
       {refresh && <RefreshButton label={account.kind === "api" ? "刷新余额" : "刷新当前账号"} result={refresh} />}
       {/* 编辑入口位置待确认：Jolu.pen 画板 27 有编辑弹窗，但账号卡片上未画入口 */}
       <Tip label="编辑连接">

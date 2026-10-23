@@ -6,12 +6,16 @@
 //!
 //! 包含双窗口、托盘、本地会话采集、SQLite 统计与连接只读查询。
 
+mod opencode;
+mod opencode_usage;
 mod platforms;
 mod provider_key;
 mod source_store;
 mod native_parse;
 mod native_sources;
 mod collector;
+#[cfg(all(debug_assertions, feature = "handoff-eval"))]
+pub mod handoff_eval;
 mod context_menu;
 mod tray_summary;
 mod session_presence;
@@ -37,6 +41,8 @@ mod watcher;
 mod validation;
 mod updater;
 mod cli_apply;
+mod auth_snapshot;
+mod current_connection;
 mod login_detect;
 mod usage_stats;
 mod session_threads;
@@ -381,9 +387,7 @@ enum MainIntent {
     Overview { settings: settings::Settings },
     Settings { section: String },
     About { version: String },
-    /// 任务 2.5：点击任务通知后打开自动化页并选中该任务。当前插件版本（tauri-plugin-notification 2.4.x）
-    /// 不支持 Windows 点击回调，暂未构造；前端 automation 意图已就绪，升级 Tauri 后由点击回调接上
-    #[allow(dead_code)]
+    /// 点击任务通知后打开自动化页并选中该任务。
     Automation { task_id: i64 },
 }
 
@@ -1189,7 +1193,7 @@ async fn connection_quota(app: tauri::AppHandle, db: State<'_, Db>, id: String, 
         return Ok(quota::QuotaState::Failed { reason: "连接不存在".into() });
     };
     // 自定义供应商（任务 3.4）不查额度，与本机来源平台一样返回「不支持」
-    if platforms::native(&c.platform) || c.platform == "custom" {
+    if platforms::uses_native_quota(&c.platform,&c.kind) || c.platform == "custom" {
         if c.platform == "grok" && c.kind == "auth" {
             return tauri::async_runtime::spawn_blocking(move || cached_query(&QUOTA_CACHE,id,force,quota_cache_outcome,grok_quota::local_grok_quota)).await.map_err(|e|e.to_string());
         }
@@ -1355,7 +1359,7 @@ async fn connection_balance(app: tauri::AppHandle, db: State<'_, Db>, id: String
         return Ok(quota::BalanceState::Failed { reason: "连接不存在".into() });
     };
     // 自定义供应商（任务 3.4）不查余额：显示「不支持查询」
-    if platforms::native(&c.platform) || c.platform == "custom" {
+    if platforms::uses_native_quota(&c.platform,&c.kind) || c.platform == "custom" {
         return Ok(quota::BalanceState::Unsupported {reason:platforms::limitation(&c.platform)});
     }
     let Some(secret) = c.secret.filter(|s| !s.trim().is_empty()) else {
@@ -1535,11 +1539,11 @@ async fn list_connections(db: State<'_, DbRead>) -> Result<Vec<connections::Conn
 #[tauri::command]
 async fn fetch_remote_models(platform: String, base_url: String, secret: String, protocol: Option<String>) -> Result<Vec<String>, String> {
     // Gemini / Grok 走各自官方 OpenAI 兼容的 /models（Bearer 鉴权）；自定义供应商按所选协议鉴权
-    if !matches!(platform.as_str(), "claude" | "codex" | "gemini" | "grok" | "custom") {
+    if !matches!(platform.as_str(), "claude" | "codex" | "gemini" | "grok" | "custom" | "zcode" | "opencode") {
         return Err("不支持的平台".into());
     }
     // 协议只对自定义供应商有效，其他平台忽略传入值（任务 4.3 再按需放开）
-    let protocol = if platform == "custom" { protocol } else { None };
+    let protocol = if matches!(platform.as_str(),"custom"|"zcode"|"opencode") { protocol } else { None };
     tauri::async_runtime::spawn_blocking(move || connections::fetch_models(&platform, protocol.as_deref(), &base_url, &secret))
         .await
         .map_err(|e| e.to_string())?
@@ -1579,7 +1583,14 @@ async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String)
         let _=app.emit("connections-changed",());
         return Ok("官方 Key 检测通过；仅保存连接，不修改外部应用登录或授予余额权限".into());
     }
-    if platforms::native(&info.platform) {
+    if matches!(info.platform.as_str(),"zcode"|"opencode") && info.kind=="api" {
+        let secret=info.secret.clone().ok_or("该连接没有保存 API Key")?;
+        tauri::async_runtime::spawn_blocking(move || quota::validate_connection(&info.platform,"api",&secret,info.base_url.as_deref(),info.model.as_deref())).await.map_err(|e|e.to_string())??;
+        let key=id.clone();with_database(db.0.clone(),move|conn|connections::set_paused(conn,&key,false)).await?;
+        invalidate_network_cache(&id);let _=app.emit("connections-changed",());let _=app.emit("refresh-requested",());
+        return Ok("已恢复连接查询，原工具配置保持原样".into());
+    }
+    if platforms::native(&info.platform) && info.kind=="auth" {
         native_sources::check(&id,&info.platform)?;
         let key=id.clone();
         with_database(db.0.clone(),move |conn|connections::set_paused(conn,&key,false)).await?;
@@ -1590,16 +1601,27 @@ async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String)
     }
     let secret = info.secret.clone().ok_or("该连接没有保存凭证，无法写入 CLI 配置")?;
     let backup_dir = data_paths(&app).map_err(|e| e.to_string())?.0.join("cli-backups");
-    let note = tauri::async_runtime::spawn_blocking(move || {
-        cli_apply::apply_to_cli(&info.platform, &info.kind, &secret, info.base_url.as_deref(), &backup_dir)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    with_database(db.0.clone(), {
-        let id = id.clone();
-        move |conn| connections::set_paused(conn, &id, false)
-    })
-    .await?;
+    let pool = db.0.clone();
+    let snapshot_id = id.clone();
+    let note = tauri::async_runtime::spawn_blocking(move || cli_apply::serialized_switch(|| {
+        // 保持写数据库锁到 CLI 写入和连接状态更新结束，其他窗口不能删除或替换目标。
+        let conn = pool.lock().map_err(|_| "连接数据库锁不可用")?;
+        let current = connections::creds_of(&conn, &snapshot_id).map_err(|e| e.to_string())?.ok_or("连接不存在")?;
+        if current.secret.as_deref() != Some(secret.as_str()) || current.platform != info.platform || current.kind != info.kind || current.base_url != info.base_url {
+            return Err("连接在准备期间已变化，请重试".into());
+        }
+        auth_snapshot::preserve_current(&conn, &info.platform)?;
+        // 保全时可能已安全同步同账号的新 token，必须使用最新的完整授权。
+        let current = connections::creds_of(&conn, &snapshot_id).map_err(|e| e.to_string())?.ok_or("连接不存在")?;
+        let secret = current.secret.as_deref().ok_or("该连接没有保存凭证")?;
+        let snapshot = if current.platform == "codex" && current.kind == "auth" {
+            auth_snapshot::capture(&conn, &snapshot_id, &current.platform, secret)?;
+            auth_snapshot::load(&conn, &snapshot_id, secret)?
+        } else { None };
+        let note = cli_apply::apply_to_cli(&current.platform, &current.kind, secret, current.base_url.as_deref(), &backup_dir, snapshot.as_ref())?;
+        connections::set_paused(&conn, &snapshot_id, false)?;
+        Ok(note)
+    })).await.map_err(|e| e.to_string())??;
     invalidate_network_cache(&id);
     let _ = app.emit("connections-changed", ());
     Ok(note.message)
@@ -1779,7 +1801,13 @@ async fn fetch_credentials(app: tauri::AppHandle, db: State<'_, Db>, id: String)
             let source=native_sources::check(&fetch_id,&info.platform)?;
             return Ok(connections::FetchResult {ok:true,masked:None,message:"本机来源已重新检测；未读取或改写外部登录凭证".into(),scanned:vec![source.path.display().to_string()],changed:false});
         }
-        connections::fetch_local(conn, &fetch_id).map_err(|e| e.to_string())
+        let result = connections::fetch_local(conn, &fetch_id).map_err(|e| e.to_string())?;
+        if result.ok {
+            if let Some(info) = connections::creds_of(conn, &fetch_id).map_err(|e| e.to_string())? {
+                if info.kind == "auth" { auth_snapshot::capture(conn, &fetch_id, &info.platform, info.secret.as_deref().unwrap_or_default())?; }
+            }
+        }
+        Ok(result)
     })
     .await?;
     if result.ok {
@@ -1834,25 +1862,10 @@ async fn replace_api_key(
 #[tauri::command]
 async fn current_connections(db: State<'_, Db>) -> Result<Vec<String>, String> {
     if validation::isolated() { return Ok(vec![]); }
-    let local: Vec<(&'static str, &'static str, String)> = tauri::async_runtime::spawn_blocking(|| {
-        let mut found = Vec::new();
-        for platform in ["claude", "codex"] {
-            for kind in ["api", "auth"] {
-                if let Some(secret) = creds::read_secret(platform, kind) { found.push((platform, kind, secret)); }
-            }
-        }
-        found
-    }).await.map_err(|e| e.to_string())?;
+    let local = tauri::async_runtime::spawn_blocking(current_connection::read_local)
+        .await.map_err(|error| error.to_string())?;
     with_database(db.0.clone(), move |conn| {
-        let mut ids = Vec::new();
-        for platform in ["claude", "codex"] {
-            let hit = local.iter()
-                .filter(|(p, _, _)| *p == platform)
-                .find_map(|(p, kind, secret)| connections::find_by_secret(conn, p, kind, secret).transpose())
-                .transpose()?;
-            if let Some(id) = hit { ids.push(id); }
-        }
-        Ok(ids)
+        local.iter().filter_map(|local| connections::find_current_local(conn, local).transpose()).collect()
     }).await
 }
 
@@ -2547,6 +2560,7 @@ mod tray_icon_tests {
                 resets_at: None,
             }).collect(),
             plan: None,
+            account: None,
         }
     }
 
@@ -2607,6 +2621,13 @@ fn handle_tray_menu(app: &tauri::AppHandle, id: &str, island: Option<&str>) -> R
         "refresh" => {
             if TRAY_REFRESHING.swap(true, Ordering::Relaxed) { return Ok(()); }
             refresh_tray_menu(app);
+            if validation::isolated() {
+                // 保留合成网关与界面的刷新，只跳过本机日志采集。
+                let _ = app.emit("island-refresh", ());
+                let _ = app.emit("refresh-requested", ());
+                finish_tray_refresh_after_cooldown(app.clone());
+                return Ok(());
+            }
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let result = with_database(app.state::<Db>().0.clone(), |conn| {
@@ -2766,8 +2787,10 @@ pub fn run() {
             data_files::confirm_import,
             data_files::discard_import,
             // 任务 2.4 结束
+            updater::set_auto_check_updates,
             updater::check_app_update_available,
             updater::download_app_update,
+            updater::cancel_app_update_download,
             updater::install_downloaded_update_and_restart,
             // 任务 2.1 开始
             set_default_page,
@@ -2811,6 +2834,7 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            notify::register_click_handler(&handle)?;
             app.manage(updater::UpdateDownloadState::default());
             let automatic = std::env::args_os().any(|arg| arg == "--autostart");
             if !automatic {

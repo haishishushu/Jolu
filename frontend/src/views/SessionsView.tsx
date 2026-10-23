@@ -1,5 +1,9 @@
 import { useContentMotion } from "@/lib/motion"
 import { LoadingSurface } from "@/components/ui/LoadingSurface"
+import { CompressDialog } from '@/components/sessions/CompressDialog'
+import { HandoffPreview } from '@/components/sessions/HandoffPreview'
+import { handoffApi } from '@/lib/handoffApi'
+import type { HandoffResult, HandoffState } from '@/lib/sessionHandoff'
 import { useEffect, useMemo, useState } from "react"
 import { ArrowDownLeft, ArrowDownWideNarrow, ArrowUpRight, Database, Files, Layers, MessagesSquare, RefreshCw, RotateCcw, Search, Target } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -28,7 +32,7 @@ export interface SessionTarget {
 
 /**
  * 会话线程（Jolu.pen 模块 D，画板 40–57）：顶部统计、搜索与筛选、项目 → 会话树与只读详情。
- * 压缩会话（画板 48–55）需要调用模型，暂标「待接入」。
+ * 压缩会话通过独立 CLI 调用生成交接草稿，不修改原会话。
  */
 export function SessionsView({ active, target, onDrillUsage, onCreateAutomation }: {
   active: boolean
@@ -47,6 +51,9 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
   const [search, setSearch] = useState("")
   const [selected, setSelected] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [compressing,setCompressing]=useState<SessionItemDto|null>(null)
+  const [handoff,setHandoff]=useState<{result:HandoffResult;name:string;target:string;session:SessionItemDto}|null>(null)
+  const [handoffState,setHandoffState]=useState<HandoffState|null>(null)
   const [continuing, setContinuing] = useState<SessionItemDto | null>(null)
   const [automating, setAutomating] = useState<SessionItemDto | null>(null)
   const [syncedAt, setSyncedAt] = useState(() => Date.now())
@@ -153,7 +160,7 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
   const minutes = Math.floor((Date.now() - syncedAt) / 60_000)
 
   return (
-    <div className="flex w-full flex-col gap-3">
+    <div className="relative flex w-full flex-col gap-3">
       <div className="flex h-[92px] gap-2">
         <Stat selected icon={<MessagesSquare />} label="线程" value={known ? String(totals.threads) : "—"} note="筛选内去重会话" />
         <Stat icon={<Layers />} label="消耗 Token" value={known ? formatTokens(totals.consumption) : "—"} note={totals.unknown ? `输入 + 输出 · ${totals.unknown} 条未知` : "输入 + 输出"} />
@@ -238,6 +245,7 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
                 session={current}
                 connections={conn.connections}
                 onDrillUsage={() => onDrillUsage(current)}
+                onCompress={() => setCompressing(current)}
                 onContinue={() => setContinuing(current)}
                 onCreateAutomation={() => setAutomating(current)}
               />
@@ -247,6 +255,8 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
       </div>
       <p className="text-[10px] text-jolu-muted">顶部统计跟随当前筛选；消耗 = 输入 + 输出，缓存输入已计入输入；无法确认的账号仍标为“未归属账号”。</p>
 
+      {compressing && <CompressDialog session={compressing} onClose={()=>setCompressing(null)} onResult={(result,name,target)=>{setHandoff({result,name,target,session:compressing});setCompressing(null);setHandoffState(null);if(isTauri)void handoffApi.state(compressing.platform,compressing.session_id).then(setHandoffState).catch(()=>{})}}/>}
+      {handoff && <HandoffPreview {...handoff} fileName={handoff.name} state={handoffState} onClose={()=>setHandoff(null)} onUpdate={()=>{setCompressing(handoff.session);setHandoff(null)}}/>}
       {continuing && (
         <ContinueDialog
           session={continuing}

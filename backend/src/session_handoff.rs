@@ -1321,6 +1321,12 @@ struct CliExecutor {
     totals: Arc<Totals>,
 }
 
+#[cfg(all(debug_assertions, feature = "handoff-eval"))]
+pub(crate) fn eval_executor(platform: &str) -> Result<impl Executor, String> {
+    let exe = crate::session_threads::find_executable(platform).ok_or("未找到所选 CLI")?;
+    Ok(CliExecutor { platform: platform.into(), exe, args: executor_args(platform, None)?, cancel: Arc::new(AtomicBool::new(false)), pid: Arc::new(Mutex::new(None)), totals: Arc::new(Totals::default()) })
+}
+
 fn map_stop(s: &str) -> StopReason {
     match s {
         "end_turn" | "stop_sequence" => StopReason::EndTurn,
@@ -1663,7 +1669,7 @@ struct Loaded {
 fn load_session(db: &Shared, platform: &str, session_id: &str) -> Result<Option<Loaded>, String> {
     let path = with_conn(db, |c| crate::session_threads::source_path(c, platform, session_id).map_err(|e| e.to_string()))?;
     let Some(path) = path else { return Ok(None) };
-    let lines = crate::session_threads::read_lines(&path);
+    let lines = crate::session_threads::read_lines(&path)?;
     let messages = crate::session_threads::parse_detail(platform, &lines);
     let cwd = crate::session_threads::read_cwd(&path);
     Ok(Some(Loaded { path, lines, messages, cwd }))
@@ -2057,6 +2063,7 @@ pub async fn handoff_render(app: AppHandle, platform: String, session_id: String
         let latest = with_conn(&db, |c| latest_handoff(c, &platform, &session_id).map_err(|e| e.to_string()))?.ok_or("还没有交接版本，请先压缩会话")?;
         let lines = with_conn(&db, |c| crate::session_threads::source_path(c, &platform, &session_id).map_err(|e| e.to_string()))?
             .map(|p| crate::session_threads::read_lines(&p))
+            .transpose()?
             .unwrap_or_default();
         let meta = RenderMeta {
             project,

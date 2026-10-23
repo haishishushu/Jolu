@@ -3,9 +3,8 @@
 //! - 只在 Rust 端发通知，前端没有通知权限；Windows 没有运行时通知权限，画板上的「引导入口」不做。
 //! - 免打扰期间一律不弹；任务通知按「额度恢复与任务继续」「任务完成与失败」两个开关分别判断。
 //! - 「需要处理」和「等待超时」归入失败类通知；任务已取消的收尾不通知。
-//! - 当前插件版本（tauri-plugin-notification 2.4.x，与 tauri 2.11 兼容）不支持 Windows 点击回调，
-//!   按简报退一步：不注册点击回调，正文写清任务名。桌面端点击回调要到插件 2.5 起才有（要求 tauri 2.12），
-//!   以后单独升级 Tauri 时再接上 `MainIntent::Automation`（前端的 automation 意图已就绪）。
+//! - 使用 notification 2.7 的桌面点击回调（2.6 首次引入），任务正文点击通过 MainIntent 打开任务详情。
+//!   回调必须在发送通知前注册；仅支持应用仍在运行时，完全退出后的系统通知不会冷启动应用。
 //! - 开发模式下 Windows 通知显示 PowerShell 的名字和图标（插件只给安装版设置 AppUserModelID），属已知限制。
 
 use std::collections::HashMap;
@@ -25,8 +24,27 @@ pub enum TaskNotice {
 
 /// 失败原因在通知正文里最多保留的字数
 const REASON_LIMIT: usize = 60;
-/// 通知附带的任务 ID：当前插件版本不支持 Windows 点击回调，暂时只随通知带上，升级后由点击回调读取
+/// 通知附带的任务 ID；余额通知不携带任务 ID，因此不会触发任务跳转。
 const TASK_KEY: &str = "task_id";
+
+fn clicked_task_id(action: &tauri_plugin_notification::ActionPerformed) -> Option<i64> {
+    if action.action_id() != "tap" { return None; }
+    action.notification()?.extra().get(TASK_KEY)?.as_i64().filter(|id| *id > 0)
+}
+
+/// setup 中注册一次，早于自动化调度启动；窗口操作交回主线程。
+pub fn register_click_handler(app: &AppHandle) -> tauri_plugin_notification::Result<()> {
+    let handle = app.clone();
+    app.notification().on_action(move |action| {
+        let Some(task_id) = clicked_task_id(action) else { return };
+        let target = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            crate::show_main_with_intent(&target, crate::MainIntent::Automation { task_id });
+        }) {
+            eprintln!("[通知] 打开任务失败：{error}");
+        }
+    })
+}
 
 /// 遮蔽失败原因里可能带出的凭证：直接用会话交接的共享规则（`handoff_facts::redact`），两处口径一致
 pub fn mask_secrets(text: &str) -> String {
@@ -88,8 +106,7 @@ pub fn balance_message(connection_name: &str, remaining: f64, currency: &str) ->
     ("余额偏低".into(), format!("{connection_name}剩余 {remaining:.2} {}，低于提醒阈值。", currency.trim().to_ascii_uppercase()))
 }
 
-/// 插件 2.4 在后台任务里 `let _ = notification.show()`，内部丢弃系统层的发送结果：系统禁用通知
-/// （或 Jolu 的通知被关掉）时不会返回错误，这里也就不会记录；这里只能记录插件准备通知时的错误
+/// Windows 实际发送与点击监听在插件后台线程进行；这里只能记录通知准备阶段返回的错误。
 fn show(app: &AppHandle, title: String, body: String, task_id: Option<i64>) {
     let mut builder = app.notification().builder().title(title).body(body);
     if let Some(id) = task_id { builder = builder.extra(TASK_KEY, id); }
@@ -121,6 +138,22 @@ pub fn check_balance(app: &AppHandle, connection_id: &str, connection_name: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_click_requires_tap_and_positive_integer_id() {
+        let action = |kind: &str, extra: serde_json::Value| {
+            serde_json::from_value::<tauri_plugin_notification::ActionPerformed>(serde_json::json!({
+                "actionId": kind, "notification": { "id": 1, "extra": extra }
+            })).unwrap()
+        };
+        assert_eq!(clicked_task_id(&action("tap", serde_json::json!({"task_id": 42}))), Some(42));
+        for extra in [serde_json::json!({}), serde_json::json!({"task_id": 0}), serde_json::json!({"task_id": -1}), serde_json::json!({"task_id": "42"}), serde_json::json!({"task_id": 1.5})] {
+            assert_eq!(clicked_task_id(&action("tap", extra)), None);
+        }
+        assert_eq!(clicked_task_id(&action("dismiss", serde_json::json!({"task_id": 42}))), None);
+        let missing = serde_json::from_value(serde_json::json!({"actionId": "tap"})).unwrap();
+        assert_eq!(clicked_task_id(&missing), None);
+    }
 
     fn settings() -> Settings {
         Settings::default()

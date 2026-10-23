@@ -127,6 +127,13 @@ pub const SPECS: &[ToolSpec] = &[
         verified: true,
         readonly_subdirs: &[(".system", Scope::System)],
     },
+    ToolSpec { id:"gemini", name:"Gemini", global:&[".agents/skills",".gemini/skills"], project:&[".gemini/skills"], home_env:None, toggle:Toggle::GeminiSettings, writable:true, require_name:false, verified:true, readonly_subdirs:&[] },
+    ToolSpec { id:"opencode", name:"OpenCode", global:&[".claude/skills",".agents/skills",".config/opencode/skills"], project:&[".opencode/skills",".claude/skills",".agents/skills"], home_env:None, toggle:Toggle::OpenCodePermission, writable:true, require_name:false, verified:true, readonly_subdirs:&[] },
+    ToolSpec { id:"qoder", name:"Qoder", global:&[".qoder-cn/skills",".qoder/skills"], project:&[".qoder/skills"], home_env:None, toggle:Toggle::None, writable:true, require_name:false, verified:true, readonly_subdirs:&[] },
+    ToolSpec { id:"trae", name:"Trae", global:&[".trae/skills",".trae-cn/skills"], project:&[".trae/skills"], home_env:None, toggle:Toggle::None, writable:true, require_name:false, verified:true, readonly_subdirs:&[] },
+    ToolSpec { id:"zcode", name:"ZCode", global:&[".zcode/skills"], project:&[".zcode/skills"], home_env:None, toggle:Toggle::None, writable:true, require_name:false, verified:true, readonly_subdirs:&[] },
+    ToolSpec { id:"workbuddy", name:"WorkBuddy", global:&[".codebuddy/skills"], project:&[".codebuddy/skills"], home_env:None, toggle:Toggle::None, writable:false, require_name:false, verified:true, readonly_subdirs:&[] },
+    ToolSpec { id:"custom", name:"自定义", global:&[], project:&[], home_env:None, toggle:Toggle::None, writable:false, require_name:false, verified:false, readonly_subdirs:&[] },
 ];
 
 pub fn spec(id: &str) -> Option<&'static ToolSpec> {
@@ -237,11 +244,12 @@ fn roots(h: &Homes, cfg: &Config, platform: &str, projects: &[PathBuf]) -> Vec<R
         parked: false,
         own,
     };
+    if platform == "custom" { return cfg.custom_dirs.iter().map(|p|root(Scope::Global,None,PathBuf::from(p),true,vec![],false)).collect(); }
     let mut out = Vec::new();
     let last = spec.global.len().saturating_sub(1);
     for (i, dir) in spec.global.iter().enumerate() {
         if i < last {
-            out.push(root(Scope::Global, None, rel(&h.user, dir), !spec.writable, Vec::new(), false));
+            out.push(root(Scope::Global, None, rel(&h.user, dir), !spec.writable || matches!(platform,"gemini"|"opencode"), Vec::new(), false));
             continue;
         }
         let path = own_global(h, cfg, spec);
@@ -254,7 +262,8 @@ fn roots(h: &Homes, cfg: &Config, platform: &str, projects: &[PathBuf]) -> Vec<R
     }
     for p in projects {
         for dir in spec.project {
-            out.push(root(Scope::Project, Some(p), rel(p, dir), !spec.writable, Vec::new(), false));
+            let shared = platform == "opencode" && *dir != ".opencode/skills";
+            out.push(root(Scope::Project, Some(p), rel(p, dir), !spec.writable || shared, Vec::new(), false));
         }
     }
     out
@@ -426,7 +435,11 @@ fn load_config(dir: &Path) -> Config {
             }
             cfg
         }
-        Err(_) => {
+        Err(error) => {
+            if let Err(io) = fs::read(&path) {
+                if let Ok(mut broken) = BROKEN_CONFIG.lock() { broken.insert(key, (file_signature(&path), format!("无法读取 Skills 配置：{io}（{error}）；未修改原文件"))); }
+                return Config::default();
+            }
             mark_broken(key, &path);
             Config::default()
         }
@@ -860,6 +873,65 @@ fn unpark(cfg: &mut Config, dir: &Path, data: &Path) -> Result<String, String> {
     Ok(entry.original)
 }
 
+// 名称级开关会作用于同名副本；遇到无法解释的配置拒绝改写。
+fn json_skill_path(h: &Homes, spec: &ToolSpec, root: &Root) -> PathBuf {
+    match (spec.toggle, root.project.as_ref()) {
+        (Toggle::GeminiSettings, Some(p)) => p.join(".gemini/settings.json"),
+        (Toggle::OpenCodePermission, Some(p)) => p.join("opencode.json"),
+        (Toggle::GeminiSettings, None) => tool_home(h,spec).join("settings.json"),
+        _ => tool_home(h,spec).join("opencode.json"),
+    }
+}
+fn read_skill_json(path: &Path) -> Result<serde_json::Value,String> {
+    // 不把 JSONC 当作空配置覆盖；保留原文件让用户在原工具处理。
+    if path.with_extension("jsonc").exists() { return Err("检测到 JSONC 配置，请在原工具中管理 Skills 启停".into()); }
+    match fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str(s.trim_start_matches('\u{feff}')).map_err(|_|format!("{} 格式无法解析，未修改",path.display())),
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(format!("无法读取 {}：{e}",path.display())),
+    }
+}
+fn json_skill_off(h:&Homes, spec:&ToolSpec, root:&Root, name:&str) -> Result<bool,String> {
+    let path=json_skill_path(h,spec,root);
+    let v=read_skill_json(&path)?;
+    let local=match spec.toggle {
+        Toggle::GeminiSettings => v.pointer("/skills/enabled")==Some(&serde_json::json!(false)) || v.pointer("/skills/disabled").and_then(|x|x.as_array()).is_some_and(|a|a.iter().any(|n|n.as_str()==Some(name))),
+        Toggle::OpenCodePermission => {
+            let p=v.pointer("/permission/skill");
+            if p.and_then(|p|p.as_object()).is_some_and(|m|m.keys().any(|k|k!="*"&&(k.contains('*')||k.contains('?')))){return Err("存在无法静态判定的 Skills 通配符规则，请在原工具核对".into())}
+            let rule=p.and_then(|p|p.get(name)).or_else(||p.and_then(|p|p.get("*"))).or(p.filter(|p|p.is_string())).and_then(|p|p.as_str());
+            if rule.is_none() && root.project.is_some(){let mut global=root.clone();global.project=None;return json_skill_off(h,spec,&global,name)}
+            rule.is_some_and(|p|p!="allow")
+        }, _=>false
+    };
+    if !local && root.project.is_some() && spec.toggle==Toggle::GeminiSettings {
+        let mut global=root.clone();global.project=None; return json_skill_off(h,spec,&global,name);
+    }
+    Ok(local)
+}
+fn set_json_skill(h:&Homes,spec:&ToolSpec,root:&Root,name:&str,enabled:bool,data:&Path)->Result<(),String>{
+    let path=json_skill_path(h,spec,root); let mut v=read_skill_json(&path)?;
+    let object=v.as_object_mut().ok_or("配置根节点必须是对象，未修改")?;
+    if spec.toggle==Toggle::GeminiSettings {
+        let skills=object.entry("skills").or_insert_with(||serde_json::json!({})).as_object_mut().ok_or("skills 格式无效")?;
+        if enabled && skills.get("enabled")==Some(&serde_json::json!(false)){return Err("Skills 总开关已关闭，请在原工具中启用".into())}
+        let disabled=skills.entry("disabled").or_insert_with(||serde_json::json!([])).as_array_mut().ok_or("skills.disabled 必须是数组")?;
+        disabled.retain(|v|v.as_str()!=Some(name)); if !enabled {disabled.push(serde_json::json!(name));}
+        if enabled && root.project.is_some(){let mut global=root.clone();global.project=None;if json_skill_off(h,spec,&global,name)?{return Err("全局配置已停用此 Skill，请先在全局范围启用".into())}}
+    }else{
+        let permission=object.entry("permission").or_insert_with(||serde_json::json!({})).as_object_mut().ok_or("permission 为全局规则，请在原工具中修改")?;
+        let skills=permission.entry("skill").or_insert_with(||serde_json::json!({})).as_object_mut().ok_or("permission.skill 为全局规则，请在原工具中修改")?;
+        if skills.keys().any(|k|k!=name&&(k.contains('*')||k.contains('?'))) { return Err("存在通配符权限规则，请在原工具中管理，避免改变规则优先级".into()); }
+        if enabled {
+            if root.project.is_some(){let mut global=root.clone();global.project=None;if json_skill_off(h,spec,&global,name)?{return Err("全局权限仍限制此 Skill，请在原工具中调整".into())}}
+            skills.remove(name);
+        }else{skills.insert(name.into(),serde_json::json!("deny"));}
+    }
+    backup_file(&path,&data.join("skill-backups/config"))?;
+    if let Some(parent)=path.parent(){fs::create_dir_all(parent).map_err(|e|e.to_string())?;}
+    write_atomic(&path,serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?.as_bytes())
+}
+
 /// 启停这一份副本，返回启停后的目录
 fn set_enabled_impl(h: &Homes, cfg: &mut Config, root: &Root, dir: &Path, name: &str, enabled: bool, data: &Path) -> Result<String, String> {
     let spec = spec(root.platform).ok_or_else(|| format!("{} 暂不支持启停 Skills", root.platform))?;
@@ -916,7 +988,8 @@ fn set_enabled_impl(h: &Homes, cfg: &mut Config, root: &Root, dir: &Path, name: 
             write_atomic(&path, doc.to_string().as_bytes())?;
             Ok(dir.display().to_string())
         }
-        Toggle::GeminiSettings | Toggle::OpenCodePermission | Toggle::None => Err(format!("{} 暂不支持启停 Skills", spec.id)),
+        Toggle::GeminiSettings | Toggle::OpenCodePermission => { set_json_skill(h,spec,root,name,enabled,data)?; Ok(dir.display().to_string()) },
+        Toggle::None => Err(format!("{} 的启停由原工具管理", spec.name)),
     }
 }
 
@@ -1006,10 +1079,11 @@ fn collect(h: &Homes, cfg: &Config, spec: &'static ToolSpec, errors: &mut Vec<Sc
                         None
                     }
                 }
+                None if matches!(spec.toggle,Toggle::GeminiSettings|Toggle::OpenCodePermission) => match json_skill_off(h,spec,&raw.root,&name) { Ok(true)=>Some("name"),Ok(false)=>None,Err(e)=>{errors.push(ScanError{path:raw.dir.display().to_string(),reason:e});Some("tool")} },
                 None => (spec.toggle == Toggle::Park && claude_tool_off(h, spec, &raw.root, &name)).then_some("tool"),
             }
         };
-        let enabled = disabled_by.is_none();
+        let enabled = disabled_by.is_none() && spec.toggle != Toggle::None;
         let invalid = validate_front(platform, &raw.front);
         // 停用区里的副本不会被工具加载，不参与同名判断
         let conflict = if raw.root.parked {
@@ -1029,6 +1103,7 @@ fn collect(h: &Homes, cfg: &Config, spec: &'static ToolSpec, errors: &mut Vec<Sc
             (Some(reason), _) => ("invalid", Some(reason)),
             (None, Some(reason)) => ("conflict", Some(reason)),
             (None, None) if disabled_by == Some("tool") => ("disabled", Some(TOOL_DISABLED.split('；').next().unwrap_or(TOOL_DISABLED).to_string())),
+            (None, None) if spec.toggle == Toggle::None => ("unknown", Some("启停由原工具管理，Jolu 仅确认文件已安装".into())),
             (None, None) => (if enabled { "enabled" } else { "disabled" }, None),
         };
         items.push(SkillItem {
@@ -1877,6 +1952,8 @@ pub struct GlobalChange {
 /// 「扫描目录设置」弹窗的草稿，点「保存并扫描」时一次提交
 #[derive(Deserialize, Debug, Default)]
 pub struct DirSettings {
+    #[serde(default)]
+    pub custom_dirs: Option<Vec<String>>,
     /// 手动添加的项目目录（完整列表）
     pub projects: Vec<String>,
     /// 会话记录带出的项目里改了忽略状态的
@@ -1890,12 +1967,26 @@ pub struct DirSettings {
 /// 在副本上依次应用并校验，全部通过才替换 `cfg`；任何一项失败都不改动配置
 pub fn save_dir_settings_with(h: &Homes, cfg: &mut Config, input: DirSettings) -> Result<(), String> {
     let mut next = cfg.clone();
+    if let Some(dirs)=input.custom_dirs {
+        if dirs.len()>50 {return Err("最多添加 50 个自定义目录".into())}
+        let mut valid=Vec::new();for dir in dirs {let p=PathBuf::from(dir.trim());if !p.is_absolute()||has_parent_component(&p)||!p.is_dir(){return Err(format!("自定义目录不存在：{}",p.display()))}if !valid.iter().any(|v:&String|same_path(v,&p)){valid.push(p.display().to_string());}}
+        next.custom_dirs=valid;
+    }
     set_projects_with(&mut next, input.projects)?;
     for change in input.ignore {
         ignore_project_with(&mut next, &change.path, change.ignored);
     }
     for change in input.globals {
         set_global_dir_with(h, &mut next, &change.platform, change.path.as_deref())?;
+    }
+    // 再按最终草稿检查，覆盖“先更换全局目录、后加项目”和恢复默认的反向冲突。
+    let projects=next.project_paths(h);
+    for (platform,path) in &next.global_override {
+        for other in SPECS {
+            if roots(h,&next,other.id,&projects).iter().any(|r| !(r.platform==platform&&r.own) && same_path(path,&r.path)) {
+                return Err(format!("更换的全局目录与 {} 扫描目录重复：{path}",other.name));
+            }
+        }
     }
     *cfg = next;
     Ok(())
@@ -1980,7 +2071,7 @@ pub async fn skill_save(app: tauri::AppHandle, db: State<'_, crate::DbRead>, inp
 
 #[tauri::command]
 pub async fn skill_copy(app: tauri::AppHandle, db: State<'_, crate::DbRead>, path: String, platform: String, scope: Scope, project: Option<String>, dry_run: bool) -> Result<CopyResult, String> {
-    let (_, cfg) = context(&app, &db, false).await?;
+    let (_, cfg) = if dry_run { context(&app, &db, false).await? } else { context_mut(&app, &db).await? };
     blocking(move || copy_with(&homes()?, &cfg, &path, &platform, scope, project.as_deref(), dry_run)).await
 }
 
@@ -2094,6 +2185,31 @@ pub async fn skill_open_dir(app: tauri::AppHandle, db: State<'_, crate::DbRead>,
 mod tests {
     use super::*;
 
+    #[test]
+    fn additional_tools_and_name_based_settings() {
+        let base = temp("additional"); let h = homes_at(&base); let mut cfg=Config::default();
+        for id in ["gemini","opencode","qoder","trae","zcode","workbuddy"] { assert!(spec(id).is_some(), "{id}"); }
+        for id in ["gemini", "opencode"] {
+            let r=write_root(&h,&cfg,id,Scope::Global,None).unwrap();
+            let dir=skill(&r.path,"demo",&body("demo"));
+            set_enabled_impl(&h,&mut cfg,&r,&dir,"demo",false,&base.join("data")).unwrap();
+            let (items,_)=collect(&h,&cfg,spec(id).unwrap(),&mut vec![]); assert!(!items[0].enabled);
+            set_enabled_impl(&h,&mut cfg,&r,&dir,"demo",true,&base.join("data")).unwrap();
+            let (items,_)=collect(&h,&cfg,spec(id).unwrap(),&mut vec![]); assert!(items[0].enabled);
+        }
+        assert!(write_root(&h,&cfg,"workbuddy",Scope::Global,None).is_err());
+    }
+
+    #[test]
+    fn opencode_project_inherits_global_permission() {
+        let base=temp("opencode-inherit");let h=homes_at(&base);let cfg=Config::default();let project=base.join("project");fs::create_dir_all(&project).unwrap();
+        let spec=spec("opencode").unwrap();let global=write_root(&h,&cfg,"opencode",Scope::Global,None).unwrap();
+        set_json_skill(&h,spec,&global,"demo",false,&base.join("data")).unwrap();
+        let local=write_root(&h,&cfg,"opencode",Scope::Project,Some(&project)).unwrap();
+        assert!(json_skill_off(&h,spec,&local,"demo").unwrap());
+        assert!(set_json_skill(&h,spec,&local,"demo",true,&base.join("data")).is_err());
+    }
+
     fn temp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("jolu-skills-{tag}-{}-{}", std::process::id(), stamp()));
         fs::create_dir_all(&dir).unwrap();
@@ -2199,7 +2315,7 @@ mod tests {
         let (claude, codex) = (spec("claude").unwrap(), spec("codex").unwrap());
         assert_eq!((claude.toggle, claude.require_name, claude.writable), (Toggle::Park, false, true));
         assert_eq!((codex.toggle, codex.require_name, codex.writable), (Toggle::CodexToml, true, true));
-        assert!(spec("gemini").is_none() && roots(&h, &cfg, "gemini", &projects).is_empty());
+        assert!(spec("grok").is_none() && roots(&h, &cfg, "grok", &projects).is_empty());
         // 约定：home_env 控制 global 的最后一项，且这一项以 `/<子目录>` 结尾
         for s in SPECS {
             if s.home_env.is_some() {
@@ -2235,7 +2351,7 @@ mod tests {
         let missing = base.join("missing").display().to_string();
         assert!(set_global_dir_with(&h, &mut cfg, "claude", Some(&missing)).unwrap_err().contains("目录不存在"));
         assert!(set_global_dir_with(&h, &mut cfg, "claude", Some("relative/dir")).unwrap_err().contains("目录不存在"));
-        assert!(set_global_dir_with(&h, &mut cfg, "gemini", Some(&custom.display().to_string())).is_err());
+        assert!(set_global_dir_with(&h, &mut cfg, "grok", Some(&custom.display().to_string())).is_err());
         assert!(cfg.global_override.is_empty());
 
         set_global_dir_with(&h, &mut cfg, "claude", Some(&custom.display().to_string())).unwrap();
@@ -2317,10 +2433,22 @@ mod tests {
         // 一次保存里新添加的项目也算：同时添加项目并把它的 Skills 目录选作全局目录，整体拒绝
         let other = base.join("other");
         fs::create_dir_all(other.join(".agents").join("skills")).unwrap();
-        let input = DirSettings { projects: vec![s(&project), s(&other)], ignore: vec![], globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&other.join(".agents").join("skills"))) }] };
+        let input = DirSettings { custom_dirs: None, projects: vec![s(&project), s(&other)], ignore: vec![], globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&other.join(".agents").join("skills"))) }] };
         assert!(save_dir_settings_with(&h, &mut cfg, input).unwrap_err().contains("已经是 Codex 的扫描目录"));
         assert_eq!(cfg.projects, vec![s(&project)]);
         fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn opencode_shared_skill_roots_are_readonly() {
+        let base=temp("opencode-shared");let h=homes_at(&base);let cfg=Config::default();let project=base.join("project");
+        let list=roots(&h,&cfg,"opencode",&[project.clone()]);
+        for suffix in [".agents/skills",".claude/skills"] {
+            assert!(list.iter().any(|r|r.path==base.join(suffix)&&r.readonly));
+            assert!(list.iter().any(|r|r.path==project.join(suffix)&&r.readonly));
+        }
+        assert_eq!(write_root(&h,&cfg,"opencode",Scope::Global,None).unwrap().path,base.join(".config/opencode/skills"));
+        fs::remove_dir_all(base).ok();
     }
 
     #[test]
@@ -2412,21 +2540,21 @@ mod tests {
         let ignore = || vec![IgnoreChange { path: s(&session), ignored: true }];
 
         // 全局目录不存在：项目与忽略状态也不写入
-        let bad = DirSettings { projects: vec![s(&project)], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&base.join("missing"))) }] };
+        let bad = DirSettings { custom_dirs: None, projects: vec![s(&project)], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&base.join("missing"))) }] };
         assert!(save_dir_settings_with(&h, &mut cfg, bad).unwrap_err().contains("目录不存在"));
         assert_eq!(snapshot(&cfg), before, "失败时配置保持原样");
         // 项目目录无效：全局目录也不写入
-        let bad = DirSettings { projects: vec![s(&base.join("gone"))], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&custom)) }] };
+        let bad = DirSettings { custom_dirs: None, projects: vec![s(&base.join("gone"))], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&custom)) }] };
         assert!(save_dir_settings_with(&h, &mut cfg, bad).unwrap_err().contains("项目目录不存在"));
         assert_eq!(snapshot(&cfg), before);
 
-        let good = DirSettings { projects: vec![s(&project)], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&custom)) }] };
+        let good = DirSettings { custom_dirs: None, projects: vec![s(&project)], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&custom)) }] };
         save_dir_settings_with(&h, &mut cfg, good).unwrap();
         assert_eq!(cfg.projects, vec![s(&project)]);
         assert_eq!(cfg.ignored_projects, vec![s(&session)]);
         assert_eq!(cfg.global_override.get("claude"), Some(&s(&custom)));
         // 同一次保存里恢复默认，其余设置不变
-        let reset = DirSettings { projects: vec![s(&project)], ignore: vec![], globals: vec![GlobalChange { platform: "claude".into(), path: None }] };
+        let reset = DirSettings { custom_dirs: None, projects: vec![s(&project)], ignore: vec![], globals: vec![GlobalChange { platform: "claude".into(), path: None }] };
         save_dir_settings_with(&h, &mut cfg, reset).unwrap();
         assert!(cfg.global_override.is_empty());
         assert_eq!((cfg.projects.len(), cfg.ignored_projects.len()), (1, 1));
@@ -2630,7 +2758,7 @@ mod tests {
         };
         let all = cfg.all_projects(&h);
         assert_eq!(all.len(), 2, "大小写与分隔符去重、跳过不存在目录和主目录");
-        assert_eq!((all[0].source, all[0].tools.as_slice()), ("manual", ["codex"].as_slice()));
+        assert_eq!((all[0].source, all[0].tools.as_slice()), ("manual", ["codex", "opencode"].as_slice()));
         assert_eq!((all[1].source, all[1].tools.is_empty()), ("session", true));
         let o = overview_with(&h, &cfg, "codex").unwrap();
         assert!(o.roots.iter().all(|r| r.scope != Scope::Project || r.exists), "没有 Skills 目录的项目不扫描");
@@ -3027,6 +3155,7 @@ pub fn enabled_skills(platform: &str, cwd: Option<&Path>) -> Result<Vec<SkillOpt
 }
 
 pub fn enabled_skills_with(h: &Homes, platform: &str, cwd: Option<&Path>) -> Result<Vec<SkillOption>, String> {
+    if !matches!(platform,"claude"|"codex") {return Err("自动化仅支持 Claude Code 与 Codex".into())}
     if spec(platform).is_none() {
         return Err(format!("{platform} 暂未接入 Skills 管理"));
     }

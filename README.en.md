@@ -66,7 +66,7 @@ Local statistics and online quotas are independent: **having local sessions does
 | WorkBuddy | Local usage, cache and reported credits | Consumed credits are not remaining credits |
 | Trae | Local source detection | No local session statistics |
 
-OpenCode and custom providers are marked "coming soon" in the app. Capabilities follow what the app actually shows; never infer login, balance, Skills or automation support from an icon or plan name.
+Custom providers support explicit URLs, protocols and API keys. ZCode and OpenCode connection flows are implemented; live ZCode key and OpenCode login validation remain pending; local OpenCode usage collection has been verified on this machine. Qoder and WorkBuddy keys stay managed in their original clients. Capabilities follow what the app actually shows; never infer login, balance, Skills or automation support from an icon or plan name.
 
 ### Quota providers
 
@@ -138,7 +138,7 @@ Latency, time to first token and status codes are shown only when the source pro
 - Search titles, session IDs or message text (press Enter).
 - Read messages and tool calls on the right; "Session info" shows the project directory, models, tokens and estimated cost.
 - **Continue in tool** checks that Claude Code / Codex is installed and the project directory is reachable, then resumes the session in a new console.
-- **View usage** opens this session's calls; **Create automation** carries the session and project into a new task. Session compaction is coming soon.
+- **View usage** opens this session's calls; **Create automation** carries the session and project into a new task. Session compaction supports incremental summaries, refinement and Markdown handoff. Exploratory short-session evaluation is complete; long-session quality still requires suitable samples.
 
 ### Automation: keep AI working while you are away
 
@@ -158,7 +158,7 @@ Latency, time to first token and status codes are shown only when the source pro
 - Scans the global and project directories of Claude Code and Codex; projects are picked up from session records automatically and can also be added by hand.
 - Browse files with Markdown preview; create, edit or import a Skill, or copy it to another tool.
 - Enabling or disabling affects only that copy, never other copies with the same name; every write, overwrite or removal is backed up first.
-- Skills for other tools, Git repository import and diffs are coming soon.
+- Gemini, OpenCode, Qoder, Trae and ZCode directories are supported. WorkBuddy uses `.codebuddy/skills` in read-only mode; custom scan directories are also read-only. HTTPS Git import and draft-to-disk diffs are supported. Gemini/OpenCode toggles are name-based, unlike Claude/Codex per-copy toggles.
 
 ### Settings
 
@@ -290,8 +290,8 @@ node --test frontend/src/lib/*.test.mjs
 # Backend tests
 cargo test --manifest-path backend/Cargo.toml
 
-# Build the Windows installer (NSIS)
-pnpm tauri build
+# Build a local Windows installer (NSIS, without signed updater artifacts)
+pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 The installer is written to `backend/target/release/bundle/nsis/`. The first Rust build takes a while; if the dev port conflicts, check that the Vite address matches Tauri's `devUrl`.
@@ -333,3 +333,6 @@ The collector reads local records incrementally and de-duplicates them into SQLi
     <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
   </picture>
 </a>
+
+
+Session handoff supports incremental summaries, draft refinement and Markdown preview/export. Exploratory prompt evaluation covered five short sessions; it does not establish long-session quality. OpenCode JSON/SQLite V1/V2 usage parsing keeps unknown fields unknown and adds visible output and separate reasoning while preferring the source total. See [unverified integrations](docs/todo/2026-10-22-unverified-integrations.md). Updates remain off unless both `JOLU_UPDATES_ENABLED=1` and `VITE_JOLU_UPDATES_ENABLED=1` are set at build time.

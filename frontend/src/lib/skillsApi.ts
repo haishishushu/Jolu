@@ -3,7 +3,7 @@ import { invoke } from "./api"
 /** 模块 F · Skills 管理的后端接口（backend/src/skills.rs） */
 
 export type SkillScope = "global" | "project" | "system" | "synced"
-export type SkillStatus = "enabled" | "disabled" | "conflict" | "invalid"
+export type SkillStatus = "enabled" | "disabled" | "conflict" | "invalid" | "unknown"
 export type SkillSource = "local" | "git" | "project" | "imported" | "synced" | "system"
 
 export interface SkillItemDto {
@@ -24,7 +24,7 @@ export interface SkillItemDto {
   /** 停用区里的副本停用前所在目录 */
   original_path: string | null
   /** parked：Jolu 停用区；path：Codex 按路径停用；tool：工具配置按名称停用（只读，影响所有同名副本） */
-  disabled_by: "parked" | "path" | "tool" | null
+  disabled_by: "parked" | "path" | "tool" | "name" | null
   /** 工具托管或符号链接：只读查看 */
   readonly: boolean
   symlink: boolean
@@ -157,6 +157,7 @@ export interface SkillGitImportScanDto {
 }
 
 export interface SkillDirSettingsInput {
+  custom_dirs?: string[]
   /** 手动添加的项目目录（完整列表） */
   projects: string[]
   /** 会话记录带出的项目里改了忽略状态的 */

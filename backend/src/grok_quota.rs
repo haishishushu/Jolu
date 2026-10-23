@@ -102,6 +102,7 @@ fn query_grok(access_token: &str) -> QuotaState {
                 .map(|dt| dt.to_rfc3339()),
         }],
         plan: None,
+            account: None,
     }
 }
 

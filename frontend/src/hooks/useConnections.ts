@@ -134,6 +134,8 @@ export function useConnections() {
 
   const add = useCallback(
     async (input: {
+      service?: string | null
+      protocol?: "openai" | "anthropic" | null
       platform: string
       kind: "auth" | "api"
       name: string

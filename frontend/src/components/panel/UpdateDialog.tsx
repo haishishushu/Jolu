@@ -1,19 +1,41 @@
 import { Check, Download, LoaderCircle } from "lucide-react"
-import { useId } from "react"
-import { isTauri } from "@/lib/api"
+import { useEffect, useId, useState } from "react"
+import { isTauri, listenEvent } from "@/lib/api"
 import { formatBytes, progressPercent } from "@/lib/updateState"
 import { useUpdate } from "./UpdateContext"
+import { AUTOMATION_CHANGED, automationApi } from "@/lib/automationApi"
 
 /**
  * 更新进度对话框（画布 17 · B）。
  *
  * 点击任一版本入口后展示下载进度；校验完成后只需点击一次「安装」。
  */
-export function UpdateDialog() {
-  const { phase, info, progress, error, startDownload, installDownloaded } = useUpdate()
+export function UpdateDialog({ onViewTasks }: { onViewTasks: () => void }) {
+  const { dialogOpen, closeDialog, cancelDownload, phase, info, progress, error, startDownload, installDownloaded } = useUpdate()
+  const [running, setRunning] = useState<number | null>(null)
+  const [taskCheckError, setTaskCheckError] = useState(false)
+  useEffect(() => {
+    if (!dialogOpen || phase !== "downloaded") return
+    let stopped = false
+    let off: (() => void) | undefined
+    const check = () => {
+      if (!isTauri) { setRunning(0); return }
+      void automationApi.overview().then((value) => {
+        if (!stopped) { setRunning(value.running); setTaskCheckError(false) }
+      }).catch(() => { if (!stopped) { setRunning(null); setTaskCheckError(true) } })
+    }
+    setRunning(null)
+    setTaskCheckError(false)
+    check()
+    void listenEvent(AUTOMATION_CHANGED, check).then((unsubscribe) => {
+      if (stopped) unsubscribe()
+      else off = unsubscribe
+    })
+    return () => { stopped = true; off?.() }
+  }, [dialogOpen, phase])
   const titleId = useId()
 
-  if (!info) return null
+  if (!info || !dialogOpen) return null
   if (phase !== "downloading" && phase !== "downloadError" && phase !== "downloaded" && phase !== "installing" && phase !== "ready") return null
 
   const percent = progressPercent(progress.downloaded, progress.total)
@@ -21,6 +43,7 @@ export function UpdateDialog() {
   const downloaded = phase === "downloaded"
   const downloadError = phase === "downloadError"
   const ready = phase === "ready"
+  const tasksRunning = downloaded && ((running ?? 0) > 0 || (running === null && !!error?.includes("自动化任务")))
   const bytes = progress.total === null
     ? formatBytes(progress.downloaded)
     : `${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}`
@@ -85,6 +108,11 @@ export function UpdateDialog() {
           </div>
         )}
 
+        {downloaded && !error && <p className="rounded-lg bg-surface-2 p-3 text-[11px] text-text-secondary">
+          {tasksRunning ? `还有 ${running} 个自动化任务正在运行，请先处理任务。`
+            : taskCheckError ? "任务状态暂时无法读取，安装时将再次检查。"
+              : running === null ? "正在检查运行中的任务…" : "没有运行中的自动化任务，可以安装更新。"}
+        </p>}
         {error && <p role="alert" className="text-[11px] text-danger">{error}</p>}
 
         <p className="text-center text-[11px] text-text-tertiary">
@@ -96,15 +124,23 @@ export function UpdateDialog() {
                   : "下载期间不会中断用量采集"}
         </p>
 
-        {(downloaded || downloadError) && (
-          <div className="flex justify-end">
+        {phase === "downloading" && <div className="flex justify-end">
+          <button type="button" onClick={cancelDownload} className="rounded-lg border px-4 py-2 text-xs text-text-secondary hover:bg-surface-2">取消下载</button>
+        </div>}
+        {(downloaded || downloadError || ready) && (
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={closeDialog} className="rounded-lg border px-4 py-2 text-xs text-text-secondary hover:bg-surface-2">
+              {downloaded ? "稍后安装" : "关闭"}
+            </button>
+            {!ready &&
             <button
               type="button"
-              onClick={downloadError ? startDownload : installDownloaded}
+              onClick={downloadError ? startDownload : tasksRunning ? () => { closeDialog(); onViewTasks() } : installDownloaded}
+              disabled={downloaded && running === null && !taskCheckError && !error}
               className="rounded-[8px] bg-success-text px-4 py-2 text-xs font-semibold text-white transition-opacity hover:opacity-90 dark:bg-success dark:text-[#0f2a1a]"
             >
-              {downloadError ? "重试下载" : "安装"}
-            </button>
+              {downloadError ? "重试下载" : tasksRunning ? "查看任务" : "重启并安装"}
+            </button>}
           </div>
         )}
 

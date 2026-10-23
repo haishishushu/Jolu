@@ -12,6 +12,8 @@
 5. `performance.ps1 -Minutes 10` 每 15 秒保存进程树工作集、私有内存、CPU 累计时间与响应状态，报告位于 output/acceptance。每次测试须确认 processes.json 的 PID 仍属于本次进程。
 6. 完成后关闭 acceptance 浏览器，并仅停止 processes.json 中本次创建的 app/gateway PID。不要结束其他同名应用。
 
+隔离模式下，「立即刷新」只刷新界面与测试连接，不采集本机日志；会话列表仍可展示隔离数据库里的统计记录，但不读取源文件正文、项目目录或全文搜索内容。即使隔离库中已有真实 `scan_state.path`，也不会打开这些文件。需要测试消息解析时使用 Rust 合成文件测试，不在隔离桌面中接入真实会话。此模式只在 debug 构建生效。
+
 ## 直连 CDP 的脚本
 
 `*.e2e.mjs` 用 Playwright 的 `connectOverCDP` 直接连接 9337，不经过 playwright-cli，公共部分在 `cdp.mjs`（操作前核验数据库位于 `<仓库>/output/acceptance/profile/` 下，且所在目录有 `.acceptance-profile` 标记，否则直接退出）。仓库不依赖 Playwright：先在 output 下准备一个目录，例如 `output/acceptance/node` 里执行 `npm install playwright-core`，再在该目录里用绝对路径运行脚本。可选环境变量：`JOLU_CDP`（默认 `http://127.0.0.1:9337`）、`JOLU_DEV_URL`（默认 `http://localhost:5173`）。
@@ -40,9 +42,31 @@ Remove-Item Env:JOLU_DEV_URL                                 # 验收结束后�
 
 环境变量 `JOLU_TEST_DIR` 只在 debug 构建生效；路径必须为绝对路径且已有 `.acceptance-profile` 标记。正式安装包忽略该开关。CDP 端口仅由启动脚本设置，不写入产品代码。
 
-## 真实只读接口
+## 账号与更新组件回归
+
+- `node scripts/acceptance/account-metadata.cjs`：需已启动 5193 前端服务及 `output/acceptance/node` 中的 playwright-core，使用 Edge 无头浏览器注入合成额度；检查四列、5 小时/周窗口、订阅快照、重置卡真实零和隐私显示。不会查询真实账号，也不执行账号切换。
+- `node scripts/acceptance/update-flow.cjs`：使用单独启用 `VITE_JOLU_UPDATES_ENABLED=1` 的 5197 前端服务（可用 `JOLU_PREVIEW_URL` 覆盖），合成更新 API 验证取消、重试、稍后安装和任务导航。不会安装更新；真实签名与安装链路须分别验证。
+
+## 真实只读接口的执行条件
 
 明确获用户授权后执行忽略的 `local_auth_read_only_smoke`（Codex）或 `local_claude_gateway_read_only_smoke`（Claude 网关）。不打印 Key、token、账号、历史记录或完整响应，不发送模型请求。其他账号类型缺失时记录缺口。
+
+## 生产预览的页面加载回归
+
+`lazy-pages-preview.e2e.mjs` 与 `lazy-jumps-preview.e2e.mjs` 使用独立的无头 Edge 浏览器，只访问本机前端预览的合成数据，不连接 CDP、不调用真实桌面接口，也不创建或执行自动化任务。它们不能替代真实账号或桌面功能验收。脚本按仓库位置解析依赖与产物目录，可以从任意工作目录运行。
+
+准备：在 `output/acceptance/node` 中安装 `playwright-core`（不加入项目依赖），本机需有 Microsoft Edge。先执行 `pnpm --dir frontend build`，再在单独终端运行 `pnpm --dir frontend preview --host localhost --port 5307 --strictPort`。必须使用生产预览；开发服务器没有待验证的生产页面 chunk。
+
+```powershell
+node scripts/acceptance/lazy-pages-preview.e2e.mjs
+node scripts/acceptance/lazy-jumps-preview.e2e.mjs
+```
+
+可用 `JOLU_PREVIEW_URL` 覆盖默认 `http://localhost:5307`，只接受本机地址；端口被其他程序占用时换端口，不结束其他进程。
+
+- 页面加载脚本核对首开不请求其他六页、七页真实内容、慢请求局部骨架、等待期间切页，以及资源加载失败后的显式“重新加载应用”恢复。截图与结果保存到 `output/acceptance/lazy-pages/`。
+- 跨页脚本核对会话 ID 带入用量搜索，以及 Codex、原会话、项目目录和任务名称带入新任务配置。仅输出断言结果，不输出整页正文或输入框值。
+- 成功或失败均关闭脚本自己创建的浏览器；失败时退出码非零。前端预览服务器由启动它的终端停止。
 
 ## Windows Sandbox 安装检查
 

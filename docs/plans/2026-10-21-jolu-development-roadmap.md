@@ -1,3 +1,5 @@
+> 已由 `2026-10-22-jolu-remaining-work.md` 取代；执行结果见 `docs/verification/2026-10-23-remaining-tasks.md`。
+
 # Jolu 统一 AI 工具管理器开发实施计划
 
 > 编写日期：2026-10-21。本文是开发计划，不代表功能已实现或已通过测试。

@@ -33,12 +33,26 @@ export function verifyRelease({ version, tag, manifest, assets }) {
   for (const platform of platforms) {
     const url = platform?.url
     if (typeof url !== "string") throw new Error("更新清单缺少下载地址")
-    const marker = `/releases/download/${tag}/`
-    if (!url.includes(marker)) throw new Error(`更新清单下载地址指向了其他发行版：${url}`)
-    const name = decodeURIComponent(url.slice(url.lastIndexOf("/") + 1))
+    const parsed = new URL(url)
+    if (parsed.origin !== "https://github.com" || parsed.username || parsed.password || parsed.search || parsed.hash
+      || !parsed.pathname.startsWith("/haishishushu/Jolu/releases/download/")) {
+      throw new Error(`更新清单下载地址必须来自官方仓库的 HTTPS 发行资源：${url}`)
+    }
+    const marker = `/haishishushu/Jolu/releases/download/${tag}/`
+    if (!parsed.pathname.startsWith(marker)) throw new Error(`更新清单下载地址指向了其他发行版：${url}`)
+    const name = decodeURIComponent(parsed.pathname.slice(marker.length))
     if (!name.startsWith(prefix) || !names.has(name)) {
       throw new Error(`更新清单下载地址对应的安装包不存在：${url}`)
     }
+    const signature = platform.signature
+    if (typeof signature !== "string" || !signature.trim()) throw new Error(`更新清单缺少签名：${name}`)
+    const lines = Buffer.from(signature.trim(), "base64").toString("utf8").trim().split(/\r?\n/)
+    // 此处检查发布清单的签名封装；密码学验签仍由 updater 使用内置公钥完成。
+    if (!lines[0]?.startsWith("untrusted comment:") || Buffer.from(lines[1] ?? "", "base64").length !== 74
+      || !lines[2]?.startsWith("trusted comment:") || Buffer.from(lines[3] ?? "", "base64").length !== 64) {
+      throw new Error(`更新清单签名格式不正确：${name}`)
+    }
+    if (!names.has(`${name}.sig`)) throw new Error(`缺少安装包签名文件：${name}.sig`)
   }
 }
 

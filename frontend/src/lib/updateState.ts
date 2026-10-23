@@ -7,7 +7,7 @@
  */
 
 /** 检查更新总开关：首个 Jolu Release 发布前停用；与后端 updater.rs 的 UPDATES_ENABLED 同步修改 */
-export const UPDATES_ENABLED = false
+export const UPDATES_ENABLED = import.meta.env?.VITE_JOLU_UPDATES_ENABLED === "1"
 
 export type UpdatePhase ="idle" | "checking" | "available" | "downloading" | "downloadError" | "downloaded" | "installing" | "ready"
 

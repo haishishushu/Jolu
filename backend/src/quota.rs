@@ -48,6 +48,7 @@ struct CodexLimits {
 struct CodexUsage {
     plan_type: Option<String>,
     rate_limit: Option<CodexLimits>,
+    rate_limit_reset_credits: Option<serde_json::Value>,
 }
 
 fn parse_codex_usage(body: &str) -> QuotaState {
@@ -75,7 +76,10 @@ fn parse_codex_usage(body: &str) -> QuotaState {
             }
         }).collect();
     if windows.is_empty() { return QuotaState::Failed { reason: "Codex 未返回可识别的额度窗口".into() }; }
-    QuotaState::Ok { windows, plan: usage.plan_type }
+    let reset_credits = usage.rate_limit_reset_credits.as_ref().and_then(ResetCredits::parse);
+    QuotaState::Ok { windows, plan: usage.plan_type, account: Some(AccountMetadata {
+        reset_credits, ..AccountMetadata::default()
+    }) }
 }
 
 pub fn codex_oauth_quota(access_token: &str, account: Option<&str>) -> QuotaState {
@@ -89,7 +93,17 @@ pub fn codex_oauth_quota(access_token: &str, account: Option<&str>) -> QuotaStat
     if let Some(account) = account { request = request.header("ChatGPT-Account-Id", account); }
     match request.send() {
         Ok(r) => match read(r) {
-            HttpOutcome::Body(body) => parse_codex_usage(&body),
+            HttpOutcome::Body(body) => {
+                let mut state = parse_codex_usage(&body);
+                if let QuotaState::Ok { account: Some(metadata), .. } = &mut state {
+                    if let Some((expires_at, observed_at)) = crate::login_detect::codex_subscription_for_secret(access_token) {
+                        metadata.expires_at = Some(expires_at);
+                        metadata.observed_at = observed_at;
+                        metadata.subscription_source = "local_snapshot";
+                    }
+                }
+                state
+            },
             HttpOutcome::Unauthorized(reason) => QuotaState::Unauthorized { reason },
             HttpOutcome::Forbidden(reason) => QuotaState::Forbidden { reason },
             HttpOutcome::RateLimited(reason) => QuotaState::RateLimited { reason },
@@ -121,8 +135,30 @@ mod codex_tests {
         }
     }
     #[test]
+    fn reset_credit_summary_preserves_zero_and_missing_counts() {
+        let result = parse_codex_usage(r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000}},"rate_limit_reset_credits":{"available_count":1,"applicable_available_count":0}}"#);
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["account"]["reset_credits"]["available_count"], 1);
+        assert_eq!(json["account"]["reset_credits"]["applicable_available_count"], 0);
+        assert_eq!(json["account"]["subscription_status"], "unknown");
+    }
+
+    #[test]
+    fn malformed_optional_reset_metadata_does_not_hide_valid_quota() {
+        for credits in ["null", "[]", r#"{"available_count":-1}"#, r#"{"available_count":"unknown"}"#] {
+            let body = format!(r#"{{"rate_limit":{{"primary_window":{{"used_percent":0,"limit_window_seconds":18000}}}},"rate_limit_reset_credits":{credits}}}"#);
+            let QuotaState::Ok { account: Some(account), windows, .. } = parse_codex_usage(&body) else { panic!("额度不应被可选元数据拖累") };
+            assert!(account.reset_credits.is_none());
+            assert_eq!(windows[0].used_percent, Some(0.0));
+        }
+        let result = ResetCredits::parse(&serde_json::json!({"available_count":0})).unwrap();
+        assert_eq!(result.available_count, Some(0));
+        assert_eq!(result.applicable_available_count, None);
+    }
+
+    #[test]
     fn weekly_primary_is_not_mislabeled_as_five_hours() {
-        let QuotaState::Ok { windows, plan } = parse_codex_usage(r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":56,"limit_window_seconds":604800,"reset_at":1789805546},"secondary_window":null}}"#) else { panic!("解析失败") };
+        let QuotaState::Ok { windows, plan, .. } = parse_codex_usage(r#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":56,"limit_window_seconds":604800,"reset_at":1789805546},"secondary_window":null}}"#) else { panic!("解析失败") };
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].key, "7d");
         assert_eq!(windows[0].used_percent, Some(56.0));
@@ -157,6 +193,38 @@ pub struct QuotaWindow {
     pub resets_at: Option<String>,
 }
 
+/// 账号信息保留来源。令牌快照只能提供历史到期记录，不能证明当前订阅有效。
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountMetadata {
+    pub subscription_status: &'static str,
+    pub expires_at: Option<String>,
+    pub subscription_source: &'static str,
+    pub observed_at: Option<String>,
+    pub reset_credits: Option<ResetCredits>,
+}
+impl Default for AccountMetadata {
+    fn default() -> Self {
+        Self { subscription_status: "unknown", expires_at: None, subscription_source: "unavailable", observed_at: None, reset_credits: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResetCredits {
+    pub available_count: Option<u64>,
+    pub applicable_available_count: Option<u64>,
+}
+impl ResetCredits {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        if !value.is_object() { return None; }
+        let count = |key: &str| value.get(key).and_then(serde_json::Value::as_u64)
+            .filter(|number| *number <= 9_007_199_254_740_991);
+        let available_count = count("available_count");
+        let applicable_available_count = count("applicable_available_count");
+        (available_count.is_some() || applicable_available_count.is_some())
+            .then_some(Self { available_count, applicable_available_count })
+    }
+}
+
 /// 额度查询状态。**刻意不用 `Option<f64>`** —— 那样无法区分
 /// 「查不到」与「真的是 0」，也无法把失败原因带到界面上（§2.5）
 #[derive(Debug, Serialize)]
@@ -168,6 +236,8 @@ pub enum QuotaState {
         windows: Vec<QuotaWindow>,
         /// 套餐名原样透传，不由百分比推断
         plan: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<AccountMetadata>,
     },
     /// 该接入方式不支持额度查询（如用 API Key 查官方订阅额度）
     Unsupported { reason: String },
@@ -515,7 +585,7 @@ pub fn claude_oauth_quota(access_token: &str) -> QuotaState {
         };
     }
     // 当前官方用量响应不含可信套餐档位，保持未知而不是复用连接类型标签。
-    QuotaState::Ok { windows, plan: None }
+    QuotaState::Ok { windows, plan: None, account: None }
 }
 
 /* ---------------- 官方 API Key：组织用量与费用（Admin 权限） ---------------- */
@@ -757,7 +827,7 @@ fn validate_connection_with(
     model: Option<&str>,
     remote: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    if platform != "custom" {
+    if !matches!(platform,"custom"|"opencode") {
         return remote();
     }
     if kind != "api" {
@@ -1041,6 +1111,7 @@ fn s2_quota_from_usage(d: S2Usage) -> QuotaState {
     QuotaState::Ok {
         windows,
         plan: d.plan_name,
+        account: None,
     }
 }
 

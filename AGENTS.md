@@ -13,12 +13,12 @@ Windows 桌面 AI 工具管理器。前端 `frontend/`：React 19 + TypeScript +
   |---|---|---|---|
   | 00 · Jolu 模块目录 | — | 索引与阅读方式 | — |
   | 模块 A · 灵动岛 | 01–04 | 主窗口「灵动岛」页、侧栏收起形态 | 已按新稿实现：`views/MainPanelWindow.tsx`、`views/IslandView.tsx`、`components/panel/SideNav.tsx` / `PageHeader.tsx` |
-  | 模块 B · 供应商 | 05–29 | 直接连接、账号管理、订阅连接、API Key 与模型获取、OpenCode、账号与连接的异常状态；29 是平台能力规则 | 已按新稿实现：`views/ProvidersView.tsx`、`components/providers/`、`lib/providerCatalog.ts`；OpenCode、自定义供应商、ZCode / Qoder / WorkBuddy 的 API Key 标「待接入」 |
+  | 模块 B · 供应商 | 05–29 | 直接连接、账号管理、订阅连接、API Key 与模型获取、OpenCode、账号与连接的异常状态；29 是平台能力规则 | 已按新稿实现：`views/ProvidersView.tsx`、`components/providers/`、`lib/providerCatalog.ts`；自定义供应商、ZCode API Key、OpenCode 模型服务已接入；ZCode/OpenCode 真机验证见未验证清单；Qoder / WorkBuddy 不代管 API Key |
   | 模块 C · 用量统计 | 30–39 | 概览、用量分析、调用明细、日期范围弹窗、交互状态 | 已按新稿实现：`views/UsageView.tsx`、`components/usage/`、`lib/usageStats.ts`，后端 `usage_stats.rs`；会话项目名、额度提醒与按账号同步失败状态待确认 |
-  | 模块 D · 会话线程 | 40–57 | 会话列表与消息、搜索、在原工具继续、压缩会话与 Markdown 交接、从会话创建自动化 | 已按新稿实现：`views/SessionsView.tsx`、`components/sessions/`、`lib/sessionThreads.ts`，后端 `session_threads.rs`；压缩会话（画板 48–55）标「待接入」，创建自动化目前只跳转到自动化页 |
+  | 模块 D · 会话线程 | 40–57 | 会话列表与消息、搜索、在原工具继续、压缩会话与 Markdown 交接、从会话创建自动化 | 已按新稿实现：`views/SessionsView.tsx`、`components/sessions/`、`lib/sessionThreads.ts`，后端 `session_threads.rs`；压缩会话（48/50/52/54/57A）已接入配置、对话式修订、MD 预览与导出；创建自动化携带会话与项目；短会话真实探索评测完成，长会话正式评测缺少样本 |
   | 模块 E · 自动化 | 58–73 | 任务列表、新建任务、等待额度与续跑、运行记录与详情、执行会话选择 | 已按新稿实现：`views/AutomationView.tsx`、`components/automation/`、`lib/automation.ts` / `automationApi.ts`，后端 `automation.rs`（Claude Code / Codex 非交互执行与本机调度）；Skills 选择（D-08，`SkillPicker.tsx`，下拉面板待确认）只列目标工具已启用的全局 + 工作目录项目 Skills，执行前与续跑前复查，执行账号须为原工具当前登录的账号 |
-  | 模块 F · Skills 管理 | 74–85 | Skills 列表、供应商选择、详情与文件、新建 / 编辑、导入与冲突检查 | 已按新稿实现：`views/SkillsView.tsx`、`components/skills/`、`lib/skillsManager.ts` / `skillsApi.ts`，后端 `skills.rs`；只接入 Claude Code 与 Codex，其他供应商、自定义目录、Git 仓库导入、查看差异标「待接入」；项目范围由会话记录自动带出 + 手动添加，Claude Code 停用 = 移到应用数据目录的停用区（不写 `skillOverrides`） |
-  | 模块 G · 设置 | 86–103 | 常规、外观、网络与代理、数据与存储、通知、关于与更新、清理确认、状态与反馈、手动联网 | 已按新稿实现：`views/SettingsPage.tsx`、`components/settings/`（settingsUi、各分区与 DataDialogs）、`lib/settingsPage.ts`、`lib/settingsApi.ts`，后端 `storage_stats.rs`；默认打开页面、界面缩放、列表密度、减少动效、应用联网方式、连接诊断、任务提醒、导入预览标「待接入」，检查更新随 `UPDATES_ENABLED` 停用；全局快捷键与套餐查询凭证已按鼠鼠要求删除，设计稿已同步 |
+  | 模块 F · Skills 管理 | 74–85 | Skills 列表、供应商选择、详情与文件、新建 / 编辑、导入与冲突检查 | 已按新稿实现：`views/SkillsView.tsx`、`components/skills/`、`lib/skillsManager.ts` / `skillsApi.ts`，后端 `skills.rs`；已接入 Claude Code、Codex、Gemini、OpenCode、Qoder、Trae、ZCode；WorkBuddy 仅只读扫描 `.codebuddy/skills`；自定义目录只读；Grok 未接入；HTTPS Git 仓库导入、草稿与磁盘差异已有实现；项目范围由会话记录自动带出 + 手动添加，Claude Code 停用 = 移到应用数据目录的停用区（不写 `skillOverrides`） |
+  | 模块 G · 设置 | 86–103 | 常规、外观、网络与代理、数据与存储、通知、关于与更新、清理确认、状态与反馈、手动联网 | 已按新稿实现：`views/SettingsPage.tsx`、`components/settings/`（settingsUi、各分区与 DataDialogs）、`lib/settingsPage.ts`、`lib/settingsApi.ts`，后端 `storage_stats.rs`；默认页面、缩放、密度、减少动效、联网方式、诊断、任务提醒与导入预览已有实现；安装版行为待真机核对，检查更新默认停用；全局快捷键与套餐查询凭证已按鼠鼠要求删除，设计稿已同步 |
   | 模块 H · 全局规范与品牌 | 104–110 | 按钮与图标交互六态、Logo 与人物、桌面 / 任务栏 / 托盘图标、启动页 | `components/brand/`、`components/ui/`、`components/tray/`；启动页（109 / 110）已按新稿实现：`frontend/startup.html`、`src/startup.ts` / `startup.css`，窗口在 `lib.rs` 的 `show_startup` |
   | 模块 A2 · 浮动灵动岛 | 111–132 | 浮动灵动岛：Auth / API 收缩与展开、仅 Token、Token 动效、配置细节、平台选择、拖动贴边、右键菜单与分身 | `components/island/`、`views/IslandWindow.tsx`、`views/ContextMenuWindow.tsx` |
 
@@ -58,7 +58,7 @@ scripts/
 - 前端：组件 `PascalCase.tsx`（一个文件导出多个基础组件时用 camelCase，如 `primitives.tsx`）；hook `useXxx.ts` 放在 `hooks/`；纯逻辑 `camelCase.ts`；测试 `<源文件名>.test.mjs`，与源文件同名同目录。
 - 后端 Rust：`snake_case.rs`；脚本：`kebab-case`。
 - 发布脚本在 `scripts/release/`。恢复 GitHub Actions 工作流时，脚本路径要改成这个目录。
-- 检查更新目前停用：`backend/src/updater.rs` 和 `frontend/src/lib/updateState.ts` 各有一个 `UPDATES_ENABLED = false`。首个带 `latest.json` 的 Release 发布后，两处同时改为 `true`。
+- 检查更新目前停用：首个带 `latest.json` 的 Release 发布时，同时设置 `JOLU_UPDATES_ENABLED=1` / `VITE_JOLU_UPDATES_ENABLED=1` 构建；默认构建仍停用。测试公钥和本地端点仅放 output 的覆盖配置，不修改生产配置。
 
 ## 3. 常用命令（在仓库根目录执行）
 
@@ -67,7 +67,7 @@ pnpm install && pnpm --dir frontend install
 pnpm dev                                    # 只启动前端预览，http://localhost:5173
 pnpm tauri dev                              # 启动桌面应用（自动拉起前端）
 pnpm --dir frontend typecheck
-node --test frontend/src/lib/*.test.mjs     # 前端纯逻辑单元测试
+node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs # 前端纯逻辑与共享状态测试
 node --test scripts/release/*.test.mjs      # 发布脚本测试
 cargo test --manifest-path backend/Cargo.toml
 ```

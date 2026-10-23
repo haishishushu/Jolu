@@ -75,6 +75,7 @@ export interface ConnectionInfo {
 export interface ConnectionDto {
   account_email?: string | null
 
+  service?: "opencode-go" | "openai" | "openai-compatible" | null
   id: string
   platform: string
   kind: "auth" | "api"
@@ -182,12 +183,20 @@ export interface QuotaWindowDto {
  * 绝不渲染为 0% 或满格。
  */
 export type QuotaStateDto =
-  | { state: "ok"; windows: QuotaWindowDto[]; plan: string | null }
+  | { state: "ok"; windows: QuotaWindowDto[]; plan: string | null; account?: AccountQuotaMetadata | null }
   | { state: "unsupported"; reason: string }
   | { state: "forbidden"; reason: string }
   | { state: "unauthorized"; reason: string }
   | { state: "rate_limited"; reason: string }
   | { state: "failed"; reason: string }
+
+export interface AccountQuotaMetadata {
+  subscription_status: "active" | "expired" | "unknown"
+  expires_at: string | null
+  subscription_source: "live" | "local_snapshot" | "unavailable"
+  observed_at: string | null
+  reset_credits: { available_count: number | null; applicable_available_count: number | null } | null
+}
 
 /** 余额查询状态。真实余额为零显示 0.00，查不到才显示「—」 */
 export type BalanceStateDto =
@@ -262,6 +271,7 @@ export interface MenuSourceEvent {
 /** 持久化设置（§2.6 / §7.3）。托盘与设置界面共享同一份值 */
 export interface AppSettings {
   silent_startup: boolean
+  auto_check_updates: boolean
   island_platform: string
   island_kind: "auth" | "api"
   island_connection_id: string | null
@@ -425,9 +435,11 @@ export const api = {
   autostartStatus: () => invoke<boolean>("autostart_status"),
   setAutostart: (on: boolean) => invoke<boolean>("set_autostart", { on }),
   /** 只查询是否有新版本，不下载（§更新：启动 1 秒后与设置页手动检查共用） */
+  setAutoCheckUpdates: (on: boolean) => invoke<AppSettings>("set_auto_check_updates", { on }),
   checkAppUpdate: () => invoke<UpdateCheckDto>("check_app_update_available"),
   /** 下载并验证签名，返回本次下载的版本 */
   downloadAppUpdate: () => invoke<UpdateCheckDto>("download_app_update"),
+  cancelAppUpdateDownload: () => invoke<void>("cancel_app_update_download"),
   /** 安装已下载的安装包；Windows 上安装器接管并自动重启 */
   installDownloadedUpdate: () => invoke<void>("install_downloaded_update_and_restart"),
   setSilentStartup: (on: boolean) => invoke<AppSettings>("set_silent_startup", { on }),
@@ -458,6 +470,7 @@ export const api = {
     invoke<AppSettings>("set_proxy", { port, enabled, fallbackDirect }),
   listConnections: () => invoke<ConnectionDto[]>("list_connections"),
   addConnection: (input: {
+    service?: string | null
     platform: string
     kind: "auth" | "api"
     name: string

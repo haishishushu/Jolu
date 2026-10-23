@@ -66,7 +66,7 @@
 | WorkBuddy | 本机用量、缓存与已上报积分 | 已消耗积分不等于剩余积分 |
 | Trae | 本机来源检测入口 | 不支持本机会话统计 |
 
-OpenCode、自定义供应商等在界面中标为「待接入」。平台能力以应用中的实际提示为准，不能根据图标或套餐名称推断某个平台支持登录、余额、Skills 或自动化。
+自定义供应商已支持显式填写地址、协议与 API Key；ZCode 与 OpenCode 已接入连接流程，ZCode 真实 Key 与 OpenCode 登录仍待验证，OpenCode 本机用量读取已完成真机验证。Qoder / WorkBuddy 的自定义模型在原客户端配置，Jolu 不代管密钥。平台能力以应用中的实际提示为准，不能根据图标或套餐名称推断某个平台支持登录、余额、Skills 或自动化。
 
 ### 额度服务商
 
@@ -138,7 +138,7 @@ OpenCode、自定义供应商等在界面中标为「待接入」。平台能力
 - 搜索框可查标题、会话 ID 或正文（按 Enter 查询）。
 - 右侧只读查看消息记录与工具调用，「会话信息」里有项目目录、模型、Token 与估算费用。
 - **在原工具中继续**：检查 Claude Code / Codex 是否安装、项目目录是否可访问后，在新的控制台里续聊原会话。
-- **查看用量明细**跳到这条会话的调用明细；**创建自动化**把会话和项目带进新建任务。压缩会话为「待接入」。
+- **查看用量明细**跳到这条会话的调用明细；**创建自动化**把会话和项目带进新建任务。**压缩会话**支持增量整理、对话式修改草稿及 Markdown 交接；已完成短会话探索性评测，长会话质量仍待合格样本验证。
 
 ### 自动化：让 AI 在你不在时继续工作
 
@@ -155,10 +155,10 @@ OpenCode、自定义供应商等在界面中标为「待接入」。平台能力
 
 ![Skills 管理](./docs/assets/readme/panel-skills.png)
 
-- 扫描 Claude Code 与 Codex 的全局目录和项目目录；项目会从会话记录里自动带出，也可以手动添加。
+- 扫描 Claude Code、Codex、Gemini、OpenCode、Qoder、Trae、ZCode 的全局目录和项目目录；WorkBuddy 只读扫描 `.codebuddy/skills`，也可添加自定义只读目录；项目会从会话记录里自动带出，也可以手动添加。
 - 查看文件树与 Markdown 预览，新建、编辑、导入 Skill，或复制到另一个工具。
-- 启用 / 停用只影响这一份副本，不会连带同名副本；写入、覆盖、移除前都会先备份。
-- 其他工具的 Skills、Git 仓库导入、查看差异为「待接入」。
+- Claude Code / Codex 按副本启停；Gemini / OpenCode 按名称规则生效，会影响同名项。其余平台的启停状态需在原工具核对。写入、覆盖、移除前都会先备份。
+- 支持 HTTPS Git 仓库导入及草稿与磁盘文件的逐行差异；Grok Skills 未接入，新接入工具的原客户端识别和热加载仍待真机核对。
 
 ### 设置
 
@@ -290,8 +290,8 @@ node --test frontend/src/lib/*.test.mjs
 # 后端测试
 cargo test --manifest-path backend/Cargo.toml
 
-# 打包 Windows 安装包（NSIS）
-pnpm tauri build
+# 打包本地 Windows 安装包（NSIS，不生成正式更新签名产物）
+pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 安装包位于 `backend/target/release/bundle/nsis/`。首次 Rust 编译耗时较长；开发端口冲突时，检查 Vite 地址与 Tauri 的 `devUrl` 是否一致。
@@ -333,3 +333,6 @@ jolu/
     <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
   </picture>
 </a>
+
+
+开发验证边界见 [未验证项清单](docs/todo/2026-10-22-unverified-integrations.md)。更新默认关闭，发布时同时设置 `JOLU_UPDATES_ENABLED=1` 和 `VITE_JOLU_UPDATES_ENABLED=1`。OpenCode 统计支持 JSON / SQLite V1/V2；落盘 output 表示可见输出，Jolu 将其与独立 reasoning 相加；总量优先采用来源的 total，缺失字段保持未知。

@@ -17,6 +17,16 @@ mod manual_models_tests {
     use super::*;
 
     #[test]
+    fn new_native_api_connections_pass_local_preparation() {
+        for (platform,base,service) in [("zcode","https://open.bigmodel.cn/api/anthropic",None),("opencode","https://opencode.ai/zen/go/v1",Some("opencode-go"))] {
+            let input=NewConnection{platform:platform.into(),kind:"api".into(),name:"synthetic".into(),secret:Some("synthetic-key".into()),base_url:Some(base.into()),model:Some("synthetic".into()),effort:None,context_1m:None,protocol:None,service:service.map(str::to_owned)};
+            let prepared=prepare_new(input).unwrap_or_else(|e|panic!("{platform}: {e}"));
+            let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+            add(&db,prepared).unwrap();let rows=list(&db).unwrap();assert_eq!(rows.len(),1);assert_eq!(rows[0].service.as_deref(),service);assert_eq!(rows[0].model.as_deref(),Some("synthetic"));
+            if platform=="zcode"{assert_eq!(rows[0].protocol.as_deref(),Some("anthropic"));}
+        }
+    }
+    #[test]
     fn models_endpoint_normalizes_base_and_rejects_non_http() {
         assert_eq!(models_endpoint("https://gw.test", "openai", None).unwrap(), "https://gw.test/v1/models");
         assert_eq!(models_endpoint("https://gw.test/", "openai", None).unwrap(), "https://gw.test/v1/models");
@@ -48,7 +58,7 @@ mod gateway_tests {
     #[test]
     fn local_registration_is_deduplicated_and_does_not_enable_connections() {
         let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
-        let input = |key: &str| NewConnection { platform: "claude".into(), kind: "api".into(), name: "local".into(), secret: Some(key.into()), base_url: Some("https://example.test".into()), model: None, effort: None, context_1m: None, protocol: None };
+        let input = |key: &str| NewConnection { service: None, platform: "claude".into(), kind: "api".into(), name: "local".into(), secret: Some(key.into()), base_url: Some("https://example.test".into()), model: None, effort: None, context_1m: None, protocol: None };
         let (id, added) = register_local(&db, input("sk-first-1234")).unwrap();
         assert!(added);
         assert!(selectable_creds(&db, &id).is_err());
@@ -71,7 +81,7 @@ mod gateway_tests {
     #[test]
     fn paused_connection_cannot_be_reactivated_by_late_query_results() {
         let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
-        let id = add(&db, NewConnection {
+        let id = add(&db, NewConnection { service: None,
             platform: "claude".into(), kind: "api".into(), name: "pause test".into(),
             secret: Some("synthetic-pause-key".into()), base_url: None,
             model: None, effort: None, context_1m: None, protocol: None,
@@ -93,7 +103,7 @@ mod gateway_tests {
     #[test]
     fn pause_preserves_saved_credentials_and_blocks_queries_until_resumed() {
         let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
-        let id = add(&db, NewConnection {
+        let id = add(&db, NewConnection { service: None,
             platform: "codex".into(), kind: "api".into(), name: "saved connection".into(),
             secret: Some("synthetic-preserved-key".into()), base_url: Some("https://example.test".into()),
             model: None, effort: None, context_1m: None, protocol: None,
@@ -114,7 +124,7 @@ mod gateway_tests {
 
     #[test]
     fn official_native_keys_require_explicit_credentials_and_supported_platform() {
-        let input=|platform: &str, kind: &str, secret: Option<&str>| NewConnection {
+        let input=|platform: &str, kind: &str, secret: Option<&str>| NewConnection { service: None,
             platform:platform.into(), kind:kind.into(), name:"official test".into(),
             secret:secret.map(str::to_string),base_url:None,model:None,effort:None,context_1m:None,protocol:None,
         };
@@ -128,7 +138,7 @@ mod gateway_tests {
 
     #[test]
     fn gateway_accepts_http_and_https_domains_but_rejects_other_schemes() {
-        let connection = |base: &str| NewConnection {
+        let connection = |base: &str| NewConnection { service: None,
             platform: "claude".into(), kind: "api".into(), name: "HTTP gateway test".into(),
             secret: Some("synthetic-test-key".into()), base_url: Some(base.into()),
             model: None, effort: None, context_1m: None, protocol: None,
@@ -151,7 +161,7 @@ mod rename_tests {
     }
 
     fn claude_api(name: &str, secret: &str) -> NewConnection {
-        NewConnection {
+        NewConnection { service: None,
             platform: "claude".into(),
             kind: "api".into(),
             name: name.into(),
@@ -193,7 +203,7 @@ mod rename_tests {
 
     #[test]
     fn custom_name_overrides_local_inputs_only_when_valid() {
-        let input = |name: &str| NewConnection {
+        let input = |name: &str| NewConnection { service: None,
             platform: "claude".into(),
             kind: "api".into(),
             name: name.into(),
@@ -227,7 +237,7 @@ mod local_sync_tests {
     }
 
     fn claude_api(name: &str, secret: &str, base: Option<&str>) -> NewConnection {
-        NewConnection {
+        NewConnection { service: None,
             platform: "claude".into(),
             kind: "api".into(),
             name: name.into(),
@@ -332,7 +342,7 @@ mod custom_provider_tests {
     use super::*;
 
     fn custom(protocol: Option<&str>, base: Option<&str>, secret: Option<&str>) -> NewConnection {
-        NewConnection {
+        NewConnection { service: None,
             platform: "custom".into(),
             kind: "api".into(),
             name: "公司网关".into(),
@@ -552,8 +562,9 @@ mod custom_provider_tests {
 /// 返回给前端的连接。**不含** secret 字段——这是刻意的，不要加。
 #[derive(Debug, Serialize)]
 pub struct ConnectionDto {
-    /// 已核对凭证的账号邮箱；未知为 None，不从名称或 Key 推断。
+    /// 已核对凭证的账号邮箱；未知为 None，绝不由连接名称或 Key 推断。
     pub account_email: Option<String>,
+    pub service: Option<String>,
     pub id: String,
     pub platform: String,
     pub kind: String,
@@ -578,6 +589,8 @@ pub struct ConnectionDto {
 
 #[derive(Debug, Deserialize)]
 pub struct NewConnection {
+    #[serde(default)]
+    pub service: Option<String>,
     pub platform: String,
     pub kind: String,
     pub name: String,
@@ -649,6 +662,7 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
         effort: r.get("effort")?,
         context_1m: r.get("context_1m")?,
         protocol: r.get("protocol")?,
+        service: r.get("service")?,
     })
 }
 
@@ -662,7 +676,7 @@ fn list_with_account_lookup(
 ) -> rusqlite::Result<Vec<ConnectionDto>> {
     let now = chrono::Local::now().timestamp_millis();
     let mut stmt = conn.prepare(
-        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, account_email, secret
+        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, service, account_email, secret
          FROM connections ORDER BY created_ms ASC",
     )?;
     let rows = stmt
@@ -686,7 +700,7 @@ fn list_with_account_lookup(
 }
 
 /// 连接名称校验：新增与改名共用同一口径（去首尾空白，1–80 个字符）。
-fn validate_name(name: &str) -> Result<String, String> {
+pub(crate) fn validate_name(name: &str) -> Result<String, String> {
     let name = name.trim().to_string();
     if name.is_empty() || name.chars().count() > 80 {
         return Err("连接名称应为 1 到 80 个字符".into());
@@ -705,10 +719,22 @@ pub fn prepare_new(mut c: NewConnection) -> Result<NewConnection, String> {
         if c.secret.as_deref().map_or(true, |s| s.trim().is_empty()) { return Err("请填写 API Key".into()); }
         if c.base_url.as_deref().map_or(true, |s| s.trim().is_empty()) { return Err("请填写 Base URL".into()); }
     }
+    if c.platform=="opencode" {
+        if c.kind!="api" {return Err("OpenAI 订阅请从 OpenCode 本机登录获取".into())}
+        if !matches!(c.service.as_deref(),Some("opencode-go"|"openai-compatible")){return Err("请选择 OpenCode 模型服务".into())}
+        if c.service.as_deref()==Some("opencode-go") && c.base_url.as_deref()!=Some("https://opencode.ai/zen/go/v1"){return Err("OpenCode Go 必须使用所选服务的官方地址".into())}
+        if c.secret.as_deref().is_none_or(|s|s.trim().is_empty()){return Err("请填写 API Key".into())}
+    } else { c.service=None; }
     c.protocol = valid_protocol(&c.platform, c.protocol.take())?;
-    if crate::platforms::native(&c.platform) && !(c.kind == "api" && crate::provider_key::supported(&c.platform)) { return Err("该平台请通过本机来源获取，不保存猜测的登录凭证".into()); }
+    if c.platform=="zcode" && c.kind=="api" {
+        let base=c.base_url.as_deref().unwrap_or("").trim_end_matches('/');
+        let valid=["https://open.bigmodel.cn/api/anthropic","https://open.bigmodel.cn/api/coding/paas/v4","https://api.z.ai/api/anthropic","https://api.z.ai/api/coding/paas/v4"];
+        if !valid.contains(&base){return Err("请选择 ZCode 官方服务地址".into())}
+        c.protocol=Some(if base.ends_with("/anthropic"){"anthropic"}else{"openai"}.into());
+    }
+    if crate::platforms::native(&c.platform) && !(c.kind == "api" && (crate::provider_key::supported(&c.platform) || matches!(c.platform.as_str(),"zcode"|"opencode"))) { return Err("该平台请通过本机来源获取，不保存猜测的登录凭证".into()); }
     // 仅获取型平台（画布 18 后续）：凭证只能来自本机读取
-    if crate::creds::is_fetch_only_platform(&c.platform) && c.kind != "auth" && !crate::provider_key::supported(&c.platform) {
+    if crate::creds::is_fetch_only_platform(&c.platform) && c.kind != "auth" && !crate::provider_key::supported(&c.platform) && !matches!(c.platform.as_str(),"zcode"|"opencode") {
         return Err("该平台只支持从本机获取凭证，不支持手动填写".into());
     }
     if !matches!(c.kind.as_str(), "auth" | "api") {
@@ -784,12 +810,25 @@ pub fn add(conn: &Sql, c: NewConnection) -> Result<String, String> {
     let base = c.base_url;
     let account_email = if c.kind == "auth" { c.secret.as_deref().and_then(|s| crate::login_detect::account_for_secret(&c.platform, s)) } else { None };
 
+    conn.execute_batch("SAVEPOINT jolu_add_connection").map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
     conn.execute(
         "INSERT INTO connections
-           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol, account_email)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13, ?14)",
-        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol, account_email],
+           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol, service, account_email)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13, ?14, ?15)",
+        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol, c.service, account_email],
     ).map_err(|e| e.to_string())?;
+    if c.kind == "auth" {
+        crate::auth_snapshot::capture(conn, &id, &c.platform, c.secret.as_deref().unwrap_or_default())?;
+    }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        conn.execute_batch("ROLLBACK TO jolu_add_connection; RELEASE jolu_add_connection")
+            .map_err(|_| "添加连接失败且事务无法回滚，请重新启动后检查连接状态")?;
+        return Err(error);
+    }
+    conn.execute_batch("RELEASE jolu_add_connection").map_err(|e| e.to_string())?;
     Ok(id)
 }
 
@@ -952,13 +991,32 @@ pub fn find_by_secret(conn: &Sql, platform: &str, kind: &str, secret: &str) -> R
     ).optional().map_err(|e| e.to_string())
 }
 
+/// 先选择本机实际来源，再匹配地址与密钥；未登记的 API 不能回退命中残留 OAuth。
+pub(crate) fn find_current_local(conn: &Sql, local: &crate::current_connection::LocalConnection) -> Result<Option<String>, String> {
+    let normalize = |base: Option<String>| normalized_base(&local.platform, &local.kind,
+        base.map(|value| value.trim().trim_end_matches('/').to_string()).filter(|value| !value.is_empty()));
+    let expected = normalize(local.base_url.clone());
+    let mut statement = conn.prepare("SELECT id, base_url FROM connections WHERE platform=?1 AND kind=?2 AND secret=?3 ORDER BY created_ms, id")
+        .map_err(|error| error.to_string())?;
+    let rows = statement.query_map(params![local.platform, local.kind, local.secret], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (id, base) = row.map_err(|error| error.to_string())?;
+        if normalize(base) == expected { return Ok(Some(id)); }
+    }
+    Ok(None)
+}
+
 pub fn register_local(conn: &Sql, input: NewConnection) -> Result<(String, bool), String> {
     let c = prepare_new(input)?;
     let mut stmt = conn.prepare("SELECT id, base_url FROM connections WHERE platform=?1 AND kind=?2 AND secret=?3").map_err(|e| e.to_string())?;
     let matches = stmt.query_map(params![c.platform, c.kind, c.secret], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
         .map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
     let existing = matches.into_iter().find(|(_, base)| normalized_base(&c.platform, &c.kind, base.clone()) == c.base_url).map(|(id, _)| id);
-    if let Some(id) = existing { return Ok((id, false)); }
+    if let Some(id) = existing {
+        if c.kind == "auth" { crate::auth_snapshot::capture(conn, &id, &c.platform, c.secret.as_deref().unwrap_or_default())?; }
+        return Ok((id, false));
+    }
     let id = add(conn, c)?;
     conn.execute("UPDATE connections SET status='paused', last_sync_ms=NULL WHERE id=?1", [&id]).map_err(|e| e.to_string())?;
     Ok((id, true))
@@ -1178,7 +1236,8 @@ pub(crate) fn apply_local(
         params![platform, kind],
         |row| row.get(0),
     )?;
-    if same_kind_count > 1 && current_secret.is_some() && current_secret.as_deref() != Some(local.secret.as_str()) {
+    if same_kind_count > 1 && current_secret.is_some() && current_secret.as_deref() != Some(local.secret.as_str())
+        && !(kind == "auth" && matches!(platform.as_str(), "codex" | "claude")) {
         return Ok(FetchResult {
             ok: false,
             masked: Some(masked),
@@ -1187,11 +1246,20 @@ pub(crate) fn apply_local(
             changed: false,
         });
     }
+    if kind == "auth" && matches!(platform.as_str(), "codex" | "claude")
+        && !crate::auth_snapshot::can_refresh(conn, id, &platform, current_secret.as_deref(), &local.secret)
+    {
+        return Ok(FetchResult { ok: false, masked: Some(masked),
+            message: "无法确认本机登录仍属于此账号，已保留原账号；请新增连接，或切回该账号后重新同步完整授权".into(),
+            scanned, changed: false });
+    }
     let changed = current_secret.as_deref() != Some(local.secret.as_str())
         || normalized_base(&platform, &kind, current_base) != base_url;
     if changed {
         let now = chrono::Local::now().timestamp_millis();
         let email = if kind == "auth" { crate::login_detect::account_for_secret(&platform, &local.secret) } else { None };
+        conn.execute_batch("SAVEPOINT jolu_refresh_connection")?;
+        let result = (|| -> rusqlite::Result<()> {
         conn.execute(
             "UPDATE connections
                 SET secret = ?2, masked = ?3, base_url = ?4, status = 'connected', last_sync_ms = ?5,
@@ -1199,6 +1267,18 @@ pub(crate) fn apply_local(
               WHERE id = ?1",
             params![id, local.secret, masked, base_url, now, email],
         )?;
+        if kind == "auth" && platform == "codex" {
+            let captured = crate::auth_snapshot::capture(conn, id, &platform, &local.secret)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error))))?;
+            if !captured { return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other("本机授权在同步期间发生变化，请重试")))); }
+        }
+        Ok(())
+        })();
+        if let Err(error) = result {
+            conn.execute_batch("ROLLBACK TO jolu_refresh_connection; RELEASE jolu_refresh_connection")?;
+            return Err(error);
+        }
+        conn.execute_batch("RELEASE jolu_refresh_connection")?;
     }
     Ok(FetchResult {
         ok: true,
@@ -1323,7 +1403,7 @@ mod account_email_tests {
     #[test]
     fn account_email_survives_rename_pause_and_dto_has_no_secret() {
         let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
-        let id = add(&db, NewConnection { platform:"codex".into(), kind:"auth".into(), name:"Work".into(), secret:Some("synthetic-identity-only".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
+        let id = add(&db, NewConnection { service: None, platform:"codex".into(), kind:"auth".into(), name:"Work".into(), secret:Some("synthetic-identity-only".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
         db.execute("UPDATE connections SET account_email='person@example.test', name='Renamed' WHERE id=?1", [&id]).unwrap();
         set_paused(&db, &id, true).unwrap();
         let rows = list(&db).unwrap();
@@ -1332,8 +1412,49 @@ mod account_email_tests {
         let dto = serde_json::to_value(&rows[0]).unwrap();
         assert!(dto.get("secret").is_none());
         assert_eq!(dto["account_email"], "person@example.test");
-        apply_local(&db, &id, Some(LocalPair { secret: "synthetic-replacement-identity".into(), base_url: None }), vec![]).unwrap();
-        assert_eq!(list(&db).unwrap()[0].account_email, None);
+        let refreshed = apply_local(&db, &id, Some(LocalPair { secret: "synthetic-replacement-identity".into(), base_url: None }), vec![]).unwrap();
+        assert!(!refreshed.ok && !refreshed.changed);
+        assert_eq!(list(&db).unwrap()[0].account_email.as_deref(), Some("person@example.test"));
 
+    }
+}
+
+#[cfg(test)]
+mod auth_identity_sync_tests {
+    use super::*;
+    #[test]
+    fn lone_subscription_is_not_overwritten_by_another_login() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        for platform in ["claude", "codex"] {
+            db.execute("INSERT INTO connections(id,platform,kind,name,secret,masked,created_ms) VALUES(?1,?1,'auth','original','original-auth','****',1)", [platform]).unwrap();
+            let result = apply_local(&db, platform, Some(LocalPair { secret: "different-auth".into(), base_url: None }), vec![]).unwrap();
+            assert!(!result.ok && !result.changed);
+            assert_eq!(creds_of(&db, platform).unwrap().unwrap().secret.as_deref(), Some("original-auth"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod current_local_tests {
+    use super::*;
+    #[test]
+    fn current_match_requires_kind_key_and_endpoint_without_oauth_fallback() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        for (id, kind, key, base) in [
+            ("oauth", "auth", "oauth-key", None),
+            ("first-gateway", "api", "shared-key", Some("https://first.test/v1")),
+            ("second-gateway", "api", "shared-key", Some("https://second.test/v1")),
+            ("official", "api", "official-key", None),
+        ] {
+            db.execute("INSERT INTO connections(id,platform,kind,name,secret,base_url,masked,created_ms) VALUES(?1,'codex',?2,?1,?3,?4,'****',1)", params![id,kind,key,base]).unwrap();
+        }
+        let mut local = crate::current_connection::LocalConnection { platform:"codex".into(), kind:"api".into(), secret:"unregistered-key".into(), base_url:None };
+        assert!(find_current_local(&db, &local).unwrap().is_none());
+        local.secret="oauth-key".into();
+        assert!(find_current_local(&db, &local).unwrap().is_none(), "API不能命中残留Auth");
+        local.secret="shared-key".into();local.base_url=Some(" https://second.test/v1/ ".into());
+        assert_eq!(find_current_local(&db, &local).unwrap().as_deref(), Some("second-gateway"));
+        local.secret="official-key".into();local.base_url=Some("https://api.openai.com/v1/".into());
+        assert_eq!(find_current_local(&db, &local).unwrap().as_deref(), Some("official"));
     }
 }

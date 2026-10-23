@@ -532,6 +532,9 @@ fn scan_file(conn: &mut Connection, path: &Path, kind: &str) -> Result<usize, St
 }
 
 pub fn scan(db: &mut impl Store) -> ScanResult {
+    if crate::validation::isolated() {
+        return ScanResult { errors: vec!["隔离验收不读取用户日志".into()], ..Default::default() };
+    }
     let mut result = ScanResult::default();
     let Some(home) = home() else {
         result.errors.push("无法定位用户主目录".into());
@@ -586,6 +589,9 @@ fn merge(result: &mut ScanResult, other: ScanResult) {
 /// 本机来源（Gemini / Qoder / WorkBuddy / Zcode）只在变化落在其目录内时才扫描，
 /// Claude / Codex 的每次写入不再连带重扫它们。
 pub fn scan_paths(db: &mut impl Store, changed: impl IntoIterator<Item = PathBuf>) -> ScanResult {
+    if crate::validation::isolated() {
+        return ScanResult { errors: vec!["隔离验收不读取用户日志".into()], ..Default::default() };
+    }
     let mut result = ScanResult::default();
     let Some(home) = home() else {
         result.errors.push("无法定位用户主目录".into());
