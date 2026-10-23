@@ -4,9 +4,9 @@ import { ChevronDown, ChevronRight, Copy, Download, Folder, FolderOpen, GitBranc
 import { cn } from "@/lib/utils"
 import { isTauri } from "@/lib/api"
 import {
-  skillsApi, type SkillCopyResultDto, type SkillImportAction, type SkillImportScanDto, type SkillItemDto, type SkillProjectDto, type SkillRootDto, type SkillScope,
+  skillsApi, type SkillCopyResultDto, type SkillImportAction, type SkillImportScanDto, type SkillItemDto, type SkillPlatformDto, type SkillProjectDto, type SkillRootDto, type SkillScope,
 } from "@/lib/skillsApi"
-import { SKILL_PLATFORMS, projectLabel, scopeLabel, targetDirHint } from "@/lib/skillsManager"
+import { SKILL_PLATFORMS, globalChanges, globalRowView, projectLabel, scopeLabel, staleParkedNote, targetDirHint, type GlobalDraft } from "@/lib/skillsManager"
 import { demoImportScan } from "@/mock/skills"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { Tip } from "@/components/ui/Tip"
@@ -28,8 +28,10 @@ function parseScope(key: string): { scope: SkillScope; project: string | null } 
 
 /* ───────────── 导入（画板 82） ───────────── */
 
-export function ImportDialog({ platform, projects, onClose, onDone }: {
+export function ImportDialog({ platform, platforms, projects, onClose, onDone }: {
   platform: string
+  /** 各工具的全局目标目录（目录设置里可能已更换） */
+  platforms: SkillPlatformDto[]
   projects: string[]
   onClose: () => void
   onDone: () => void
@@ -211,7 +213,7 @@ export function ImportDialog({ platform, projects, onClose, onDone }: {
           <FieldSelect label="安装范围" value={scopeKey} onChange={setScopeKey} options={scopeOptions(projects)} />
         </Field>
       </div>
-      <span className="truncate text-[11px] text-jolu-muted">目标：{scan?.target ?? targetDirHint(target, scope, project)}</span>
+      <span className="truncate text-[11px] text-jolu-muted">目标：{scan?.target ?? targetDirHint(target, scope, project, platforms)}</span>
 
       {error && <p role="alert" className="rounded-lg bg-jolu-danger-soft px-3 py-2 text-[11px] text-jolu-danger">{error}</p>}
 
@@ -421,11 +423,14 @@ export function RemoveDialog({ item, onClose, onDone }: { item: SkillItemDto; on
 }
 
 /* ───────────── 扫描目录设置（画板 84 · 01） ───────────── */
-/* ───────────── 扫描目录设置（画板 84 · 01） ───────────── */
+
+/** D-18：更换只改 Jolu 扫描和写入的目录，不改工具的环境变量 */
+const GLOBAL_DIR_NOTE = "工具是否读取该目录取决于其配置（如 CLAUDE_CONFIG_DIR / CODEX_HOME）"
 
 /**
- * 全局目录由工具决定（只显示）；项目目录 = 会话记录自动带出 + 手动添加。
- * 自动带出的可以忽略 / 恢复（只记在 skills.json，不删会话数据），手动添加的可以移除。
+ * 全局目录：工具主目录可以「更换」，已更换的可以「恢复默认」；Codex 的 `~/.agents/skills` 不受 CODEX_HOME 影响、固定扫描，不提供更换。
+ * 项目目录 = 会话记录自动带出 + 手动添加。自动带出的可以忽略 / 恢复（只记在 skills.json，不删会话数据），手动添加的可以移除。
+ * 画板 84 · 01 整块只有一个「保存并扫描」：以上改动都先记在草稿里，保存时一次提交（任一项无效都不写入）；关闭弹窗即放弃草稿。
  */
 export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }: {
   platform: string
@@ -436,6 +441,7 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
 }) {
   const [manual, setManual] = useState(() => projects.filter((p) => p.source === "manual").map((p) => p.path))
   const [ignored, setIgnored] = useState(() => new Set(projects.filter((p) => p.ignored).map((p) => p.path)))
+  const [drafts, setDrafts] = useState<Record<string, GlobalDraft>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const globals = roots.filter((r) => r.scope === "global")
@@ -451,14 +457,26 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
       setError(errorText(reason))
     }
   }
+  /** 更换只改草稿；目录是否有效在保存时由后端校验 */
+  const pickGlobal = async (root: SkillRootDto) => {
+    if (!isTauri) return
+    try {
+      const folder = await skillsApi.pickFolder(`更换 ${providerName(root.platform)} 全局目录`)
+      if (folder) setDrafts((d) => ({ ...d, [root.platform]: folder }))
+    } catch (reason) {
+      setError(errorText(reason))
+    }
+  }
   const save = async () => {
     if (!isTauri) return onSaved()
     setSaving(true)
+    setError(null)
     try {
-      await skillsApi.setProjects(manual)
-      for (const p of sessions) {
-        if (p.ignored !== ignored.has(p.path)) await skillsApi.ignoreProject(p.path, ignored.has(p.path))
-      }
+      await skillsApi.saveDirSettings({
+        projects: manual,
+        ignore: sessions.filter((p) => p.ignored !== ignored.has(p.path)).map((p) => ({ path: p.path, ignored: ignored.has(p.path) })),
+        globals: globalChanges(roots, drafts),
+      })
       onSaved()
     } catch (reason) {
       setError(errorText(reason))
@@ -470,33 +488,58 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
   const skillDirs = (path: string) => {
     const p = known(path)
     if (!p) return "保存后扫描"
-    const found = [p.claude && "Claude Code", p.codex && "Codex"].filter(Boolean)
-    return found.length ? `含 ${found.join(" / ")} 的项目 Skills 目录` : "没有 Skills 目录 · 可作为新建或复制的目标"
+    return p.tools.length ? `含 ${p.tools.map(providerName).join(" / ")} 的项目 Skills 目录` : "没有 Skills 目录 · 可作为新建或复制的目标"
   }
 
-  const row = (key: string, label: string, path: string, note: string | null, action: React.ReactNode, dim = false) => (
+  const row = (key: string, label: string, path: string, note: React.ReactNode, action: React.ReactNode, dim = false) => (
     <div key={key} className={cn("flex items-center gap-2.5 rounded-lg bg-jolu-side p-3", dim && "opacity-55")}>
       <FolderOpen aria-hidden className="size-4 shrink-0 text-jolu-muted" />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="text-[10px] text-jolu-muted">{label}</span>
         <span className="truncate font-mono text-[11px] text-jolu-text" title={path}>{path}</span>
-        {note && <span className="text-[10px] text-jolu-muted">{note}</span>}
+        {note}
       </div>
       {action}
     </div>
   )
 
+  const globalRow = (r: SkillRootDto) => {
+    if (!r.overridable) {
+      const note = r.exists ? null : <span className="text-[10px] text-jolu-muted">未检测到这个目录</span>
+      return row(`g-${r.platform}-${r.path}`, `${providerName(r.platform)} · 全局目录`, r.path, note,
+        <Tip label="共享目录，不受工具环境变量影响，固定扫描"><span tabIndex={0}><JoluButton variant="outline" size="sm" disabled>更换</JoluButton></span></Tip>)
+    }
+    const view = globalRowView(r, drafts[r.platform])
+    const notes = [
+      !view.changed && !r.exists ? "未检测到这个目录" : null,
+      view.defaultPath ? `默认位置：${view.defaultPath}` : null,
+    ].filter(Boolean).join(" · ")
+    // 待确认：画板 84 · 01 只画了全局目录旁的「更换」；「恢复默认」、共享目录的禁用说明与下方停用提示按 D-18 补上
+    const note = (
+      <>
+        {notes && <span className="text-[10px] text-jolu-muted">{notes}</span>}
+        {view.staleParked > 0 && (
+          <span className="flex items-start gap-1 text-[10px] text-jolu-text">
+            {/* 待确认：画板 84 未画此状态 */}
+            <Info aria-hidden className="mt-px size-3 shrink-0" />{staleParkedNote(view.staleParked)}
+          </span>
+        )}
+      </>
+    )
+    const action = (
+      <div className="flex shrink-0 gap-1.5">
+        {view.overridden && <JoluButton variant="outline" size="sm" disabled={!isTauri || saving} onClick={() => setDrafts((d) => ({ ...d, [r.platform]: null }))}>恢复默认</JoluButton>}
+        <JoluButton variant="outline" size="sm" disabled={!isTauri || saving} onClick={() => void pickGlobal(r)}>更换</JoluButton>
+      </div>
+    )
+    return row(`g-${r.platform}-${r.path}`, `${providerName(r.platform)} · 全局目录${view.overridden ? " · 已更换" : ""}`, view.path, note, action)
+  }
+
   return (
     <DialogShell width={600} title="扫描目录设置" onClose={onClose} busy={saving}>
-      <p className="text-[11px] text-jolu-muted">供应商：{platform === "all" ? "全部" : providerName(platform)} · 全局目录由工具决定；项目目录来自会话记录和手动添加</p>
+      <p className="text-[11px] text-jolu-muted">供应商：{platform === "all" ? "全部" : providerName(platform)} · 全局目录可更换，只影响 Jolu 扫描和写入的位置，{GLOBAL_DIR_NOTE}；项目目录来自会话记录和手动添加</p>
       <div className="flex max-h-[400px] flex-col gap-2 overflow-y-auto">
-        {globals.map((r) => row(
-          `g-${r.path}`,
-          `${providerName(r.platform)} · 全局目录`,
-          r.path,
-          r.exists ? null : "未检测到这个目录",
-          <Tip label="更换全局目录待接入"><span tabIndex={0}><JoluButton variant="outline" size="sm" disabled>更换</JoluButton></span></Tip>,
-        ))}
+        {globals.map(globalRow)}
         {manual.map((p) => row(`m-${p}`, "项目目录 · 手动添加", p, skillDirs(p),
           <JoluButton variant="outline" size="sm" onClick={() => setManual(manual.filter((x) => x !== p))}><X aria-hidden />移除</JoluButton>,
         ))}
@@ -519,7 +562,7 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
         <JoluButton variant="neutral" size="sm" disabled={!isTauri || saving} onClick={() => void add()}><Plus aria-hidden />添加目录</JoluButton>
         <JoluButton variant="soft" size="sm" disabled={saving} onClick={() => void save()}><RefreshCw aria-hidden />保存并扫描</JoluButton>
       </div>
-      <p className="text-[10px] text-jolu-muted">只扫描含有 Skills 目录的项目；已不存在的目录自动跳过。忽略或移除项目不会删除任何文件或会话数据。</p>
+      <p className="text-[10px] text-jolu-muted">只扫描含有 Skills 目录的项目；已不存在的目录自动跳过。更换全局目录、忽略或移除项目不会移动或删除任何文件或会话数据。</p>
     </DialogShell>
   )
 }

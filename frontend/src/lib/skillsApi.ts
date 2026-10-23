@@ -43,12 +43,24 @@ export interface SkillRootDto {
   path: string
   exists: boolean
   readonly: boolean
+  /** 工具主目录，可在「扫描目录设置」里更换（D-18） */
+  overridable: boolean
+  /** 已更换为其他目录 */
+  overridden: boolean
+  /** 已更换时的默认位置，「恢复默认」后回到这里 */
+  default_path: string | null
+  /** 停用区里原位置在这个目录下的 Skill 数；更换目录后它们启用时仍回到这里 */
+  parked_here: number
 }
 
 export interface SkillPlatformDto {
   id: string
   detected: boolean
   count: number
+  /** 目录规则已按官方文档核实 */
+  verified: boolean
+  /** 新建、导入、复制到全局时的目标目录；工具不支持写入时为 null */
+  global_dir: string | null
 }
 
 export interface SkillProjectDto {
@@ -56,9 +68,8 @@ export interface SkillProjectDto {
   /** manual：手动添加；session：来自会话记录 */
   source: "manual" | "session"
   ignored: boolean
-  /** 含有 Claude Code / Codex 的项目级 Skills 目录 */
-  claude: boolean
-  codex: boolean
+  /** 含有项目级 Skills 目录的工具 id */
+  tools: string[]
 }
 
 export interface SkillsOverviewDto {
@@ -145,6 +156,15 @@ export interface SkillGitImportScanDto {
   scan: SkillImportScanDto
 }
 
+export interface SkillDirSettingsInput {
+  /** 手动添加的项目目录（完整列表） */
+  projects: string[]
+  /** 会话记录带出的项目里改了忽略状态的 */
+  ignore: { path: string; ignored: boolean }[]
+  /** 改了全局目录的工具；path 为 null 表示恢复默认 */
+  globals: { platform: string; path: string | null }[]
+}
+
 /** 编辑保存时文件已被其他程序改动（画板 84「检测到外部修改」） */
 export const SKILL_EXTERNAL_CHANGE = "external_change"
 
@@ -171,4 +191,6 @@ export const skillsApi = {
   importGit: (url: string, branch: string | null, platform: string, scope: SkillScope, project: string | null) =>
     invoke<SkillGitImportScanDto>("skills_import_git", { url, branch, platform, scope, project }),
   importGitCleanup: (checkoutDir: string) => invoke<void>("skills_import_git_cleanup", { checkoutDir }),
+  /** 「扫描目录设置」的「保存并扫描」：项目目录、忽略状态、全局目录（D-18）一次提交，任一项无效则都不写入 */
+  saveDirSettings: (input: SkillDirSettingsInput) => invoke<void>("skills_save_dir_settings", { input }),
 }

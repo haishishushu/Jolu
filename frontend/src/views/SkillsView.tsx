@@ -160,7 +160,7 @@ export function SkillsView({ active }: { active: boolean }) {
 
   const dialogs = (
     <>
-      {dialog?.kind === "import" && <ImportDialog platform={platform} projects={targets} onClose={() => setDialog(null)} onDone={() => { setDialog(null); refresh() }} />}
+      {dialog?.kind === "import" && <ImportDialog platform={platform} platforms={data?.platforms ?? []} projects={targets} onClose={() => setDialog(null)} onDone={() => { setDialog(null); refresh() }} />}
       {dialog?.kind === "dirs" && data && (
         <DirectoryDialog platform={platform} roots={data.roots} projects={data.projects} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh() }} />
       )}
@@ -192,6 +192,7 @@ export function SkillsView({ active }: { active: boolean }) {
         key={mode.target.mode === "edit" ? mode.target.item.path : "new"}
         target={mode.target}
         items={items}
+        platforms={data?.platforms ?? []}
         projects={targets}
         onCancel={() => setMode(mode.back ? { kind: "detail", item: mode.back } : { kind: "list" })}
         onSaved={(path, savedPlatform) => {

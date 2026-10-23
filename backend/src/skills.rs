@@ -5,7 +5,10 @@
 //!   `skills/synced/` 是从 claude.ai 同步来的，只读。
 //! - Codex：用户 `~/.agents/skills` 与旧位置 `$CODEX_HOME/skills`，系统 `$CODEX_HOME/skills/.system`（只读），
 //!   项目 `<项目>/.agents/skills` 与 `<项目>/.codex/skills`。
-//! 其他工具没有可靠依据，前端标「待接入」。
+//! 其他工具没有可靠依据，前端标「待接入」。各工具的目录、启停方式与写入能力集中在 `SPECS` 规则表（D-19）。
+//!
+//! 「更换全局目录」（D-18）只改 Jolu 扫描和写入的工具主目录（存进 `skills.json` 的 `global_override`），
+//! 不改工具的环境变量与配置文件位置；Codex 的 `~/.agents/skills` 不受 `CODEX_HOME` 影响，照常扫描。
 //!
 //! 启停只作用于选中的这一份副本：
 //! - Claude Code 的 `skillOverrides` 按名称生效、不能按路径区分，会连带同名副本，所以 Jolu 不写它；
@@ -20,7 +23,7 @@
 //! 操作的路径必须是已知根目录的直接子目录（或停用区里登记过的副本），符号链接安装项只读，复制时不跟随符号链接。
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -30,8 +33,6 @@ use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
-/// 支持扫描与写入的工具；其余供应商在前端标「待接入」
-pub const PLATFORMS: [&str; 2] = ["claude", "codex"];
 const SKILL_FILE: &str = "SKILL.md";
 const MAX_SKILL_BYTES: u64 = 1024 * 1024;
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
@@ -52,6 +53,98 @@ pub enum Scope {
     Synced,
 }
 
+/* ───────────────────────── 工具规则表（D-19） ───────────────────────── */
+
+/// 启停方式
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Toggle {
+    /// 把这一份移到 Jolu 停用区（Claude Code）；同时只读识别 settings.json 里用户写的 `skillOverrides`
+    Park,
+    /// Codex `config.toml` 的 `[[skills.config]]`，按 SKILL.md 路径停用
+    CodexToml,
+    /// 任务 4.2：`~/.gemini/settings.json` 的 `skills.disabled[]`
+    #[allow(dead_code)]
+    GeminiSettings,
+    /// 任务 4.2：`opencode.json` 的 `permission.skill.<名称> = "deny"`
+    #[allow(dead_code)]
+    OpenCodePermission,
+    /// 不提供启停
+    #[allow(dead_code)]
+    None,
+}
+
+/// 一个工具的 Skills 目录规则。路径用 `/` 分隔，拼接时逐段展开（不混用分隔符）。
+///
+/// 约定：
+/// - `global[0]` 是新建、导入、复制到全局时的目标目录；
+/// - `global` 的最后一项是工具自己的主目录：`home_env` 设了环境变量时为 `$ENV/<子目录>`，否则为用户目录下的默认位置，
+///   默认位置去掉末尾的 `/<子目录>` 就是工具配置所在目录（如 `~/.claude/settings.json`、`~/.codex/config.toml`）；
+///   「更换全局目录」（D-18）替换的也是这一项，前面的项（如 Codex 的 `~/.agents/skills`）不受影响；
+/// - `readonly_subdirs` 是主目录下由工具托管的只读子目录，单独作为根目录扫描，扫描主目录时跳过。
+pub struct ToolSpec {
+    pub id: &'static str,
+    /// 给用户看的名称（报错文案用）
+    pub name: &'static str,
+    /// 相对用户目录，如 ".claude/skills"
+    pub global: &'static [&'static str],
+    /// 相对项目根，如 ".claude/skills"
+    pub project: &'static [&'static str],
+    /// (环境变量, 其下子目录)，如 ("CLAUDE_CONFIG_DIR", "skills")
+    pub home_env: Option<(&'static str, &'static str)>,
+    pub toggle: Toggle,
+    pub writable: bool,
+    /// SKILL.md 必须写 name（Codex）；否则缺 name 时用目录名
+    pub require_name: bool,
+    /// 目录规则已按官方文档核实
+    pub verified: bool,
+    pub readonly_subdirs: &'static [(&'static str, Scope)],
+}
+
+/// 已接入的工具；其余供应商在前端标「待接入」（任务 4.2 继续添加）
+pub const SPECS: &[ToolSpec] = &[
+    ToolSpec {
+        id: "claude",
+        name: "Claude Code",
+        global: &[".claude/skills"],
+        project: &[".claude/skills"],
+        home_env: Some(("CLAUDE_CONFIG_DIR", "skills")),
+        toggle: Toggle::Park,
+        writable: true,
+        require_name: false,
+        verified: true,
+        readonly_subdirs: &[("synced", Scope::Synced)],
+    },
+    ToolSpec {
+        id: "codex",
+        name: "Codex",
+        // `~/.agents/skills` 是首选位置，`$CODEX_HOME/skills` 是旧位置；`~/.agents/skills` 不受 CODEX_HOME 影响
+        global: &[".agents/skills", ".codex/skills"],
+        project: &[".agents/skills", ".codex/skills"],
+        home_env: Some(("CODEX_HOME", "skills")),
+        toggle: Toggle::CodexToml,
+        writable: true,
+        require_name: true,
+        verified: true,
+        readonly_subdirs: &[(".system", Scope::System)],
+    },
+];
+
+pub fn spec(id: &str) -> Option<&'static ToolSpec> {
+    SPECS.iter().find(|s| s.id == id)
+}
+
+/// 按 `/` 逐段拼到 `base` 下
+fn rel(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/').filter(|s| !s.is_empty()).fold(base.to_path_buf(), |path, seg| path.join(seg))
+}
+
+/// `home_env` 的环境变量名与未设置时的默认目录（相对用户目录）：`global` 最后一项去掉 `/<子目录>`
+fn env_default(spec: &ToolSpec) -> Option<(&'static str, &'static str)> {
+    let (name, sub) = spec.home_env?;
+    let own = spec.global.last()?;
+    own.strip_suffix(sub)?.strip_suffix('/').map(|dir| (name, dir))
+}
+
 #[derive(Clone, Debug)]
 struct Root {
     platform: &'static str,
@@ -60,78 +153,127 @@ struct Root {
     path: PathBuf,
     readonly: bool,
     /// 扫描时跳过的子目录（它们是单独的根目录）
-    skip: &'static [&'static str],
+    skip: Vec<&'static str>,
     /// 停用区里登记的副本
     parked: bool,
+    /// 工具主目录（可在 Jolu 里更换）
+    own: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Homes {
-    pub claude: PathBuf,
-    pub codex: PathBuf,
     pub user: PathBuf,
+    /// `home_env` 的环境变量 → 工具配置所在目录（环境变量的值，或用户目录下的默认位置）
+    pub env: HashMap<String, PathBuf>,
+}
+
+fn homes_from(user: PathBuf, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Homes {
+    let mut env = HashMap::new();
+    for spec in SPECS {
+        if let Some((name, default)) = env_default(spec) {
+            let dir = var(name).map(PathBuf::from).unwrap_or_else(|| rel(&user, default));
+            env.insert(name.to_string(), dir);
+        }
+    }
+    Homes { user, env }
+}
+
+/// 隔离验收环境：用户目录换成 `<JOLU_TEST_DIR>/skills-home`，不读环境变量
+fn isolated_homes(test_dir: &Path) -> Homes {
+    homes_from(test_dir.join("skills-home"), |_| None)
 }
 
 fn homes() -> Result<Homes, String> {
-    // 隔离验收环境不碰真实用户目录
+    // 隔离验收环境不碰真实用户目录，也不读环境变量
     if let Some(dir) = crate::validation::data_dir() {
-        let base = dir.join("skills-home");
-        return Ok(Homes { claude: base.join(".claude"), codex: base.join(".codex"), user: base });
+        return Ok(isolated_homes(&dir));
     }
     let user = crate::creds::home().ok_or("未找到用户主目录")?;
-    let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| user.join(".claude"));
-    let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| user.join(".codex"));
-    Ok(Homes { claude, codex, user })
+    Ok(homes_from(user, |name| std::env::var_os(name)))
 }
 
-fn static_platform(platform: &str) -> &'static str {
-    if platform == "claude" { "claude" } else { "codex" }
+/// 工具配置所在目录（如 `~/.claude`、`$CODEX_HOME`）；不受「更换全局目录」影响
+fn tool_home(h: &Homes, spec: &ToolSpec) -> PathBuf {
+    if let Some(dir) = spec.home_env.and_then(|(name, _)| h.env.get(name)) {
+        return dir.clone();
+    }
+    let own = spec.global.last().copied().unwrap_or_default();
+    rel(&h.user, own.rsplit_once('/').map_or(own, |(dir, _)| dir))
 }
 
-fn roots(h: &Homes, platform: &str, projects: &[PathBuf]) -> Vec<Root> {
-    let root = |scope, project: Option<&PathBuf>, path: PathBuf, readonly, skip| Root {
-        platform: static_platform(platform),
+/// 工具主目录的默认位置（没有在 Jolu 里更换时）
+fn default_global(h: &Homes, spec: &ToolSpec) -> PathBuf {
+    match spec.home_env {
+        Some((_, sub)) if env_default(spec).is_some() => rel(&tool_home(h, spec), sub),
+        _ => rel(&h.user, spec.global.last().copied().unwrap_or_default()),
+    }
+}
+
+/// 工具主目录：「更换全局目录」设置过时用它，否则用默认位置
+fn own_global(h: &Homes, cfg: &Config, spec: &ToolSpec) -> PathBuf {
+    cfg.global_override.get(spec.id).map(PathBuf::from).unwrap_or_else(|| default_global(h, spec))
+}
+
+/// 已保存的覆盖路径失效（不是绝对路径或目录已不存在）时返回它：这时主目录只读，不会被写入时静默重建
+fn broken_override<'a>(cfg: &'a Config, spec: &ToolSpec) -> Option<&'a str> {
+    let path = cfg.global_override.get(spec.id)?;
+    let dir = Path::new(path);
+    (!dir.is_absolute() || has_parent_component(dir) || !dir.is_dir()).then_some(path.as_str())
+}
+
+fn broken_override_reason(path: &str) -> String {
+    format!("已更换的目录不存在：{path}")
+}
+
+fn roots(h: &Homes, cfg: &Config, platform: &str, projects: &[PathBuf]) -> Vec<Root> {
+    let Some(spec) = spec(platform) else { return Vec::new() };
+    let root = |scope, project: Option<&PathBuf>, path: PathBuf, readonly, skip: Vec<&'static str>, own| Root {
+        platform: spec.id,
         scope,
         project: project.cloned(),
         path,
         readonly,
         skip,
         parked: false,
+        own,
     };
     let mut out = Vec::new();
-    match platform {
-        "claude" => {
-            out.push(root(Scope::Global, None, h.claude.join("skills"), false, &["synced"]));
-            out.push(root(Scope::Synced, None, h.claude.join("skills").join("synced"), true, &[]));
-            for p in projects {
-                out.push(root(Scope::Project, Some(p), p.join(".claude").join("skills"), false, &[]));
-            }
+    let last = spec.global.len().saturating_sub(1);
+    for (i, dir) in spec.global.iter().enumerate() {
+        if i < last {
+            out.push(root(Scope::Global, None, rel(&h.user, dir), !spec.writable, Vec::new(), false));
+            continue;
         }
-        "codex" => {
-            out.push(root(Scope::Global, None, h.user.join(".agents").join("skills"), false, &[]));
-            out.push(root(Scope::Global, None, h.codex.join("skills"), false, &[".system"]));
-            out.push(root(Scope::System, None, h.codex.join("skills").join(".system"), true, &[]));
-            for p in projects {
-                out.push(root(Scope::Project, Some(p), p.join(".agents").join("skills"), false, &[]));
-                out.push(root(Scope::Project, Some(p), p.join(".codex").join("skills"), false, &[]));
-            }
+        let path = own_global(h, cfg, spec);
+        let skip = spec.readonly_subdirs.iter().map(|(sub, _)| *sub).collect();
+        let readonly = !spec.writable || broken_override(cfg, spec).is_some();
+        out.push(root(Scope::Global, None, path.clone(), readonly, skip, true));
+        for (sub, scope) in spec.readonly_subdirs {
+            out.push(root(*scope, None, rel(&path, sub), true, Vec::new(), false));
         }
-        _ => {}
+    }
+    for p in projects {
+        for dir in spec.project {
+            out.push(root(Scope::Project, Some(p), rel(p, dir), !spec.writable, Vec::new(), false));
+        }
     }
     out
 }
 
 /// 新建、导入、复制的目标目录：每个范围取首选位置（Codex 用户级用 `~/.agents/skills`，`$CODEX_HOME/skills` 已标记为旧位置）
-fn write_root(h: &Homes, platform: &str, scope: Scope, project: Option<&Path>) -> Result<Root, String> {
+fn write_root(h: &Homes, cfg: &Config, platform: &str, scope: Scope, project: Option<&Path>) -> Result<Root, String> {
     let project = match scope {
         Scope::Global => None,
         Scope::Project => Some(project.ok_or("请选择项目目录")?.to_path_buf()),
         _ => return Err("只读范围不能写入".into()),
     };
-    let list = roots(h, platform, project.as_slice());
-    list.into_iter()
-        .find(|r| r.scope == scope && !r.readonly)
-        .ok_or_else(|| format!("{platform} 暂不支持写入 Skills"))
+    let list = roots(h, cfg, platform, project.as_slice());
+    list.into_iter().find(|r| r.scope == scope && !r.readonly).ok_or_else(|| {
+        match (scope, spec(platform).and_then(|s| broken_override(cfg, s))) {
+            (Scope::Global, Some(path)) => broken_override_reason(path),
+            _ => format!("{platform} 暂不支持写入 Skills"),
+        }
+    })
 }
 
 /* ───────────────────────── 路径比较 ───────────────────────── */
@@ -180,6 +322,12 @@ pub struct Config {
     /// 会话记录带出的项目目录（运行时填入，不落盘）
     #[serde(skip)]
     pub session_projects: Vec<String>,
+    /// 「更换全局目录」（D-18）：工具 id → Jolu 扫描与写入的全局目录，替换工具主目录；不改工具本身的环境变量
+    #[serde(default)]
+    pub global_override: HashMap<String, String>,
+    /// 任务 4.2：「自定义」扫描目录（只扫描，不提供启停）
+    #[serde(default)]
+    pub custom_dirs: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -188,9 +336,8 @@ pub struct ProjectInfo {
     /// manual：手动添加；session：来自会话记录
     pub source: &'static str,
     pub ignored: bool,
-    /// 含有 Claude Code / Codex 的项目级 Skills 目录
-    pub claude: bool,
-    pub codex: bool,
+    /// 含有项目级 Skills 目录的工具 id（按 `SPECS` 顺序）
+    pub tools: Vec<&'static str>,
 }
 
 impl Config {
@@ -214,8 +361,7 @@ impl Config {
                 path: path.clone(),
                 source,
                 ignored: source == "session" && self.ignored(path),
-                claude: dir.join(".claude").join("skills").is_dir(),
-                codex: dir.join(".agents").join("skills").is_dir() || dir.join(".codex").join("skills").is_dir(),
+                tools: SPECS.iter().filter(|s| s.project.iter().any(|d| rel(dir, d).is_dir())).map(|s| s.id).collect(),
             });
         }
         out
@@ -231,14 +377,73 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     crate::data_paths(app).map(|(dir, _)| dir)
 }
 
+type FileSignature = (u64, Option<std::time::SystemTime>);
+
+/// 读不懂的 skills.json：配置目录 → (文件大小与修改时间, 拒绝保存时的说明)。
+/// 读取时登记并备份一次；文件修好后下次读取即清除。登记期间所有保存都被拒绝，避免用空配置覆盖掉停用登记
+static BROKEN_CONFIG: LazyLock<Mutex<HashMap<String, (FileSignature, String)>>> = LazyLock::new(Default::default);
+
+fn file_signature(path: &Path) -> FileSignature {
+    fs::metadata(path).map(|m| (m.len(), m.modified().ok())).unwrap_or((0, None))
+}
+
+fn parse_config(path: &Path) -> Result<Config, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let text = text.trim_start_matches('\u{feff}');
+    if text.trim().is_empty() {
+        return Ok(Config::default());
+    }
+    serde_json::from_str(text).map_err(|e| e.to_string())
+}
+
+/// 损坏时先把原文件复制为 `skills.json.broken-<时间戳>`（同一份损坏内容只备份一次），本次按空配置继续读取扫描
+fn mark_broken(key: String, path: &Path) {
+    let signature = file_signature(path);
+    let Ok(mut broken) = BROKEN_CONFIG.lock() else { return };
+    if broken.get(&key).is_some_and(|(known, _)| *known == signature) {
+        return;
+    }
+    let backup = path.with_file_name(format!("skills.json.broken-{}", stamp()));
+    let message = match fs::copy(path, &backup) {
+        Ok(_) => format!("Skills 配置文件损坏，已备份为 {}，请检查后重试", backup.display()),
+        Err(e) => format!("Skills 配置文件损坏且无法备份（{e}），请检查 {} 后重试", path.display()),
+    };
+    broken.insert(key, (signature, message));
+}
+
 fn load_config(dir: &Path) -> Config {
-    fs::read_to_string(dir.join("skills.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok())
-        .unwrap_or_default()
+    let path = dir.join("skills.json");
+    let key = norm_key(&dir.to_string_lossy());
+    match parse_config(&path) {
+        Ok(cfg) => {
+            if let Ok(mut broken) = BROKEN_CONFIG.lock() {
+                broken.remove(&key);
+            }
+            cfg
+        }
+        Err(_) => {
+            mark_broken(key, &path);
+            Config::default()
+        }
+    }
+}
+
+/// skills.json 损坏时拒绝一切写入
+fn config_guard(dir: &Path) -> Result<(), String> {
+    let key = norm_key(&dir.to_string_lossy());
+    match BROKEN_CONFIG.lock() {
+        Ok(broken) => broken.get(&key).map_or(Ok(()), |(_, message)| Err(message.clone())),
+        Err(_) => Ok(()),
+    }
 }
 
 fn save_config(dir: &Path, cfg: &Config) -> Result<(), String> {
+    config_guard(dir)?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     write_atomic(&dir.join("skills.json"), text.as_bytes())
@@ -348,12 +553,12 @@ pub fn parse_front(text: &str) -> Result<Front, String> {
     Ok(front)
 }
 
-/// 格式问题；None 表示有效。Codex 要求 name 与 description，Claude Code 缺 name 时用目录名
+/// 格式问题；None 表示有效。都要求 description；`require_name` 的工具（Codex）还要求 name，其余缺 name 时用目录名
 fn validate_front(platform: &str, front: &Result<Front, String>) -> Option<String> {
     match front {
         Err(reason) => Some(reason.clone()),
         Ok(f) if f.description.is_none() => Some("SKILL.md 缺少 description".into()),
-        Ok(f) if platform == "codex" && f.name.is_none() => Some("SKILL.md 缺少 name".into()),
+        Ok(f) if f.name.is_none() && spec(platform).is_some_and(|s| s.require_name) => Some("SKILL.md 缺少 name".into()),
         Ok(_) => None,
     }
 }
@@ -418,6 +623,14 @@ pub struct RootInfo {
     pub path: String,
     pub exists: bool,
     pub readonly: bool,
+    /// 工具主目录，可在「扫描目录设置」里更换（D-18）
+    pub overridable: bool,
+    /// 已更换为其他目录
+    pub overridden: bool,
+    /// 已更换时的默认位置，「恢复默认」后回到这里
+    pub default_path: Option<String>,
+    /// 停用区里原位置在这个目录下的 Skill 数；更换目录后它们启用时仍回到这里
+    pub parked_here: usize,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -426,6 +639,10 @@ pub struct PlatformSummary {
     /// 至少有一个 Skills 根目录存在
     pub detected: bool,
     pub count: usize,
+    /// 目录规则已按官方文档核实
+    pub verified: bool,
+    /// 新建、导入、复制到全局时的目标目录；工具不支持写入时为 None
+    pub global_dir: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -521,18 +738,18 @@ fn claude_override(path: &Path, name: &str) -> Option<String> {
 
 /// 用户自己写的 `skillOverrides: "off"`：按设置优先级取第一个写了这个名称的文件
 /// （项目 settings.local.json > 项目 settings.json > 用户 settings.json）
-fn claude_tool_off(h: &Homes, root: &Root, name: &str) -> bool {
+fn claude_tool_off(h: &Homes, spec: &ToolSpec, root: &Root, name: &str) -> bool {
     let mut files = Vec::new();
     if let (Scope::Project, Some(p)) = (root.scope, &root.project) {
         files.push(p.join(".claude").join("settings.local.json"));
         files.push(p.join(".claude").join("settings.json"));
     }
-    files.push(h.claude.join("settings.json"));
+    files.push(tool_home(h, spec).join("settings.json"));
     files.iter().find_map(|f| claude_override(f, name)).as_deref() == Some("off")
 }
 
-fn codex_config_path(h: &Homes) -> PathBuf {
-    h.codex.join("config.toml")
+fn codex_config_path(h: &Homes, spec: &ToolSpec) -> PathBuf {
+    tool_home(h, spec).join("config.toml")
 }
 
 /// Codex config.toml 里 enabled = false 的覆盖：(path 选择器, name 选择器)
@@ -645,15 +862,16 @@ fn unpark(cfg: &mut Config, dir: &Path, data: &Path) -> Result<String, String> {
 
 /// 启停这一份副本，返回启停后的目录
 fn set_enabled_impl(h: &Homes, cfg: &mut Config, root: &Root, dir: &Path, name: &str, enabled: bool, data: &Path) -> Result<String, String> {
-    match root.platform {
-        "claude" => match (enabled, root.parked) {
+    let spec = spec(root.platform).ok_or_else(|| format!("{} 暂不支持启停 Skills", root.platform))?;
+    match spec.toggle {
+        Toggle::Park => match (enabled, root.parked) {
             (true, true) => unpark(cfg, dir, data),
             (false, false) => park(cfg, root, dir, name, data),
-            (true, false) if claude_tool_off(h, root, name) => Err(TOOL_DISABLED.into()),
+            (true, false) if claude_tool_off(h, spec, root, name) => Err(TOOL_DISABLED.into()),
             _ => Ok(dir.display().to_string()),
         },
-        "codex" => {
-            let path = codex_config_path(h);
+        Toggle::CodexToml => {
+            let path = codex_config_path(h, spec);
             let (_, names) = codex_disabled(&path);
             if enabled && names.iter().any(|n| n == name) {
                 return Err(TOOL_DISABLED.into());
@@ -698,7 +916,7 @@ fn set_enabled_impl(h: &Homes, cfg: &mut Config, root: &Root, dir: &Path, name: 
             write_atomic(&path, doc.to_string().as_bytes())?;
             Ok(dir.display().to_string())
         }
-        other => Err(format!("{other} 暂不支持启停 Skills")),
+        Toggle::GeminiSettings | Toggle::OpenCodePermission | Toggle::None => Err(format!("{} 暂不支持启停 Skills", spec.id)),
     }
 }
 
@@ -716,10 +934,11 @@ fn source_of(raw: &Raw, imported: &[String]) -> &'static str {
     }
 }
 
-fn collect(h: &Homes, cfg: &Config, platform: &str, errors: &mut Vec<ScanError>) -> (Vec<SkillItem>, Vec<RootInfo>) {
+fn collect(h: &Homes, cfg: &Config, spec: &'static ToolSpec, errors: &mut Vec<ScanError>) -> (Vec<SkillItem>, Vec<RootInfo>) {
+    let platform = spec.id;
     let projects = cfg.project_paths(h);
     // 没有对应 Skills 目录的项目不进入扫描结果
-    let list: Vec<Root> = roots(h, platform, &projects).into_iter().filter(|r| r.scope != Scope::Project || r.path.is_dir()).collect();
+    let list: Vec<Root> = roots(h, cfg, platform, &projects).into_iter().filter(|r| r.scope != Scope::Project || r.path.is_dir()).collect();
     let mut raws = Vec::new();
     for root in &list {
         scan_root(root, &mut raws, errors);
@@ -731,18 +950,23 @@ fn collect(h: &Homes, cfg: &Config, platform: &str, errors: &mut Vec<ScanError>)
             continue;
         }
         let root = Root {
-            platform: static_platform(platform),
+            platform,
             scope: entry.scope,
             project: entry.project.as_ref().map(PathBuf::from),
             path: dir.parent().map(Path::to_path_buf).unwrap_or_default(),
             readonly: false,
-            skip: &[],
+            skip: Vec::new(),
             parked: true,
+            own: false,
         };
         let dir_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let front = read_limited(&dir.join(SKILL_FILE), MAX_SKILL_BYTES).and_then(|(t, _)| parse_front(&t));
         raws.push(Raw { root, dir, dir_name, front, original: Some(entry.original.clone()) });
     }
+    if let Some(path) = broken_override(cfg, spec) {
+        errors.push(ScanError { path: path.to_string(), reason: broken_override_reason(path) });
+    }
+    let overridden = cfg.global_override.contains_key(platform);
     let infos = list
         .iter()
         .map(|r| RootInfo {
@@ -752,9 +976,18 @@ fn collect(h: &Homes, cfg: &Config, platform: &str, errors: &mut Vec<ScanError>)
             path: r.path.display().to_string(),
             exists: r.path.is_dir(),
             readonly: r.readonly,
+            overridable: r.own,
+            overridden: overridden && r.own,
+            default_path: (overridden && r.own).then(|| default_global(h, spec).display().to_string()),
+            parked_here: cfg
+                .disabled
+                .iter()
+                .filter(|e| e.platform == platform && Path::new(&e.stored).join(SKILL_FILE).is_file())
+                .filter(|e| Path::new(&e.original).parent().is_some_and(|p| same_path(&p.to_string_lossy(), &r.path)))
+                .count(),
         })
         .collect();
-    let codex = if platform == "codex" { Some(codex_disabled(&codex_config_path(h))) } else { None };
+    let codex = (spec.toggle == Toggle::CodexToml).then(|| codex_disabled(&codex_config_path(h, spec)));
     let mut seen: Vec<(String, Scope)> = Vec::new();
     let mut items = Vec::new();
     for raw in &raws {
@@ -773,7 +1006,7 @@ fn collect(h: &Homes, cfg: &Config, platform: &str, errors: &mut Vec<ScanError>)
                         None
                     }
                 }
-                None => claude_tool_off(h, &raw.root, &name).then_some("tool"),
+                None => (spec.toggle == Toggle::Park && claude_tool_off(h, spec, &raw.root, &name)).then_some("tool"),
             }
         };
         let enabled = disabled_by.is_none();
@@ -821,17 +1054,18 @@ fn collect(h: &Homes, cfg: &Config, platform: &str, errors: &mut Vec<ScanError>)
 }
 
 pub fn overview_with(h: &Homes, cfg: &Config, platform: &str) -> Result<Overview, String> {
-    if platform != "all" && !PLATFORMS.contains(&platform) {
+    if platform != "all" && spec(platform).is_none() {
         return Err(format!("{platform} 暂未接入 Skills 管理"));
     }
     let mut errors = Vec::new();
     let mut platforms = Vec::new();
     let mut items = Vec::new();
     let mut roots_out = Vec::new();
-    for p in PLATFORMS {
-        let (list, infos) = collect(h, cfg, p, &mut errors);
-        platforms.push(PlatformSummary { id: p.into(), detected: infos.iter().any(|r| r.exists), count: list.len() });
-        if platform == "all" || platform == p {
+    for s in SPECS {
+        let (list, infos) = collect(h, cfg, s, &mut errors);
+        let global_dir = write_root(h, cfg, s.id, Scope::Global, None).ok().map(|r| r.path.display().to_string());
+        platforms.push(PlatformSummary { id: s.id.into(), detected: infos.iter().any(|r| r.exists), count: list.len(), verified: s.verified, global_dir });
+        if platform == "all" || platform == s.id {
             items.extend(list);
             roots_out.extend(infos);
         }
@@ -861,20 +1095,21 @@ fn locate(h: &Homes, cfg: &Config, path: &str) -> Result<(Root, PathBuf), String
             return Err("停用区里找不到这份 Skill".into());
         }
         let root = Root {
-            platform: static_platform(&entry.platform),
+            platform: spec(&entry.platform).ok_or("路径无效")?.id,
             scope: entry.scope,
             project: entry.project.as_ref().map(PathBuf::from),
             path: parent.to_path_buf(),
             readonly: false,
-            skip: &[],
+            skip: Vec::new(),
             parked: true,
+            own: false,
         };
         return Ok((root, dir));
     }
     let parent_c = fs::canonicalize(parent).map_err(|_| "Skill 所在目录不存在")?;
     let projects = cfg.project_paths(h);
-    for platform in PLATFORMS {
-        for root in roots(h, platform, &projects) {
+    for s in SPECS {
+        for root in roots(h, cfg, s.id, &projects) {
             let Ok(root_c) = fs::canonicalize(&root.path) else { continue };
             if root_c == parent_c && !root.skip.contains(&name.as_str()) {
                 if !dir.join(SKILL_FILE).is_file() {
@@ -1010,7 +1245,7 @@ fn list_files(dir: &Path, base: &Path, depth: u8, out: &mut Vec<FileEntry>) -> b
 pub fn detail_with(h: &Homes, cfg: &Config, path: &str) -> Result<Detail, String> {
     let (root, dir) = locate(h, cfg, path)?;
     let mut errors = Vec::new();
-    let (items, _) = collect(h, cfg, root.platform, &mut errors);
+    let (items, _) = collect(h, cfg, spec(root.platform).ok_or("路径无效")?, &mut errors);
     let item = items.into_iter().find(|i| same_path(&i.path, &dir)).ok_or("没有找到这个 Skill，可能已被移除")?;
     let (content, truncated) = read_limited(&dir.join(SKILL_FILE), MAX_PREVIEW_BYTES)?;
     let mut files = Vec::new();
@@ -1086,7 +1321,7 @@ fn check_project(h: &Homes, cfg: &Config, project: Option<&str>) -> Result<Optio
 }
 
 pub fn save_with(h: &Homes, cfg: &mut Config, input: SaveInput, data: &Path) -> Result<SaveResult, String> {
-    if !PLATFORMS.contains(&input.platform.as_str()) {
+    if !spec(&input.platform).is_some_and(|s| s.writable) {
         return Err(format!("{} 暂不支持写入 Skills", input.platform));
     }
     if !valid_name(&input.name) {
@@ -1119,7 +1354,7 @@ pub fn save_with(h: &Homes, cfg: &mut Config, input: SaveInput, data: &Path) -> 
         return Ok(SaveResult { path: dir.display().to_string(), modified_ms: modified_ms(&file), backup: backup.map(|p| p.display().to_string()) });
     }
     let project = check_project(h, cfg, input.project.as_deref())?;
-    let root = write_root(h, &input.platform, input.scope, project.as_deref())?;
+    let root = write_root(h, cfg, &input.platform, input.scope, project.as_deref())?;
     let dir = root.path.join(&input.name);
     if dir.exists() {
         return Err(format!("目标已有同名 Skill：{}", dir.display()));
@@ -1149,7 +1384,7 @@ pub struct CopyResult {
 pub fn copy_with(h: &Homes, cfg: &Config, path: &str, platform: &str, scope: Scope, project: Option<&str>, dry_run: bool) -> Result<CopyResult, String> {
     let (_, dir) = locate(h, cfg, path)?;
     let project = check_project(h, cfg, project)?;
-    let root = write_root(h, platform, scope, project.as_deref())?;
+    let root = write_root(h, cfg, platform, scope, project.as_deref())?;
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let target = root.path.join(&name);
     let front = read_limited(&dir.join(SKILL_FILE), MAX_SKILL_BYTES).and_then(|(t, _)| parse_front(&t));
@@ -1203,7 +1438,7 @@ pub fn import_scan_with(h: &Homes, cfg: &Config, source: &str, platform: &str, s
         return Err("来源目录不存在".into());
     }
     let project = check_project(h, cfg, project)?;
-    let root = write_root(h, platform, scope, project.as_deref())?;
+    let root = write_root(h, cfg, platform, scope, project.as_deref())?;
     let mut candidates = Vec::new();
     if src.join(SKILL_FILE).is_file() {
         candidates.push(src.clone());
@@ -1264,7 +1499,7 @@ fn parked_copy(cfg: &Config, platform: &str, target: &Path) -> Option<PathBuf> {
 pub fn import_with(h: &Homes, cfg: &mut Config, source: &str, platform: &str, scope: Scope, project: Option<&str>, choices: Vec<ImportChoice>, enable: bool, data: &Path) -> Result<ImportResult, String> {
     let scan = import_scan_with(h, cfg, source, platform, scope, project)?;
     let project_path = check_project(h, cfg, project)?;
-    let root = write_root(h, platform, scope, project_path.as_deref())?;
+    let root = write_root(h, cfg, platform, scope, project_path.as_deref())?;
     let mut result = ImportResult::default();
     for choice in choices {
         let Some(item) = scan.items.iter().find(|i| i.name == choice.name) else {
@@ -1559,7 +1794,7 @@ pub fn import_git_with(h: &Homes, cfg: &Config, temp_root: &Path, program: &str,
     }
     // 先确认目标范围可写，避免白拉一次
     let project_path = check_project(h, cfg, project)?;
-    write_root(h, platform, scope, project_path.as_deref())?;
+    write_root(h, cfg, platform, scope, project_path.as_deref())?;
     fs::create_dir_all(temp_root).map_err(|e| format!("无法创建临时目录：{e}"))?;
     // 克隆到 `jolu-git-<时间戳>/<仓库名>`：仓库本身是 Skill 时目录名就是仓库名，重复导入能命中冲突检查
     let dest = temp_root.join(format!("{GIT_PREFIX}{}", stamp()));
@@ -1597,6 +1832,75 @@ pub fn set_projects_with(cfg: &mut Config, projects: Vec<String>) -> Result<Vec<
     Ok(list)
 }
 
+/// 「更换全局目录」（D-18）：替换工具主目录（`ToolSpec::global` 的最后一项），只改 Jolu 扫描和写入的位置，
+/// 不改工具本身的环境变量；`path` 为 None 或与默认位置相同时恢复默认。目录必须已存在
+pub fn set_global_dir_with(h: &Homes, cfg: &mut Config, platform: &str, path: Option<&str>) -> Result<(), String> {
+    let spec = spec(platform).ok_or_else(|| format!("{platform} 暂未接入 Skills 管理"))?;
+    let Some(raw) = path.map(str::trim).filter(|p| !p.is_empty()) else {
+        cfg.global_override.remove(spec.id);
+        return Ok(());
+    };
+    let dir = PathBuf::from(raw);
+    if !dir.is_absolute() || has_parent_component(&dir) || !dir.is_dir() {
+        return Err(format!("目录不存在：{raw}"));
+    }
+    if same_path(raw, &default_global(h, spec)) {
+        cfg.global_override.remove(spec.id);
+        return Ok(());
+    }
+    // 已经是任一工具（含自己）的其他扫描目录、只读子目录或项目 Skills 目录时拒绝：同一目录被扫描两次会标成同名冲突，
+    // 被两个工具扫描时 `locate` 先命中排在前面的工具，启停就会走错方式（如在 Codex 列表里停用却按 Claude 移进停用区）
+    let projects = cfg.project_paths(h);
+    for other in SPECS {
+        let taken = roots(h, cfg, other.id, &projects).into_iter().filter(|r| !(other.id == spec.id && r.own)).find(|r| same_path(raw, &r.path));
+        if let Some(root) = taken {
+            return Err(format!("这个目录已经是 {} 的扫描目录：{}", other.name, root.path.display()));
+        }
+    }
+    cfg.global_override.insert(spec.id.into(), dir.display().to_string());
+    Ok(())
+}
+
+#[derive(Deserialize, Debug)]
+pub struct IgnoreChange {
+    pub path: String,
+    pub ignored: bool,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GlobalChange {
+    pub platform: String,
+    /// None：恢复默认
+    pub path: Option<String>,
+}
+
+/// 「扫描目录设置」弹窗的草稿，点「保存并扫描」时一次提交
+#[derive(Deserialize, Debug, Default)]
+pub struct DirSettings {
+    /// 手动添加的项目目录（完整列表）
+    pub projects: Vec<String>,
+    /// 会话记录带出的项目里改了忽略状态的
+    #[serde(default)]
+    pub ignore: Vec<IgnoreChange>,
+    /// 改了全局目录的工具
+    #[serde(default)]
+    pub globals: Vec<GlobalChange>,
+}
+
+/// 在副本上依次应用并校验，全部通过才替换 `cfg`；任何一项失败都不改动配置
+pub fn save_dir_settings_with(h: &Homes, cfg: &mut Config, input: DirSettings) -> Result<(), String> {
+    let mut next = cfg.clone();
+    set_projects_with(&mut next, input.projects)?;
+    for change in input.ignore {
+        ignore_project_with(&mut next, &change.path, change.ignored);
+    }
+    for change in input.globals {
+        set_global_dir_with(h, &mut next, &change.platform, change.path.as_deref())?;
+    }
+    *cfg = next;
+    Ok(())
+}
+
 /// 忽略 / 恢复一个从会话记录带出的项目；只改 skills.json，不碰会话数据
 pub fn ignore_project_with(cfg: &mut Config, path: &str, ignored: bool) {
     cfg.ignored_projects.retain(|p| norm_key(p) != norm_key(path));
@@ -1620,12 +1924,27 @@ async fn context(app: &tauri::AppHandle, db: &State<'_, crate::DbRead>, force: b
     Ok((dir, cfg))
 }
 
+/// 会改动文件或配置的命令：skills.json 损坏时在动手之前就拒绝，避免改了文件却记不下停用登记
+async fn context_mut(app: &tauri::AppHandle, db: &State<'_, crate::DbRead>) -> Result<(PathBuf, Config), String> {
+    let (dir, cfg) = context(app, db, false).await?;
+    config_guard(&dir)?;
+    Ok((dir, cfg))
+}
+
 /// 列出 Skills。`platform` 为 all / claude / codex；`force` 时重新读取会话记录里的项目目录。
 /// 模块 E 的「Skills（可选）」也可用它列出某个工具的可用项
 #[tauri::command]
 pub async fn skills_overview(app: tauri::AppHandle, db: State<'_, crate::DbRead>, platform: String, force: bool) -> Result<Overview, String> {
-    let (_, cfg) = context(&app, &db, force).await?;
-    blocking(move || overview_with(&homes()?, &cfg, &platform)).await
+    let (dir, cfg) = context(&app, &db, force).await?;
+    blocking(move || {
+        let mut overview = overview_with(&homes()?, &cfg, &platform)?;
+        // 配置损坏时照常扫描，同时在扫描错误里说明为什么改动会被拒绝
+        if let Err(reason) = config_guard(&dir) {
+            overview.errors.insert(0, ScanError { path: dir.join("skills.json").display().to_string(), reason });
+        }
+        Ok(overview)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1643,7 +1962,7 @@ pub async fn skill_file(app: tauri::AppHandle, db: State<'_, crate::DbRead>, pat
 /// 启停这一份副本，返回启停后的目录（Claude 停用后位于停用区）
 #[tauri::command]
 pub async fn skill_set_enabled(app: tauri::AppHandle, db: State<'_, crate::DbRead>, path: String, enabled: bool) -> Result<String, String> {
-    let (dir, mut cfg) = context(&app, &db, false).await?;
+    let (dir, mut cfg) = context_mut(&app, &db).await?;
     blocking(move || {
         let h = homes()?;
         let (root, skill_dir) = locate(&h, &cfg, &path)?;
@@ -1655,7 +1974,7 @@ pub async fn skill_set_enabled(app: tauri::AppHandle, db: State<'_, crate::DbRea
 
 #[tauri::command]
 pub async fn skill_save(app: tauri::AppHandle, db: State<'_, crate::DbRead>, input: SaveInput) -> Result<SaveResult, String> {
-    let (dir, mut cfg) = context(&app, &db, false).await?;
+    let (dir, mut cfg) = context_mut(&app, &db).await?;
     blocking(move || save_with(&homes()?, &mut cfg, input, &dir)).await
 }
 
@@ -1667,7 +1986,7 @@ pub async fn skill_copy(app: tauri::AppHandle, db: State<'_, crate::DbRead>, pat
 
 #[tauri::command]
 pub async fn skill_remove(app: tauri::AppHandle, db: State<'_, crate::DbRead>, path: String) -> Result<String, String> {
-    let (dir, mut cfg) = context(&app, &db, false).await?;
+    let (dir, mut cfg) = context_mut(&app, &db).await?;
     blocking(move || remove_with(&homes()?, &mut cfg, &path, &dir)).await
 }
 
@@ -1680,7 +1999,7 @@ pub async fn skills_import_scan(app: tauri::AppHandle, db: State<'_, crate::DbRe
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn skills_import(app: tauri::AppHandle, db: State<'_, crate::DbRead>, source: String, platform: String, scope: Scope, project: Option<String>, choices: Vec<ImportChoice>, enable: bool) -> Result<ImportResult, String> {
-    let (dir, mut cfg) = context(&app, &db, false).await?;
+    let (dir, mut cfg) = context_mut(&app, &db).await?;
     blocking(move || {
         let result = import_with(&homes()?, &mut cfg, &source, &platform, scope, project.as_deref(), choices, enable, &dir)?;
         save_config(&dir, &cfg)?;
@@ -1728,6 +2047,31 @@ pub async fn skills_ignore_project(app: tauri::AppHandle, path: String, ignored:
     .await
 }
 
+/// 更换或恢复（`path` 为 None）某个工具的全局目录，返回这个工具更新后的概览。
+/// 立即写入，仅供脚本 / 验收使用；界面走 `skills_save_dir_settings`（「保存并扫描」时一次提交）
+#[tauri::command]
+pub async fn skills_set_global_dir(app: tauri::AppHandle, db: State<'_, crate::DbRead>, platform: String, path: Option<String>) -> Result<Overview, String> {
+    let (dir, mut cfg) = context_mut(&app, &db).await?;
+    blocking(move || {
+        let h = homes()?;
+        set_global_dir_with(&h, &mut cfg, &platform, path.as_deref())?;
+        save_config(&dir, &cfg)?;
+        overview_with(&h, &cfg, &platform)
+    })
+    .await
+}
+
+/// 「扫描目录设置」的「保存并扫描」：项目目录、忽略状态、全局目录一次校验，skills.json 只原子写入一次
+#[tauri::command]
+pub async fn skills_save_dir_settings(app: tauri::AppHandle, db: State<'_, crate::DbRead>, input: DirSettings) -> Result<(), String> {
+    let (dir, mut cfg) = context_mut(&app, &db).await?;
+    blocking(move || {
+        save_dir_settings_with(&homes()?, &mut cfg, input)?;
+        save_config(&dir, &cfg)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn skills_pick_folder(app: tauri::AppHandle, title: String) -> Result<Option<String>, String> {
     let window = app.get_webview_window(crate::MAIN).ok_or("请从主面板选择目录")?;
@@ -1757,7 +2101,15 @@ mod tests {
     }
 
     fn homes_at(base: &Path) -> Homes {
-        Homes { claude: base.join(".claude"), codex: base.join(".codex"), user: base.to_path_buf() }
+        homes_from(base.to_path_buf(), |_| None)
+    }
+
+    fn claude_home(h: &Homes) -> PathBuf {
+        h.env["CLAUDE_CONFIG_DIR"].clone()
+    }
+
+    fn codex_home(h: &Homes) -> PathBuf {
+        h.env["CODEX_HOME"].clone()
     }
 
     fn skill(root: &Path, name: &str, body: &str) -> PathBuf {
@@ -1769,6 +2121,338 @@ mod tests {
 
     fn body(name: &str) -> String {
         format!("---\nname: {name}\ndescription: {name} 描述\n---\n")
+    }
+
+    fn fmt_roots(list: &[Root]) -> Vec<String> {
+        list.iter()
+            .map(|r| format!("{}|{:?}|{}|{}|{}|{:?}|{}", r.platform, r.scope, r.project.as_ref().map(|p| p.display().to_string()).unwrap_or_default(), r.path.display(), r.readonly, r.skip, r.parked))
+            .collect()
+    }
+
+    /// 重构前 `roots()` 的输出（2026-10-23 用旧实现跑出的固定值）
+    fn roots_before() -> Vec<String> {
+        [
+            r#"claude|Global||C:\h\cc\skills|false|["synced"]|false"#,
+            r"claude|Synced||C:\h\cc\skills\synced|true|[]|false",
+            r"claude|Project|D:\p1|D:\p1\.claude\skills|false|[]|false",
+            r"claude|Project|D:\p2|D:\p2\.claude\skills|false|[]|false",
+            r"codex|Global||C:\h\.agents\skills|false|[]|false",
+            r#"codex|Global||C:\h\cx\skills|false|[".system"]|false"#,
+            r"codex|System||C:\h\cx\skills\.system|true|[]|false",
+            r"codex|Project|D:\p1|D:\p1\.agents\skills|false|[]|false",
+            r"codex|Project|D:\p1|D:\p1\.codex\skills|false|[]|false",
+            r"codex|Project|D:\p2|D:\p2\.agents\skills|false|[]|false",
+            r"codex|Project|D:\p2|D:\p2\.codex\skills|false|[]|false",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn specs_preserve_claude_codex_roots() {
+        let h = homes_from(PathBuf::from(r"C:\h"), |name| match name {
+            "CLAUDE_CONFIG_DIR" => Some(r"C:\h\cc".into()),
+            "CODEX_HOME" => Some(r"C:\h\cx".into()),
+            _ => None,
+        });
+        let cfg = Config::default();
+        let projects = [PathBuf::from(r"D:\p1"), PathBuf::from(r"D:\p2")];
+        let mut got = fmt_roots(&roots(&h, &cfg, "claude", &projects));
+        got.extend(fmt_roots(&roots(&h, &cfg, "codex", &projects)));
+        assert_eq!(got, roots_before());
+        // 没设环境变量时用默认位置
+        let d = homes_from(PathBuf::from(r"C:\h"), |_| None);
+        assert_eq!((claude_home(&d), codex_home(&d)), (PathBuf::from(r"C:\h\.claude"), PathBuf::from(r"C:\h\.codex")));
+        let mut got = fmt_roots(&roots(&d, &cfg, "claude", &projects));
+        got.extend(fmt_roots(&roots(&d, &cfg, "codex", &projects)));
+        // 按旧实现推导：Homes { claude: user/.claude, codex: user/.codex, user }
+        let expected_default = [
+            r#"claude|Global||C:\h\.claude\skills|false|["synced"]|false"#,
+            r"claude|Synced||C:\h\.claude\skills\synced|true|[]|false",
+            r"claude|Project|D:\p1|D:\p1\.claude\skills|false|[]|false",
+            r"claude|Project|D:\p2|D:\p2\.claude\skills|false|[]|false",
+            r"codex|Global||C:\h\.agents\skills|false|[]|false",
+            r#"codex|Global||C:\h\.codex\skills|false|[".system"]|false"#,
+            r"codex|System||C:\h\.codex\skills\.system|true|[]|false",
+            r"codex|Project|D:\p1|D:\p1\.agents\skills|false|[]|false",
+            r"codex|Project|D:\p1|D:\p1\.codex\skills|false|[]|false",
+            r"codex|Project|D:\p2|D:\p2\.agents\skills|false|[]|false",
+            r"codex|Project|D:\p2|D:\p2\.codex\skills|false|[]|false",
+        ];
+        assert_eq!(got, expected_default);
+        // 隔离环境：按旧实现推导 base = <JOLU_TEST_DIR>/skills-home，claude = base/.claude，codex = base/.codex，不读环境变量
+        let iso = isolated_homes(Path::new(r"D:\t"));
+        assert_eq!(iso.user, PathBuf::from(r"D:\t\skills-home"));
+        assert_eq!((claude_home(&iso), codex_home(&iso)), (PathBuf::from(r"D:\t\skills-home\.claude"), PathBuf::from(r"D:\t\skills-home\.codex")));
+        let mut got = fmt_roots(&roots(&iso, &cfg, "claude", &[]));
+        got.extend(fmt_roots(&roots(&iso, &cfg, "codex", &[])));
+        let expected_iso = [
+            r#"claude|Global||D:\t\skills-home\.claude\skills|false|["synced"]|false"#,
+            r"claude|Synced||D:\t\skills-home\.claude\skills\synced|true|[]|false",
+            r"codex|Global||D:\t\skills-home\.agents\skills|false|[]|false",
+            r#"codex|Global||D:\t\skills-home\.codex\skills|false|[".system"]|false"#,
+            r"codex|System||D:\t\skills-home\.codex\skills\.system|true|[]|false",
+        ];
+        assert_eq!(got, expected_iso);
+        // 启停方式与校验规则
+        let (claude, codex) = (spec("claude").unwrap(), spec("codex").unwrap());
+        assert_eq!((claude.toggle, claude.require_name, claude.writable), (Toggle::Park, false, true));
+        assert_eq!((codex.toggle, codex.require_name, codex.writable), (Toggle::CodexToml, true, true));
+        assert!(spec("gemini").is_none() && roots(&h, &cfg, "gemini", &projects).is_empty());
+        // 约定：home_env 控制 global 的最后一项，且这一项以 `/<子目录>` 结尾
+        for s in SPECS {
+            if s.home_env.is_some() {
+                assert!(env_default(s).is_some(), "{} 的 global 最后一项应以 home_env 的子目录结尾", s.id);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_agents_dir_ignores_codex_home() {
+        let h = homes_from(PathBuf::from(r"C:\u"), |name| (name == "CODEX_HOME").then(|| r"E:\codex-home".into()));
+        let cfg = Config::default();
+        let globals: Vec<_> = roots(&h, &cfg, "codex", &[]).into_iter().filter(|r| r.scope == Scope::Global).map(|r| r.path).collect();
+        assert_eq!(globals, vec![PathBuf::from(r"C:\u\.agents\skills"), PathBuf::from(r"E:\codex-home\skills")]);
+        assert_eq!(codex_config_path(&h, spec("codex").unwrap()), PathBuf::from(r"E:\codex-home\config.toml"));
+        // 新建 / 导入到全局仍写 ~/.agents/skills
+        assert_eq!(write_root(&h, &cfg, "codex", Scope::Global, None).unwrap().path, PathBuf::from(r"C:\u\.agents\skills"));
+        // Claude 不受 CODEX_HOME 影响
+        assert_eq!(claude_home(&h), PathBuf::from(r"C:\u\.claude"));
+    }
+
+    #[test]
+    fn global_override_replaces_default() {
+        let base = temp("override");
+        let h = homes_at(&base);
+        let data = base.join("data");
+        let mut cfg = Config::default();
+        let custom = base.join("my-skills");
+        skill(&custom, "custom-one", &body("custom-one"));
+        skill(&claude_home(&h).join("skills"), "default-one", &body("default-one"));
+
+        let missing = base.join("missing").display().to_string();
+        assert!(set_global_dir_with(&h, &mut cfg, "claude", Some(&missing)).unwrap_err().contains("目录不存在"));
+        assert!(set_global_dir_with(&h, &mut cfg, "claude", Some("relative/dir")).unwrap_err().contains("目录不存在"));
+        assert!(set_global_dir_with(&h, &mut cfg, "gemini", Some(&custom.display().to_string())).is_err());
+        assert!(cfg.global_override.is_empty());
+
+        set_global_dir_with(&h, &mut cfg, "claude", Some(&custom.display().to_string())).unwrap();
+        let list = roots(&h, &cfg, "claude", &[]);
+        assert_eq!((list[0].scope, &list[0].path), (Scope::Global, &custom));
+        assert_eq!((list[1].scope, &list[1].path), (Scope::Synced, &custom.join("synced")));
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        assert_eq!(o.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), vec!["custom-one"], "只扫描新目录");
+        let info = o.roots.iter().find(|r| r.scope == Scope::Global).unwrap();
+        assert!(info.overridable && info.overridden);
+        assert_eq!(info.default_path.as_deref(), Some(claude_home(&h).join("skills").display().to_string().as_str()));
+        assert_eq!(o.platforms.iter().find(|p| p.id == "claude").unwrap().global_dir.as_deref(), Some(custom.display().to_string().as_str()));
+        // 新建写到新目录；工具配置（settings.json）位置不变
+        let input = SaveInput { platform: "claude".into(), scope: Scope::Global, project: None, name: "new-one".into(), content: body("new-one"), original_path: None, expected_modified_ms: None, enable: true };
+        assert!(Path::new(&save_with(&h, &mut cfg, input, &data).unwrap().path).starts_with(&custom));
+        assert!(locate(&h, &cfg, &custom.join("new-one").display().to_string()).is_ok());
+        // 存进 skills.json
+        save_config(&data, &cfg).unwrap();
+        assert_eq!(load_config(&data).global_override.get("claude"), Some(&custom.display().to_string()));
+
+        // 恢复默认；选回默认目录也等同恢复默认
+        set_global_dir_with(&h, &mut cfg, "claude", None).unwrap();
+        assert_eq!(roots(&h, &cfg, "claude", &[])[0].path, claude_home(&h).join("skills"));
+        set_global_dir_with(&h, &mut cfg, "claude", Some(&claude_home(&h).join("skills").display().to_string())).unwrap();
+        assert!(cfg.global_override.is_empty());
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        let info = o.roots.iter().find(|r| r.scope == Scope::Global).unwrap();
+        assert!(info.overridable && !info.overridden && info.default_path.is_none());
+
+        // Codex：更换的是 $CODEX_HOME/skills，~/.agents/skills 照常扫描、仍是写入目标，且不能被选作替换目录
+        let agents = base.join(".agents").join("skills");
+        fs::create_dir_all(&agents).unwrap();
+        assert!(set_global_dir_with(&h, &mut cfg, "codex", Some(&agents.display().to_string())).unwrap_err().contains("已经是"));
+        set_global_dir_with(&h, &mut cfg, "codex", Some(&custom.display().to_string())).unwrap();
+        let paths: Vec<_> = roots(&h, &cfg, "codex", &[]).into_iter().map(|r| (r.scope, r.path)).collect();
+        assert_eq!(paths, vec![(Scope::Global, agents.clone()), (Scope::Global, custom.clone()), (Scope::System, custom.join(".system"))]);
+        assert_eq!(write_root(&h, &cfg, "codex", Scope::Global, None).unwrap().path, agents);
+        let o = overview_with(&h, &cfg, "codex").unwrap();
+        let flags: Vec<_> = o.roots.iter().filter(|r| r.scope == Scope::Global).map(|r| (r.overridable, r.overridden)).collect();
+        assert_eq!(flags, vec![(false, false), (true, true)]);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn global_override_rejects_other_tools_and_project_dirs() {
+        let base = temp("override-others");
+        let h = homes_at(&base);
+        let s = |p: &Path| p.display().to_string();
+        let project = base.join("proj");
+        let project_claude = project.join(".claude").join("skills");
+        let agents = base.join(".agents").join("skills");
+        let codex_skills = codex_home(&h).join("skills");
+        let claude_skills = claude_home(&h).join("skills");
+        let custom = base.join("my-skills");
+        for d in [&project_claude, &agents, &codex_skills, &claude_skills.join("synced"), &custom] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let mut cfg = Config { projects: vec![s(&project)], ..Default::default() };
+        let err = |cfg: &mut Config, platform: &str, path: String| set_global_dir_with(&h, cfg, platform, Some(&path)).unwrap_err();
+
+        // 其他工具的全局目录（两个方向）
+        let e = err(&mut cfg, "claude", s(&agents));
+        assert!(e.contains("已经是 Codex 的扫描目录"), "{e}");
+        assert!(err(&mut cfg, "claude", s(&codex_skills)).contains("已经是 Codex 的扫描目录"));
+        assert!(err(&mut cfg, "codex", s(&claude_skills)).contains("已经是 Claude Code 的扫描目录"));
+        // 只读子目录
+        assert!(err(&mut cfg, "codex", s(&claude_skills.join("synced"))).contains("已经是 Claude Code 的扫描目录"));
+        // 项目的 Skills 目录（同一工具与其他工具）
+        assert!(err(&mut cfg, "claude", s(&project_claude)).contains("已经是 Claude Code 的扫描目录"));
+        assert!(err(&mut cfg, "codex", s(&project_claude)).contains("已经是 Claude Code 的扫描目录"));
+        // 大小写与分隔符不同也拦住
+        if cfg!(windows) {
+            assert!(err(&mut cfg, "claude", s(&agents).replace('\\', "/").to_uppercase()).contains("已经是 Codex 的扫描目录"));
+        }
+        // 另一个工具已经更换到的目录
+        set_global_dir_with(&h, &mut cfg, "claude", Some(&s(&custom))).unwrap();
+        assert!(err(&mut cfg, "codex", s(&custom)).contains("已经是 Claude Code 的扫描目录"));
+        assert_eq!(cfg.global_override.keys().collect::<Vec<_>>(), vec!["claude"]);
+        // 一次保存里新添加的项目也算：同时添加项目并把它的 Skills 目录选作全局目录，整体拒绝
+        let other = base.join("other");
+        fs::create_dir_all(other.join(".agents").join("skills")).unwrap();
+        let input = DirSettings { projects: vec![s(&project), s(&other)], ignore: vec![], globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&other.join(".agents").join("skills"))) }] };
+        assert!(save_dir_settings_with(&h, &mut cfg, input).unwrap_err().contains("已经是 Codex 的扫描目录"));
+        assert_eq!(cfg.projects, vec![s(&project)]);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn broken_saved_override_is_readonly_and_reported() {
+        let base = temp("override-broken");
+        let h = homes_at(&base);
+        let data = base.join("data");
+        let gone = base.join("gone");
+        let mut cfg = Config::default();
+        cfg.global_override.insert("claude".into(), gone.display().to_string());
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        let reason = format!("已更换的目录不存在：{}", gone.display());
+        assert!(o.errors.iter().any(|e| e.reason == reason), "{:?}", o.errors);
+        let g = o.roots.iter().find(|r| r.scope == Scope::Global).unwrap();
+        assert!(g.readonly && g.overridden && !g.exists);
+        assert_eq!(o.platforms.iter().find(|p| p.id == "claude").unwrap().global_dir, None);
+        // 写入报错，不静默重建
+        let input = SaveInput { platform: "claude".into(), scope: Scope::Global, project: None, name: "new-one".into(), content: body("new-one"), original_path: None, expected_modified_ms: None, enable: true };
+        assert_eq!(save_with(&h, &mut cfg, input, &data).unwrap_err(), reason);
+        let source = base.join("downloads");
+        skill(&source, "api-review", &body("api-review"));
+        assert_eq!(import_scan_with(&h, &cfg, &source.display().to_string(), "claude", Scope::Global, None).unwrap_err(), reason);
+        assert!(!gone.exists(), "不重建已更换的目录");
+        // 相对路径同样视为失效
+        cfg.global_override.insert("claude".into(), "relative/dir".into());
+        assert!(overview_with(&h, &cfg, "claude").unwrap().errors.iter().any(|e| e.reason.contains("已更换的目录不存在：relative/dir")));
+        // 恢复默认后正常
+        set_global_dir_with(&h, &mut cfg, "claude", None).unwrap();
+        assert!(overview_with(&h, &cfg, "claude").unwrap().errors.is_empty());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn broken_config_is_backed_up_and_never_overwritten() {
+        let data = temp("broken-config");
+        let file = data.join("skills.json");
+        let broken = "{ \"disabled\": [ 损坏";
+        fs::write(&file, broken).unwrap();
+        let backups = || {
+            let mut list: Vec<PathBuf> = fs::read_dir(&data).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("skills.json.broken-")).map(|e| e.path()).collect();
+            list.sort();
+            list
+        };
+        let cfg = load_config(&data);
+        assert!(cfg.disabled.is_empty(), "读取扫描照常可用（按空配置）");
+        assert_eq!(backups().len(), 1);
+        assert_eq!(fs::read_to_string(&backups()[0]).unwrap(), broken, "备份内容与原文件一致");
+        let err = save_config(&data, &cfg).unwrap_err();
+        assert_eq!(err, format!("Skills 配置文件损坏，已备份为 {}，请检查后重试", backups()[0].display()));
+        assert_eq!(fs::read_to_string(&file).unwrap(), broken, "不覆盖损坏的文件");
+        // 再读一次不重复备份
+        let mut cfg = load_config(&data);
+        assert_eq!(backups().len(), 1);
+        // 停用（要写停用登记）被拒绝并回滚，目录留在原位
+        let h = homes_at(&data);
+        let dir = skill(&claude_home(&h).join("skills"), "keep-me", &body("keep-me"));
+        let (root, located) = locate(&h, &cfg, &dir.display().to_string()).unwrap();
+        assert!(set_enabled_impl(&h, &mut cfg, &root, &located, "keep-me", false, &data).unwrap_err().contains("Skills 配置文件损坏"));
+        assert!(dir.join(SKILL_FILE).is_file() && cfg.disabled.is_empty());
+        assert!(config_guard(&data).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), broken);
+        // 修好之后恢复正常
+        fs::write(&file, "{}").unwrap();
+        let cfg = load_config(&data);
+        assert!(config_guard(&data).is_ok());
+        save_config(&data, &cfg).unwrap();
+        // 空文件按空配置处理，不算损坏
+        fs::write(&file, "  ").unwrap();
+        load_config(&data);
+        assert!(config_guard(&data).is_ok());
+        assert_eq!(backups().len(), 1);
+        fs::remove_dir_all(&data).ok();
+    }
+
+    #[test]
+    fn save_dir_settings_is_all_or_nothing() {
+        let base = temp("dir-settings");
+        let h = homes_at(&base);
+        let project = base.join("proj");
+        let session = base.join("from-session");
+        let custom = base.join("my-skills");
+        for d in [&project, &session, &custom] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let s = |p: &Path| p.display().to_string();
+        let mut cfg = Config { session_projects: vec![s(&session)], ..Default::default() };
+        let snapshot = |c: &Config| serde_json::to_string(c).unwrap();
+        let before = snapshot(&cfg);
+        let ignore = || vec![IgnoreChange { path: s(&session), ignored: true }];
+
+        // 全局目录不存在：项目与忽略状态也不写入
+        let bad = DirSettings { projects: vec![s(&project)], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&base.join("missing"))) }] };
+        assert!(save_dir_settings_with(&h, &mut cfg, bad).unwrap_err().contains("目录不存在"));
+        assert_eq!(snapshot(&cfg), before, "失败时配置保持原样");
+        // 项目目录无效：全局目录也不写入
+        let bad = DirSettings { projects: vec![s(&base.join("gone"))], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&custom)) }] };
+        assert!(save_dir_settings_with(&h, &mut cfg, bad).unwrap_err().contains("项目目录不存在"));
+        assert_eq!(snapshot(&cfg), before);
+
+        let good = DirSettings { projects: vec![s(&project)], ignore: ignore(), globals: vec![GlobalChange { platform: "claude".into(), path: Some(s(&custom)) }] };
+        save_dir_settings_with(&h, &mut cfg, good).unwrap();
+        assert_eq!(cfg.projects, vec![s(&project)]);
+        assert_eq!(cfg.ignored_projects, vec![s(&session)]);
+        assert_eq!(cfg.global_override.get("claude"), Some(&s(&custom)));
+        // 同一次保存里恢复默认，其余设置不变
+        let reset = DirSettings { projects: vec![s(&project)], ignore: vec![], globals: vec![GlobalChange { platform: "claude".into(), path: None }] };
+        save_dir_settings_with(&h, &mut cfg, reset).unwrap();
+        assert!(cfg.global_override.is_empty());
+        assert_eq!((cfg.projects.len(), cfg.ignored_projects.len()), (1, 1));
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn roots_count_parked_skills_left_in_old_dir() {
+        let base = temp("parked-here");
+        let h = homes_at(&base);
+        let data = base.join("data");
+        let mut cfg = Config::default();
+        let dir = skill(&claude_home(&h).join("skills"), "old-one", &body("old-one"));
+        let (root, located) = locate(&h, &cfg, &dir.display().to_string()).unwrap();
+        set_enabled_impl(&h, &mut cfg, &root, &located, "old-one", false, &data).unwrap();
+        let global = |cfg: &Config| overview_with(&h, cfg, "claude").unwrap().roots.into_iter().find(|r| r.scope == Scope::Global).unwrap();
+        assert_eq!(global(&cfg).parked_here, 1, "停用区里原位置在默认目录的 1 个");
+        let custom = base.join("my-skills");
+        fs::create_dir_all(&custom).unwrap();
+        set_global_dir_with(&h, &mut cfg, "claude", Some(&custom.display().to_string())).unwrap();
+        assert_eq!(global(&cfg).parked_here, 0, "新目录下没有停用的");
+        // 启用逻辑不变：已停用的仍显示，原位置还是旧目录
+        let o = overview_with(&h, &cfg, "claude").unwrap();
+        let parked = o.items.iter().find(|i| i.name == "old-one").unwrap();
+        assert_eq!((parked.disabled_by, parked.original_path.as_deref()), (Some("parked"), Some(dir.display().to_string().as_str())));
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -1791,14 +2475,14 @@ mod tests {
         let base = temp("scan");
         let h = homes_at(&base);
         let project = base.join("proj");
-        let global = h.claude.join("skills");
+        let global = claude_home(&h).join("skills");
         skill(&global, "frontend-design", &body("frontend-design"));
         skill(&global, "api-contract", "---\nname: api-contract\n---\n");
         skill(&global, "legacy", &body("legacy"));
         skill(&global.join("synced"), "synced-one", &body("synced-one"));
         skill(&project.join(".claude").join("skills"), "frontend-design", &body("frontend-design"));
         let settings = r#"{"skillOverrides":{"legacy":"off"}}"#;
-        fs::write(h.claude.join("settings.json"), settings).unwrap();
+        fs::write(claude_home(&h).join("settings.json"), settings).unwrap();
         let cfg = Config { projects: vec![project.display().to_string()], ..Default::default() };
         let o = overview_with(&h, &cfg, "claude").unwrap();
         let get = |name: &str, scope: Scope| o.items.iter().find(|i| i.name == name && i.scope == scope).unwrap();
@@ -1814,7 +2498,7 @@ mod tests {
         let mut cfg = cfg;
         let (root, dir) = locate(&h, &cfg, &legacy.path).unwrap();
         assert!(set_enabled_impl(&h, &mut cfg, &root, &dir, "legacy", true, &base.join("data")).unwrap_err().contains("由工具配置停用"));
-        assert_eq!(fs::read_to_string(h.claude.join("settings.json")).unwrap(), settings);
+        assert_eq!(fs::read_to_string(claude_home(&h).join("settings.json")).unwrap(), settings);
         fs::remove_dir_all(&base).ok();
     }
 
@@ -1824,7 +2508,7 @@ mod tests {
         let h = homes_at(&base);
         let data = base.join("data");
         let project = base.join("proj");
-        skill(&h.claude.join("skills"), "docs-writer", &body("docs-writer"));
+        skill(&claude_home(&h).join("skills"), "docs-writer", &body("docs-writer"));
         let local = skill(&project.join(".claude").join("skills"), "docs-writer", &body("docs-writer"));
         fs::write(local.join("notes.md"), "附带文件").unwrap();
         let mut cfg = Config { projects: vec![project.display().to_string()], ..Default::default() };
@@ -1833,7 +2517,7 @@ mod tests {
         let stored = set_enabled_impl(&h, &mut cfg, &root, &dir, "docs-writer", false, &data).unwrap();
         assert!(!local.exists() && Path::new(&stored).join("notes.md").is_file() && Path::new(&stored).join(SKILL_FILE).is_file());
         assert!(stored.starts_with(&data.join("skills-disabled").display().to_string()));
-        assert!(!h.claude.join("settings.json").exists(), "不写 skillOverrides");
+        assert!(!claude_home(&h).join("settings.json").exists(), "不写 skillOverrides");
         assert_eq!(load_config(&data).disabled.len(), 1);
         assert!(fs::read_dir(data.join("skill-backups").join("disabled")).unwrap().count() == 1);
 
@@ -1874,7 +2558,7 @@ mod tests {
             return;
         }
         let h = homes_at(&base);
-        let dir = skill(&h.claude.join("skills"), "cross-disk", &body("cross-disk"));
+        let dir = skill(&claude_home(&h).join("skills"), "cross-disk", &body("cross-disk"));
         fs::create_dir_all(dir.join("refs")).unwrap();
         fs::write(dir.join("refs").join("guide.md"), "跨盘附带文件\n第二行").unwrap();
         let bytes = vec![0u8, 1, 2, 254, 255];
@@ -1908,13 +2592,13 @@ mod tests {
         let data = base.join("data");
         let mut cfg = Config::default();
         let a = skill(&base.join(".agents").join("skills"), "test-runner", &body("test-runner"));
-        skill(&h.codex.join("skills"), "test-runner", &body("test-runner"));
-        skill(&h.codex.join("skills"), "legacy", &body("legacy"));
-        fs::create_dir_all(&h.codex).unwrap();
-        fs::write(h.codex.join("config.toml"), "# 我的配置\nmodel = \"gpt-5\"\n\n[[skills.config]]\nname = \"legacy\"\nenabled = false\n").unwrap();
+        skill(&codex_home(&h).join("skills"), "test-runner", &body("test-runner"));
+        skill(&codex_home(&h).join("skills"), "legacy", &body("legacy"));
+        fs::create_dir_all(&codex_home(&h)).unwrap();
+        fs::write(codex_home(&h).join("config.toml"), "# 我的配置\nmodel = \"gpt-5\"\n\n[[skills.config]]\nname = \"legacy\"\nenabled = false\n").unwrap();
         let (root, dir) = locate(&h, &cfg, &a.display().to_string()).unwrap();
         set_enabled_impl(&h, &mut cfg, &root, &dir, "test-runner", false, &data).unwrap();
-        let text = fs::read_to_string(h.codex.join("config.toml")).unwrap();
+        let text = fs::read_to_string(codex_home(&h).join("config.toml")).unwrap();
         assert!(text.contains("# 我的配置") && text.contains("name = \"legacy\"") && text.contains("enabled = false"));
         let o = overview_with(&h, &cfg, "codex").unwrap();
         let states: Vec<_> = o.items.iter().map(|i| (i.name.as_str(), i.path == a.display().to_string(), i.disabled_by)).collect();
@@ -1925,7 +2609,7 @@ mod tests {
         let (lroot, ldir) = locate(&h, &cfg, &legacy.path).unwrap();
         assert!(set_enabled_impl(&h, &mut cfg, &lroot, &ldir, "legacy", true, &data).is_err());
         set_enabled_impl(&h, &mut cfg, &root, &dir, "test-runner", true, &data).unwrap();
-        let text = fs::read_to_string(h.codex.join("config.toml")).unwrap();
+        let text = fs::read_to_string(codex_home(&h).join("config.toml")).unwrap();
         assert!(text.contains("name = \"legacy\"") && !text.contains("test-runner"));
         fs::remove_dir_all(&base).ok();
     }
@@ -1946,8 +2630,8 @@ mod tests {
         };
         let all = cfg.all_projects(&h);
         assert_eq!(all.len(), 2, "大小写与分隔符去重、跳过不存在目录和主目录");
-        assert_eq!((all[0].source, all[0].codex, all[0].claude), ("manual", true, false));
-        assert_eq!((all[1].source, all[1].codex), ("session", false));
+        assert_eq!((all[0].source, all[0].tools.as_slice()), ("manual", ["codex"].as_slice()));
+        assert_eq!((all[1].source, all[1].tools.is_empty()), ("session", true));
         let o = overview_with(&h, &cfg, "codex").unwrap();
         assert!(o.roots.iter().all(|r| r.scope != Scope::Project || r.exists), "没有 Skills 目录的项目不扫描");
         assert_eq!(o.items.iter().filter(|i| i.scope == Scope::Project).count(), 1);
@@ -1998,7 +2682,7 @@ mod tests {
         let base = temp("paths");
         let h = homes_at(&base);
         let cfg = Config::default();
-        let dir = skill(&h.claude.join("skills"), "safe", "---\ndescription: d\n---\n");
+        let dir = skill(&claude_home(&h).join("skills"), "safe", "---\ndescription: d\n---\n");
         let outside = skill(&base.join("elsewhere"), "evil", "---\ndescription: d\n---\n");
         assert!(locate(&h, &cfg, &dir.display().to_string()).is_ok());
         assert!(locate(&h, &cfg, &outside.display().to_string()).is_err());
@@ -2019,7 +2703,7 @@ mod tests {
         skill(&source, "api-review", &body("api-review"));
         skill(&source, "frontend-design", &body("frontend-design"));
         skill(&source, "quick-test", "---\nname: quick-test\n---\n");
-        skill(&h.claude.join("skills"), "frontend-design", &body("frontend-design"));
+        skill(&claude_home(&h).join("skills"), "frontend-design", &body("frontend-design"));
         let src = source.display().to_string();
         let scan = import_scan_with(&h, &cfg, &src, "claude", Scope::Global, None).unwrap();
         let status: Vec<_> = scan.items.iter().map(|i| (i.name.as_str(), i.status)).collect();
@@ -2162,7 +2846,7 @@ mod tests {
         let choices = vec![ImportChoice { name: "my-skill".into(), action: "import".into() }];
         let result = import_with(&h, &mut cfg, &scan.source, "claude", Scope::Global, None, choices, true, &data).unwrap();
         assert_eq!(result.imported.len(), 1);
-        let target = h.claude.join("skills").join("my-skill");
+        let target = claude_home(&h).join("skills").join("my-skill");
         assert!(target.join(SKILL_FILE).is_file() && !target.join(".git").exists(), "目标目录里没有 .git");
         // 再导入一次命中冲突检查
         let again = scan_clone(&h, &cfg, &repo, "claude", Scope::Global, None).unwrap();
@@ -2196,7 +2880,7 @@ mod tests {
         let src = source.display().to_string();
 
         // Claude：启用中的 Skill 被覆盖后仍在原位置启用，「导入后启用」关闭也不停用
-        let target = skill(&h.claude.join("skills"), "api-review", &body("api-review"));
+        let target = skill(&claude_home(&h).join("skills"), "api-review", &body("api-review"));
         let result = import_with(&h, &mut cfg, &src, "claude", Scope::Global, None, overwrite("api-review"), false, &data).unwrap();
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert!(same_path(&result.imported[0], &target));
@@ -2210,7 +2894,7 @@ mod tests {
         let result = import_with(&h, &mut cfg, &src, "codex", Scope::Global, None, overwrite("api-review"), false, &data).unwrap();
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(fs::read_to_string(codex_target.join(SKILL_FILE)).unwrap(), new_body("api-review"));
-        assert!(!h.codex.join("config.toml").exists(), "不写停用条目");
+        assert!(!codex_home(&h).join("config.toml").exists(), "不写停用条目");
         let o = overview_with(&h, &cfg, "codex").unwrap();
         assert_eq!(o.items.iter().find(|i| i.name == "api-review").unwrap().disabled_by, None);
         fs::remove_dir_all(&base).ok();
@@ -2227,7 +2911,7 @@ mod tests {
         let src = source.display().to_string();
 
         // Claude：停用区里的 Skill 算作同名冲突，覆盖写到停用区里那一份，不在原位置再放一份
-        let original = skill(&h.claude.join("skills"), "api-review", &body("api-review"));
+        let original = skill(&claude_home(&h).join("skills"), "api-review", &body("api-review"));
         let (root, dir) = locate(&h, &cfg, &original.display().to_string()).unwrap();
         let stored = set_enabled_impl(&h, &mut cfg, &root, &dir, "api-review", false, &data).unwrap();
         let registry = serde_json::to_string(&load_config(&data).disabled).unwrap();
@@ -2254,11 +2938,11 @@ mod tests {
         let codex_target = skill(&base.join(".agents").join("skills"), "api-review", &body("api-review"));
         let (root, dir) = locate(&h, &cfg, &codex_target.display().to_string()).unwrap();
         set_enabled_impl(&h, &mut cfg, &root, &dir, "api-review", false, &data).unwrap();
-        let config = fs::read_to_string(h.codex.join("config.toml")).unwrap();
+        let config = fs::read_to_string(codex_home(&h).join("config.toml")).unwrap();
         let result = import_with(&h, &mut cfg, &src, "codex", Scope::Global, None, overwrite("api-review"), true, &data).unwrap();
         assert!(result.failed.is_empty(), "{:?}", result.failed);
         assert_eq!(fs::read_to_string(codex_target.join(SKILL_FILE)).unwrap(), new_body("api-review"));
-        assert_eq!(fs::read_to_string(h.codex.join("config.toml")).unwrap(), config, "config.toml 不变");
+        assert_eq!(fs::read_to_string(codex_home(&h).join("config.toml")).unwrap(), config, "config.toml 不变");
         let o = overview_with(&h, &cfg, "codex").unwrap();
         assert_eq!(o.items.iter().find(|i| i.name == "api-review").unwrap().disabled_by, Some("path"));
         fs::remove_dir_all(&base).ok();
@@ -2273,7 +2957,7 @@ mod tests {
         let source = base.join("downloads");
         skill(&source, "fresh-one", &body("fresh-one"));
         skill(&source, "kept-on", &new_body("kept-on"));
-        let existing = skill(&h.claude.join("skills"), "kept-on", &body("kept-on"));
+        let existing = skill(&claude_home(&h).join("skills"), "kept-on", &body("kept-on"));
         let choices = vec![
             ImportChoice { name: "fresh-one".into(), action: "import".into() },
             ImportChoice { name: "kept-on".into(), action: "overwrite".into() },
@@ -2343,7 +3027,7 @@ pub fn enabled_skills(platform: &str, cwd: Option<&Path>) -> Result<Vec<SkillOpt
 }
 
 pub fn enabled_skills_with(h: &Homes, platform: &str, cwd: Option<&Path>) -> Result<Vec<SkillOption>, String> {
-    if !PLATFORMS.contains(&platform) {
+    if spec(platform).is_none() {
         return Err(format!("{platform} 暂未接入 Skills 管理"));
     }
     // 只扫描任务的工作目录：不读 skills.json 里的项目列表与忽略设置，原工具在该目录执行时总会加载其项目 Skills
@@ -2376,14 +3060,15 @@ mod task_3_3_tests {
     #[test]
     fn enabled_skills_lists_global_and_cwd_project() {
         let base = std::env::temp_dir().join(format!("jolu-skills-enabled-{}-{}", std::process::id(), stamp()));
-        let h = Homes { claude: base.join(".claude"), codex: base.join(".codex"), user: base.clone() };
-        let global = h.claude.join("skills");
+        let h = homes_from(base.clone(), |_| None);
+        let claude_home = tool_home(&h, spec("claude").unwrap());
+        let global = claude_home.join("skills");
         let body = |n: &str| format!("---\nname: {n}\ndescription: {n} 描述\n---\n");
         skill(&global, "api-review", &body("api-review"));
         skill(&global, "no-desc", "---\nname: no-desc\n---\n");
         skill(&global, "Upper", "---\ndescription: 目录名不合规\n---\n");
         skill(&global, "turned-off", &body("turned-off"));
-        fs::write(h.claude.join("settings.json"), r#"{"skillOverrides":{"turned-off":"off"}}"#).unwrap();
+        fs::write(claude_home.join("settings.json"), r#"{"skillOverrides":{"turned-off":"off"}}"#).unwrap();
         let project = base.join("proj");
         skill(&project.join(".claude").join("skills"), "test-check", &body("test-check"));
         skill(&project.join(".claude").join("skills"), "api-review", &body("api-review"));
