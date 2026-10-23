@@ -34,6 +34,7 @@ export function SkillsView({ active }: { active: boolean }) {
   const toast = useToast()
   const [platform, setPlatform] = useState("claude")
   const [data, setData] = useState<SkillsOverviewDto | null>(() => queryCache.get("skills:claude"))
+  const [scanning, setScanning] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
@@ -50,6 +51,7 @@ export function SkillsView({ active }: { active: boolean }) {
 
   const refresh = useCallback(() => setTick((t) => t + 1), [])
   const rescan = () => {
+    setScanning(true)
     setForce(true)
     refresh()
   }
@@ -65,7 +67,7 @@ export function SkillsView({ active }: { active: boolean }) {
       queryCache.set(`skills:${platform}`, value)
       setData(value)
       setError(null)
-    }, (reason: unknown) => !stale && setError(errorText(reason))).finally(() => !stale && setLoading(false))
+    }, (reason: unknown) => !stale && setError(errorText(reason))).finally(() => { if (!stale) { setLoading(false); setScanning(false) } })
     return () => { stale = true }
   }, [platform, tick, active])
 
@@ -227,8 +229,8 @@ export function SkillsView({ active }: { active: boolean }) {
           <p className="text-xs text-jolu-muted">把常用工作方法，交给每个 AI 工具。</p>
         </div>
         <div className="flex gap-2">
-          <JoluButton variant="outline" className="h-[34px]" disabled={loading} onClick={rescan}>
-            <RefreshCw aria-hidden className={cn(loading && "animate-spin")} />扫描目录
+          <JoluButton variant="outline" className="h-[34px]" disabled={scanning} onClick={rescan}>
+            <RefreshCw aria-hidden className={cn(scanning && "animate-spin")} />扫描目录
           </JoluButton>
           <JoluButton variant="outline" className="h-[34px]" onClick={() => setDialog({ kind: "import" })}><Download aria-hidden />导入 Skill</JoluButton>
           <JoluButton variant="primary" className="h-[34px]" onClick={() => setMode({ kind: "editor", target: { mode: "new", platform }, back: null })}><Plus aria-hidden />新建 Skill</JoluButton>

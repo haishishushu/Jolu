@@ -11,7 +11,7 @@ export type AutomationQuery<T> = LiveQuery<T>
  */
 export function useAutomationQuery<T>(key: string, load: () => Promise<T>, demo: () => T, enabled = true, pollMs = 0): AutomationQuery<T> {
   const query = useLiveQuery(`automation:${key}`, load, demo, enabled)
-  const { refresh } = query
+  const { revalidate: refresh } = query
 
   useEffect(() => {
     if (!enabled || !isTauri) return

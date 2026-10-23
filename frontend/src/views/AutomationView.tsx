@@ -100,10 +100,10 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
   }, [conn.connections])
 
   const refreshAll = () => {
-    overview.refresh()
-    if (taskId !== null) task.refresh()
-    if (runId !== null) run.refresh()
-    if (tab === "runs") runs.refresh()
+    overview.revalidate()
+    if (taskId !== null) task.revalidate()
+    if (runId !== null) run.revalidate()
+    if (tab === "runs") runs.revalidate()
   }
 
   const doAction = async (id: number, action: TaskAction) => {
@@ -216,7 +216,7 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
                 filter={runFilter}
                 page={runPage}
                 now={now}
-                loading={runs.loading}
+                loading={runs.refreshing}
                 accounts={accounts}
                 onFilter={(f) => { setRunFilter(f); setRunPage(1) }}
                 onPage={setRunPage}
@@ -232,7 +232,7 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
 
   return (
     <div className="flex flex-col gap-3.5">
-      <ContentTransition identity={`${tab}-${route.kind}-${route.kind === "task" ? taskId : route.kind === "run" ? runId : "list"}-${!!overview.data}-${!!task.data}-${!!run.data}-${!!runs.data}`} className="flex flex-col gap-3.5">{body}</ContentTransition>
+      <ContentTransition identity={`${tab}-${route.kind}-${route.kind === "task" ? taskId : route.kind === "run" ? runId : "list"}-${route.kind === "task" ? !!task.data : route.kind === "run" ? !!run.data : tab === "tasks" ? !!overview.data : !!runs.data}`} className="flex flex-col gap-3.5">{body}</ContentTransition>
       {dialog && (
         <TaskDialog
           key={dialog.nonce}
@@ -269,8 +269,8 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
             // 失败时抛出，由弹窗显示原因；成功后关闭弹窗和任务详情并刷新列表（画板 68 第 10 格），不另弹提示
             await automationApi.deleteTask(deleting.id)
             if (taskId === deleting.id) setRoute({ kind: "list" })
-            overview.refresh()
-            if (tab === "runs") runs.refresh()
+            overview.revalidate()
+            if (tab === "runs") runs.revalidate()
           }}
         />
       )}

@@ -194,7 +194,7 @@ export function UsageView({ active, request, onOpenSession }: {
           <AccountFilter accounts={accountsFor(conn.connections, platform)} value={accounts} onChange={setAccounts} />
           <span className="flex-1" />
           <span className="text-[11px] text-jolu-muted">{range.end.slice(5).replace("-", "/")} · {zone}时区</span>
-          <RefreshButton loading={overview.loading} onClick={() => { overview.refresh(); if (tab === "analysis") activity.refresh() }} />
+          <RefreshButton loading={overview.refreshing} onClick={() => { overview.refresh(); if (tab === "analysis") activity.refresh() }} />
         </div>
       ) : (
         <>
@@ -217,7 +217,7 @@ export function UsageView({ active, request, onOpenSession }: {
             />
             <span className="flex-1" />
             <ResetButton onClick={resetCalls} />
-            <RefreshButton loading={calls.loading} onClick={calls.refresh} />
+            <RefreshButton loading={calls.refreshing} onClick={calls.refresh} />
           </div>
           <div className="flex h-[34px] items-center gap-2">
             <label className="flex h-[34px] w-[360px] items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">

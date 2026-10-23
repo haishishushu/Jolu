@@ -100,65 +100,77 @@ function subscribe(listener: () => void) {
   return () => { listeners.delete(listener) }
 }
 
+// 串行执行不同设置，避免组合配置的读改写互相覆盖。
+let saveQueue: Promise<unknown> = Promise.resolve()
 const snapshot = () => shared
 
 export function useSettings() {
   const state = useSyncExternalStore(subscribe, snapshot)
-  const [saving, setSaving] = useState(false)
+  const [pending, setPending] = useState<Set<string>>(new Set())
+  const saving = pending.size > 0
+  const isSaving = (key: string) => pending.has(key)
   const [saveError, setSaveError] = useState<string | null>(null)
-  const busy = useRef(false)
+  const busy = useRef(new Set<string>())
 
-  const save = useCallback(async (action: () => Promise<AppSettings>) => {
-    if (busy.current) return false
-    busy.current = true
-    setSaving(true)
+  const save = useCallback(async (key: string, action: () => Promise<AppSettings>) => {
+    if (busy.current.has(key)) return false
+    busy.current.add(key)
+    setPending(new Set(busy.current))
     setSaveError(null)
-    const started = revision
-    try {
-      const next = await action()
-      if (revision === started) publish({ settings: next })
-      return true
-    } catch (reason) {
-      setSaveError(`设置保存失败：${String(reason)}`)
-      return false
-    } finally { busy.current = false; setSaving(false) }
+    const operation = saveQueue.then(async () => {
+      const started = revision
+      try {
+        const next = await action()
+        if (revision === started) publish({ settings: next })
+        return true
+      } catch (reason) {
+        setSaveError(`设置保存失败：${String(reason)}`)
+        return false
+      }
+    })
+    saveQueue = operation
+    try { return await operation }
+    finally {
+      busy.current.delete(key)
+      setPending(new Set(busy.current))
+    }
   }, [])
 
-  const setIslandPlatform = useCallback((platform: string) => save(() => api.setIslandPlatform(platform)), [save])
-  const setIslandConnection = useCallback((id: string | null, island: string | null = null) => save(() => api.setIslandConnection(id, island)), [save])
-  const setIslandSource = useCallback((id: string | null) => save(() => api.setIslandSource(id)), [save])
-  const setDnd = useCallback((on: boolean) => save(() => api.setDnd(on)), [save])
-  const setDockEnabled = useCallback((on: boolean) => save(() => api.setDockEnabled(on)), [save])
-  const setTopmost = useCallback((on: boolean) => save(() => api.islandTopmost(on)), [save])
-  const setIslandVisible = useCallback((visible: boolean) => save(() => api.setIslandVisibility(visible)), [save])
-  const setSilentStartup = useCallback((on: boolean) => save(() => api.setSilentStartup(on)), [save])
+  const setIslandPlatform = useCallback((platform: string) => save("island_platform", () => api.setIslandPlatform(platform)), [save])
+  const setIslandConnection = useCallback((id: string | null, island: string | null = null) => save("island_connection", () => api.setIslandConnection(id, island)), [save])
+  const setIslandSource = useCallback((id: string | null) => save("island_source", () => api.setIslandSource(id)), [save])
+  const setDnd = useCallback((on: boolean) => save("dnd", () => api.setDnd(on)), [save])
+  const setDockEnabled = useCallback((on: boolean) => save("dock_enabled", () => api.setDockEnabled(on)), [save])
+  const setTopmost = useCallback((on: boolean) => save("always_on_top", () => api.islandTopmost(on)), [save])
+  const setIslandVisible = useCallback((visible: boolean) => save("island_visible", () => api.setIslandVisibility(visible)), [save])
+  const setSilentStartup = useCallback((on: boolean) => save("silent_startup", () => api.setSilentStartup(on)), [save])
   const setProxy = useCallback(
-    (port: number, enabled: boolean, fallbackDirect: boolean) => save(() => api.setProxy(port, enabled, fallbackDirect)),
+    (port: number, enabled: boolean, fallbackDirect: boolean) => save("proxy", () => api.setProxy(port, enabled, fallbackDirect)),
     [save],
   )
-  const setTheme = useCallback((theme: "light" | "dark" | "system") => save(() => api.setTheme(theme)), [save])
-  const setRetentionDays = useCallback((days: number | null) => save(() => api.setRetentionDays(days)), [save])
-  const setDisplayPreferences = useCallback((patch: Partial<Pick<AppSettings, "island_opacity" | "island_scale" | "island_shrink_scale" | "refresh_minutes">>) => save(async () => {
+  const setTheme = useCallback((theme: "light" | "dark" | "system") => save("theme", () => api.setTheme(theme)), [save])
+  const setRetentionDays = useCallback((days: number | null) => save("retention_days", () => api.setRetentionDays(days)), [save])
+  const setDisplayPreferences = useCallback((patch: Partial<Pick<AppSettings, "island_opacity" | "island_scale" | "island_shrink_scale" | "refresh_minutes">>) => save(Object.keys(patch).sort().join(","), async () => {
     const next = { ...await api.getSettings(), ...patch }
     return api.setDisplayPreferences(next.island_opacity, next.island_scale, next.island_shrink_scale, next.refresh_minutes)
   }), [save])
-  const setDefaultPage = useCallback((page: DefaultPage) => save(() => settingsApi.setDefaultPage(page)), [save])
-  const setAppearance = useCallback((patch: Partial<Pick<AppSettings, "main_zoom" | "list_density" | "reduce_motion">>) => save(async () => {
+  const setDefaultPage = useCallback((page: DefaultPage) => save("default_page", () => settingsApi.setDefaultPage(page)), [save])
+  const setAppearance = useCallback((patch: Partial<Pick<AppSettings, "main_zoom" | "list_density" | "reduce_motion">>) => save(Object.keys(patch).sort().join(","), async () => {
     const next = { ...await api.getSettings(), ...patch }
     return settingsApi.setAppearancePreferences(next.main_zoom, normalizeDensity(next.list_density), next.reduce_motion)
   }), [save])
   /** 成功返回保存后的设置（手动代理地址已由后端规整），失败返回 null */
   const setNetwork = useCallback(async (mode: NetworkMode, proxyUrl: string | null) => {
     let saved = null as AppSettings | null
-    const ok = await save(async () => (saved = await settingsApi.setNetwork(mode, proxyUrl)))
+    const ok = await save("network", async () => (saved = await settingsApi.setNetwork(mode, proxyUrl)))
     return ok ? saved : null
   }, [save])
 
   /** 设置 · 通知（画板 94）：任务提醒开关，只改传入的那一个 */
-  const setTaskNotify = useCallback((patch: { resumed?: boolean; finished?: boolean }) => save(() => settingsApi.setTaskNotify(patch.resumed ?? null, patch.finished ?? null)), [save])
+  const setTaskNotify = useCallback((patch: { resumed?: boolean; finished?: boolean }) => save(patch.resumed !== undefined ? "notify_task_resumed" : "notify_task_finished", () => settingsApi.setTaskNotify(patch.resumed ?? null, patch.finished ?? null)), [save])
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
+  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
 }
 

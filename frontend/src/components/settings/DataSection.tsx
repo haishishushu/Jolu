@@ -22,7 +22,7 @@ export function DataSection({ cfg, onOpenSkills }: { cfg: Cfg; onOpenSkills: () 
   // 选择文件并预览中 / 已有预览（确认前可重新选择文件）
   const [previewing, setPreviewing] = useState(false)
   const [preview, setPreview] = useState<ImportPreviewDto | null>(null)
-  const disabled = !cfg.ready || cfg.saving
+  const disabled = !cfg.ready
 
   const load = useCallback(() => {
     if (!isTauri) {
@@ -107,7 +107,7 @@ export function DataSection({ cfg, onOpenSkills }: { cfg: Cfg; onOpenSkills: () 
             <SelectButton
               label="自动清理规则"
               value={String(cfg.settings.retention_days ?? "")}
-              disabled={disabled}
+              disabled={disabled || cfg.isSaving("retention_days")}
               onChange={(v) => void cfg.setRetentionDays(v ? Number(v) : null)}
               options={[{ value: "", label: "不自动清理" }, ...RETENTION_OPTIONS.map((n) => ({ value: String(n), label: `保留 ${n} 天` }))]}
             />

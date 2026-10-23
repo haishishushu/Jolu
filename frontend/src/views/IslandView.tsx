@@ -31,7 +31,7 @@ export function IslandView() {
   const cfg = useSettings()
   const s = cfg.settings
   const savePreferences = cfg.setDisplayPreferences
-  const disabled = !cfg.ready || cfg.saving
+  const disabled = !cfg.ready
 
   return (
     <div className="flex w-full flex-col gap-3">
@@ -50,30 +50,30 @@ export function IslandView() {
           title="显示灵动岛"
           desc="控制本体与全部分身；与右上角按钮、系统托盘同步"
           className="h-[60px] rounded-[10px]"
-          control={<Switch on={s.island_visible} disabled={disabled || !isTauri} label="显示灵动岛" onChange={(on) => void cfg.setIslandVisible(on)} />}
+          control={<Switch on={s.island_visible} disabled={disabled || cfg.isSaving("island_visible") || !isTauri} label="显示灵动岛" onChange={(on) => void cfg.setIslandVisible(on)} />}
         />
 
         <div className="grid w-full grid-cols-2 gap-5">
           <Group title="窗口行为">
-            <Row title="灵动岛置顶" desc="本体与全部分身保持在其他窗口之上" control={<Switch on={s.always_on_top} disabled={disabled} label="灵动岛置顶" onChange={(on) => void cfg.setTopmost(on)} />} />
-            <Row title="贴边停靠" desc="拖到屏幕边缘自动吸附；关闭后解除停靠" control={<Switch on={s.dock_enabled} disabled={disabled} label="贴边停靠" onChange={(on) => void cfg.setDockEnabled(on)} />} />
-            <Row title="免打扰" desc="暂停增量提示、水位提醒与通知；继续采集" control={<Switch on={s.dnd} disabled={disabled} label="免打扰" onChange={(on) => void cfg.setDnd(on)} />} />
+            <Row title="灵动岛置顶" desc="本体与全部分身保持在其他窗口之上" control={<Switch on={s.always_on_top} disabled={disabled || cfg.isSaving("always_on_top")} label="灵动岛置顶" onChange={(on) => void cfg.setTopmost(on)} />} />
+            <Row title="贴边停靠" desc="拖到屏幕边缘自动吸附；关闭后解除停靠" control={<Switch on={s.dock_enabled} disabled={disabled || cfg.isSaving("dock_enabled")} label="贴边停靠" onChange={(on) => void cfg.setDockEnabled(on)} />} />
+            <Row title="免打扰" desc="暂停增量提示、水位提醒与通知；继续采集" control={<Switch on={s.dnd} disabled={disabled || cfg.isSaving("dnd")} label="免打扰" onChange={(on) => void cfg.setDnd(on)} />} />
           </Group>
           <Group title="显示外观">
             <Row
               title="透明度"
               desc="仅影响灵动岛，菜单保持清晰"
-              control={<SelectField className={cn(SELECT, "w-[142px]")} label="透明度" disabled={disabled} value={String(s.island_opacity)} options={[60, 70, 80, 90, 100].map((n) => ({ value: String(n), label: `${n}%` }))} onValueChange={(v) => void savePreferences({ island_opacity: Number(v) })} />}
+              control={<SelectField className={cn(SELECT, "w-[142px]")} label="透明度" disabled={disabled || cfg.isSaving("island_opacity")} value={String(s.island_opacity)} options={[60, 70, 80, 90, 100].map((n) => ({ value: String(n), label: `${n}%` }))} onValueChange={(v) => void savePreferences({ island_opacity: Number(v) })} />}
             />
             <Row
               title="大小"
               desc="用于探出与展开内容"
-              control={<SelectField className={cn(SELECT, "w-[142px]")} label="大小" disabled={disabled} value={String(s.island_scale)} options={[{ value: "85", label: "紧凑 · 85%" }, { value: "100", label: "标准 · 100%" }, { value: "115", label: "大号 · 115%" }]} onValueChange={(v) => void savePreferences({ island_scale: Number(v) })} />}
+              control={<SelectField className={cn(SELECT, "w-[142px]")} label="大小" disabled={disabled || cfg.isSaving("island_scale")} value={String(s.island_scale)} options={[{ value: "85", label: "紧凑 · 85%" }, { value: "100", label: "标准 · 100%" }, { value: "115", label: "大号 · 115%" }]} onValueChange={(v) => void savePreferences({ island_scale: Number(v) })} />}
             />
             <Row
               title="缩小后大小"
               desc="仅调整停靠条"
-              control={<SelectField className={cn(SELECT, "w-[142px]")} label="缩小后大小" disabled={disabled} value={String(s.island_shrink_scale)} options={[{ value: "75", label: "迷你 · 75%" }, { value: "100", label: "标准 · 100%" }, { value: "125", label: "大号 · 125%" }]} onValueChange={(v) => void savePreferences({ island_shrink_scale: Number(v) })} />}
+              control={<SelectField className={cn(SELECT, "w-[142px]")} label="缩小后大小" disabled={disabled || cfg.isSaving("island_shrink_scale")} value={String(s.island_shrink_scale)} options={[{ value: "75", label: "迷你 · 75%" }, { value: "100", label: "标准 · 100%" }, { value: "125", label: "大号 · 125%" }]} onValueChange={(v) => void savePreferences({ island_shrink_scale: Number(v) })} />}
             />
           </Group>
         </div>
@@ -87,7 +87,7 @@ export function IslandView() {
           className="h-14 rounded-[9px]"
           control={
             <div className="flex items-center gap-2.5">
-              <SelectField className={cn(SELECT, "w-[120px]")} label="自动刷新间隔" disabled={disabled} value={String(s.refresh_minutes)} options={[1, 5, 15, 30].map((n) => ({ value: String(n), label: `${n} 分钟` }))} onValueChange={(v) => void savePreferences({ refresh_minutes: Number(v) })} />
+              <SelectField className={cn(SELECT, "w-[120px]")} label="自动刷新间隔" disabled={disabled || cfg.isSaving("refresh_minutes")} value={String(s.refresh_minutes)} options={[1, 5, 15, 30].map((n) => ({ value: String(n), label: `${n} 分钟` }))} onValueChange={(v) => void savePreferences({ refresh_minutes: Number(v) })} />
               <ActionButton action="refresh" icon={<RefreshCw aria-hidden className="size-4" />} label="立即刷新" done="已开始刷新" />
             </div>
           }

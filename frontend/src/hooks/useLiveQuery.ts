@@ -7,6 +7,8 @@ export interface LiveQuery<T> {
   /** 首次加载没有数据时显示骨架；再次加载保留上次数据 */
   loading: boolean
   error: string | null
+  refreshing: boolean
+  revalidate: () => void
   refresh: () => void
 }
 
@@ -21,6 +23,7 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
   const data = result.key === key ? result.data : queryCache.get<T>(key)
   const [loading, setLoading] = useState(isTauri)
   const [error, setError] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [tick, setTick] = useState(0)
   const loadRef = useRef(load)
   const demoRef = useRef(demo)
@@ -40,6 +43,7 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
       queryCache.set(key, value)
       setResult({ key, data: value })
       setLoading(false)
+      setRefreshing(false)
       return
     }
     inFlight.current = true
@@ -63,7 +67,7 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
         if (queued.current) {
           queued.current = false
           setTick((value) => value + 1)
-        }
+        } else setRefreshing(false)
       })
     return () => {
       revision.current++
@@ -72,10 +76,15 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
     }
   }, [key, tick, enabled])
 
-  const refresh = useCallback(() => {
+  const revalidate = useCallback(() => {
     if (inFlight.current) queued.current = true
     else setTick((value) => value + 1)
   }, [])
 
-  return { data, loading, error: result.key === key ? error : null, refresh }
+  const refresh = useCallback(() => {
+    setRefreshing(true)
+    revalidate()
+  }, [revalidate])
+
+  return { data, loading, refreshing, revalidate, error: result.key === key ? error : null, refresh }
 }

@@ -49,6 +49,7 @@ export function useConnections() {
   const [live, setLive] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const loadRevision = useRef(0)
+  const initialized = useRef(queryCache.get<Connection[]>("connections") !== null)
   /** 每行「获取」的独立状态，按连接 id 索引 */
   const [fetchState, setFetchState] = useState<Record<string, FetchState>>({})
   /** 最近一次「获取」扫描过的位置，界面据此说明读取范围 */
@@ -57,12 +58,13 @@ export function useConnections() {
   const reload = useCallback(async () => {
     if (!isTauri) return
     const revision = ++loadRevision.current
-    setLoading(true)
+    if (!initialized.current) setLoading(true)
     try {
       const list = await api.listConnections()
       if (revision !== loadRevision.current) return
       const mapped = list.map(toConnection)
       queryCache.set("connections", mapped)
+      initialized.current = true
       setConnections(mapped)
       setLive(true)
       setError(null)
