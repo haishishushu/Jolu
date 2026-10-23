@@ -285,6 +285,10 @@ export interface AppSettings {
   /** 接管时保存的真实上游（网关地址，非凭证） */
   proxy_claude_upstream: string | null
   proxy_codex_upstream: string | null
+  /** 默认打开页面：last = 上次访问的页面，否则为主窗口页面 id */
+  default_page: string
+  /** 上次访问的主窗口页面；从未记录时为 null */
+  last_page: string | null
 }
 
 export interface ProxyStatusDto {
@@ -306,8 +310,22 @@ export interface CleanupPreviewDto {
 }
 
 export interface ImportSummaryDto {
+  /** 新导入的请求条数；重复项不再合并更新 */
   requests_changed: number
   sessions_changed: number
+  /** 跳过的条数：重复项 + 无效项 */
+  skipped: number
+}
+
+/** 导入前预览（画板 100 · 05）；token 10 分钟内有效，确认导入时传回 */
+export interface ImportPreviewDto {
+  token: string
+  file_name: string
+  valid: number
+  duplicate: number
+  invalid: number
+  /** 无效项原因，最多 20 条 */
+  invalid_reasons: string[]
 }
 
 export interface UpdateCheckDto {
@@ -373,8 +391,14 @@ export const api = {
   cleanupPreview: (days: number) => invoke<CleanupPreviewDto>("cleanup_preview", { days }),
   cleanupHistory: (days: number) => invoke<CleanupPreviewDto>("cleanup_history", { days }),
   readLocalConnections: (platform: string, kind: "auth" | "api", name?: string | null) => invoke<{ added: number; existing: number; warnings?: string[] }>("read_local_connections", { platform, kind, name: name ?? null }),
-  importDataFile: () => invoke<ImportSummaryDto | null>("import_data_file"),
-  exportDataFile: (platform: string | null) => invoke<string | null>("export_data_file", { platform }),
+  /** 选择备份文件并预览；用户取消选择时为 null */
+  previewImportFile: () => invoke<ImportPreviewDto | null>("preview_import_file"),
+  confirmImport: (token: string) => invoke<ImportSummaryDto>("confirm_import", { token }),
+  /** 取消 / 关闭预览：释放后端暂存的备份 */
+  discardImport: (token: string) => invoke<void>("discard_import", { token }),
+  /** 日期为 [startMs, endMs) 毫秒区间，都传 null 表示全部日期 */
+  exportDataFile: (platform: string | null, startMs: number | null, endMs: number | null) =>
+    invoke<string | null>("export_data_file", { platform, startMs, endMs }),
   scanLocalSessions: () => invoke<ScanResult>("scan_local_sessions"),
   collectionStatus: () => invoke<CollectionStatusDto>("collection_status"),
   dataInfo: () => invoke<DataInfo>("data_info"),

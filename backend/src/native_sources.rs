@@ -1132,7 +1132,7 @@ mod tests {
             )
             .unwrap();
         }
-        let json = crate::db::export_backup(&conn, None).unwrap();
+        let json = crate::db::export_backup(&conn, None, None, None).unwrap();
         let mut restored = crate::db::open(Path::new(":memory:")).unwrap();
         crate::db::import_backup(&mut restored, &json).unwrap();
         for (platform, _, _, _, _, _) in counts {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import {
-  SETTINGS_TABS, cleanupCutoffDate, formatBytes, formatCount, parseThreshold, portError, saveState, tabForSection,
+  SETTINGS_TABS, cleanupCutoffDate, formatBytes, formatCount, importCountsText, importDoneText, parseThreshold, portError, saveState, tabForSection,
 } from "./settingsPage.ts"
 
 test("分类顺序与画板 86 一致", () => {
@@ -54,4 +54,10 @@ test("页头保存状态：失败 > 保存中 > 未保存 > 已保存", () => {
   assert.equal(saveState({ saving: true, error: null, dirty: true }), "saving")
   assert.equal(saveState({ saving: false, error: null, dirty: true }), "dirty")
   assert.equal(saveState({ saving: false, error: null, dirty: false }), "saved")
+})
+
+test("导入预览与完成文案按画板 100 · 05", () => {
+  assert.equal(importCountsText({ valid: 1200, duplicate: 180, invalid: 2 }), "1,200 条有效 · 180 条重复 · 2 条无效")
+  assert.equal(importDoneText({ requests_changed: 1200, skipped: 182 }), "完成：已导入 1,200 条，跳过 182 条")
+  assert.equal(importDoneText({ requests_changed: 0, skipped: 0 }), "完成：已导入 0 条，跳过 0 条")
 })

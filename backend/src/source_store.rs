@@ -54,7 +54,7 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// 清理历史后的采集下限：早于它的记录不再重新入库。
-fn cutoff(conn: &Connection) -> rusqlite::Result<i64> {
+pub(crate) fn cutoff(conn: &Connection) -> rusqlite::Result<i64> {
     conn.prepare_cached("SELECT cutoff_ms FROM collection_policy WHERE singleton=1")?
         .query_row([], |r| r.get(0))
 }
@@ -173,10 +173,14 @@ pub fn context(conn: &Connection, value: &ContextSnapshot) -> rusqlite::Result<u
 pub fn contexts(
     conn: &Connection,
     platform: Option<&str>,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
 ) -> rusqlite::Result<Vec<ContextSnapshot>> {
-    let mut q=conn.prepare("SELECT platform,source,session_id,model,ratio,ts FROM native_context WHERE ?1 IS NULL OR platform=?1")?;
+    // 日期区间左闭右开，不传表示全部
+    let mut q=conn.prepare("SELECT platform,source,session_id,model,ratio,ts FROM native_context
+        WHERE (?1 IS NULL OR platform=?1) AND (?2 IS NULL OR ts>=?2) AND (?3 IS NULL OR ts<?3)")?;
     let result = q
-        .query_map([platform], |r| {
+        .query_map(params![platform, start_ms, end_ms], |r| {
             Ok(ContextSnapshot {
                 platform: r.get(0)?,
                 source: r.get(1)?,
@@ -281,7 +285,7 @@ mod tests {
         let trend = crate::db::trend_at(&conn, "workbuddy", "total", None, None, 2000).unwrap();
         assert_eq!(trend.points[0].cache_write, None);
         assert_eq!(trend.points[0].tokens, Some(1020));
-        let json = crate::db::export_backup(&conn, None).unwrap();
+        let json = crate::db::export_backup(&conn, None, None, None).unwrap();
         let mut target = crate::db::open(std::path::Path::new(":memory:")).unwrap();
         assert_eq!(
             crate::db::import_backup(&mut target, &json)

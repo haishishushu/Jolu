@@ -1856,6 +1856,51 @@ mod tests {
         fs::remove_dir_all(&base).ok();
     }
 
+    fn drive_of(path: &Path) -> Option<String> {
+        match path.components().next() {
+            Some(std::path::Component::Prefix(p)) => Some(p.as_os_str().to_string_lossy().to_uppercase()),
+            _ => None,
+        }
+    }
+
+    /// Skills 目录在仓库所在盘（D:），停用区在系统临时目录（C:）：停用、启用都要走「复制 + 校验 + 删除」路径，文件内容不变
+    #[test]
+    fn claude_park_and_unpark_across_volumes() {
+        let data = temp("cross-data");
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("jolu-skills-cross-{}-{}", std::process::id(), stamp()));
+        if drive_of(&data) == drive_of(&base) {
+            eprintln!("未测：临时目录与仓库在同一个盘（{:?}），无法模拟跨盘移动", drive_of(&data));
+            fs::remove_dir_all(&data).ok();
+            return;
+        }
+        let h = homes_at(&base);
+        let dir = skill(&h.claude.join("skills"), "cross-disk", &body("cross-disk"));
+        fs::create_dir_all(dir.join("refs")).unwrap();
+        fs::write(dir.join("refs").join("guide.md"), "跨盘附带文件\n第二行").unwrap();
+        let bytes = vec![0u8, 1, 2, 254, 255];
+        fs::write(dir.join("blob.bin"), &bytes).unwrap();
+        let mut cfg = Config::default();
+
+        let (root, located) = locate(&h, &cfg, &dir.display().to_string()).unwrap();
+        let stored = set_enabled_impl(&h, &mut cfg, &root, &located, "cross-disk", false, &data).unwrap();
+        let stored = PathBuf::from(stored);
+        assert_ne!(drive_of(&stored), drive_of(&dir), "停用区应在另一个盘");
+        assert!(!dir.exists(), "原目录已删除");
+        assert_eq!(fs::read_to_string(stored.join(SKILL_FILE)).unwrap(), body("cross-disk"));
+        assert_eq!(fs::read_to_string(stored.join("refs").join("guide.md")).unwrap(), "跨盘附带文件\n第二行");
+        assert_eq!(fs::read(stored.join("blob.bin")).unwrap(), bytes);
+
+        let (root, located) = locate(&h, &cfg, &stored.display().to_string()).unwrap();
+        let back = set_enabled_impl(&h, &mut cfg, &root, &located, "cross-disk", true, &data).unwrap();
+        assert!(same_path(&back, &dir) && !stored.exists());
+        assert_eq!(fs::read_to_string(dir.join(SKILL_FILE)).unwrap(), body("cross-disk"));
+        assert_eq!(fs::read_to_string(dir.join("refs").join("guide.md")).unwrap(), "跨盘附带文件\n第二行");
+        assert_eq!(fs::read(dir.join("blob.bin")).unwrap(), bytes);
+        assert!(load_config(&data).disabled.is_empty());
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&data).ok();
+    }
+
     #[test]
     fn codex_toggles_by_path_and_keeps_name_entries() {
         let base = temp("codex");
