@@ -44,8 +44,26 @@ Remove-Item Env:JOLU_DEV_URL                                 # 验收结束后�
 
 ## 账号与更新组件回归
 
+- `node scripts/acceptance/account-refresh.cjs`：使用 5193 Vite 开发服务器（`JOLU_PREVIEW_URL` 可覆盖，仅限本机）、Edge 和上述 playwright-core。挂载真实账号面板、额度 hook 与 API 桥接，只替换原生调用为合成 Promise；验证刷新一个账号不改变另一张卡片，成功更新重置卡次数，失败保留旧值并标注。不会连接真实桌面、读取凭据或查询上游服务。
 - `node scripts/acceptance/account-metadata.cjs`：需已启动 5193 前端服务及 `output/acceptance/node` 中的 playwright-core，使用 Edge 无头浏览器注入合成额度；检查四列、5 小时/周窗口、订阅快照、重置卡真实零和隐私显示。不会查询真实账号，也不执行账号切换。
 - `node scripts/acceptance/update-flow.cjs`：使用单独启用 `VITE_JOLU_UPDATES_ENABLED=1` 的 5197 前端服务（可用 `JOLU_PREVIEW_URL` 覆盖），合成更新 API 验证取消、重试、稍后安装和任务导航。不会安装更新；真实签名与安装链路须分别验证。
+
+## 组件异步状态回归
+
+`async-components.e2e.mjs` 在独立无头 Edge 中挂载真实 `SkillDetail`、`SkillEditor` 和 `TaskDetail`，由 `async-components.fixture.mjs` 将相关 API 替换为可控 Promise。fixture 仅由脚本提供给浏览器，不进入产品构建；未声明的原生调用一律拒绝。不会读取或写入真实 Skills、账号、额度，也不连接真实桌面。
+
+在 `output/acceptance/node` 安装 `playwright-core`，单独启动开发服务器：`pnpm --dir frontend dev --host localhost --port 5311 --strictPort`，然后执行：
+
+```powershell
+node scripts/acceptance/async-components.e2e.mjs
+```
+
+用 `JOLU_COMPONENT_URL` 覆盖默认 `http://localhost:5311`，仅接受本机地址。此脚本需要 Vite 开发服务器加载真实 TSX 组件，与上面的生产拆包回归不同。
+
+- 快速切文件：新成功后旧成功、旧失败均不能覆盖；当前失败仍显示；切换 Skill 本身时的旧失败也被忽略。
+- 保存：双击仅发出一次保存，输入框、供应商/范围、模板、启用选项与取消入口禁用；失败保留草稿并允许重试，成功只回调一次。
+- 任务额度：切账号立即移除旧值；旧成功/失败不能覆盖新状态；同账号新检查失败清除旧额度，再成功清除错误。
+- 只输出通过摘要，不打印正文、草稿或输入值；任何断言失败返回非零退出码，finally 关闭自建浏览器。不代替真实桌面/文件系统/API 联调。
 
 ## 真实只读接口的执行条件
 
