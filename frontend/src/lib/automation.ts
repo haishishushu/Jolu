@@ -321,6 +321,8 @@ export interface TaskForm {
   autoResume: boolean
   /** datetime-local 字符串；空为不限制 */
   deadline: string
+  /** 同账号排队（D-09） */
+  serialQueue: boolean
 }
 
 export type FormErrors = Partial<Record<"name" | "connectionId" | "cwd" | "prompt" | "time" | "deadline" | "launch", string>>

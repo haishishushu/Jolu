@@ -43,7 +43,7 @@ function initialForm(req: TaskDialogRequest): TaskForm {
   const today = dateKey(new Date())
   const base: TaskForm = {
     name: "", platform: "claude", connectionId: "", model: "", cwd: "", sessionId: null, prompt: "", launch: "now",
-    freq: "daily", time: "09:00", weekday: 1, date: today, timezone: localZone(), autoResume: true, deadline: "",
+    freq: "daily", time: "09:00", weekday: 1, date: today, timezone: localZone(), autoResume: true, deadline: "", serialQueue: true,
   }
   if (req.task) {
     const t = req.task
@@ -52,7 +52,7 @@ function initialForm(req: TaskDialogRequest): TaskForm {
     return {
       ...base, name: t.name, platform: t.platform, connectionId: t.connection_id, model: t.model ?? "", cwd: t.cwd, sessionId: t.session_id,
       prompt: t.prompt, launch: t.launch, freq: t.schedule?.freq ?? "daily", time: t.schedule?.time ?? "09:00", weekday: t.schedule?.weekday ?? 1,
-      date: t.schedule?.date ?? today, autoResume: t.auto_resume, deadline,
+      date: t.schedule?.date ?? today, autoResume: t.auto_resume, deadline, serialQueue: t.serial_queue,
     }
   }
   if (req.session) {
@@ -211,7 +211,7 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
       name: form.name.trim(), platform: form.platform, connection_id: form.connectionId, model: form.model || null, cwd: form.cwd.trim(),
       session_id: form.sessionId, prompt: form.prompt.trim(), skills: [], launch: form.launch,
       schedule: form.launch === "schedule" ? toSchedule(form) : null, auto_resume: form.autoResume,
-      wait_deadline: form.deadline ? new Date(form.deadline).getTime() : null,
+      wait_deadline: form.deadline ? new Date(form.deadline).getTime() : null, serial_queue: form.serialQueue,
     }
     if (!isTauri) return onSaved(request.task?.id ?? 0, input.launch)
     setSaving(true)
@@ -421,7 +421,7 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
             <button type="button" aria-expanded={advanced} onClick={() => setAdvanced((v) => !v)} className="flex h-7 items-center gap-2.5 rounded-md text-left outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent">
               <ChevronRight aria-hidden className={cn("size-[15px] text-jolu-muted transition-transform", advanced && "rotate-90")} />
               <span className="text-xs text-jolu-text">高级设置</span>
-              <span className="text-[10px] text-jolu-muted">{form.deadline ? `等待至 ${dayTime(new Date(form.deadline).getTime(), now)}` : "不限等待时间"} · 同账号顺序执行</span>
+              <span className="text-[10px] text-jolu-muted">{form.deadline ? `等待至 ${dayTime(new Date(form.deadline).getTime(), now)}` : "不限等待时间"}{form.serialQueue ? " · 同账号顺序执行" : " · 同账号可并行"}</span>
             </button>
             {advanced && (
               <div className="flex flex-col gap-3 rounded-xl border border-jolu-border p-3.5">
@@ -437,9 +437,13 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
                     {form.deadline && <input type="datetime-local" value={form.deadline} onChange={(e) => set("deadline", e.target.value)} className={INPUT} />}
                   </div>
                 </Field>
-                <Tip label="关闭排队待接入">
-                  <span><Checkbox checked disabled title="同一账号按队列顺序执行" note="默认开启，暂停当前任务后再处理后续任务。" /></span>
-                </Tip>
+                {/* 关闭态画板 60、68 未画，按 D-09 显示提示文案（待确认） */}
+                <Checkbox
+                  checked={form.serialQueue}
+                  onChange={(v) => set("serialQueue", v)}
+                  title="同一账号按队列顺序执行"
+                  note={form.serialQueue ? "默认开启，暂停当前任务后再处理后续任务。" : "同账号任务可能同时运行并争用额度；同一工作目录仍按顺序执行。"}
+                />
                 <span className="text-[10px] text-jolu-muted">到期仍不可用则标记「等待超时」，保留记录，由用户重新排队。恢复时间已知：到点检查；时间未知或检查失败：间隔重试，逐步延长。</span>
               </div>
             )}

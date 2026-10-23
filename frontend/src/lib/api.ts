@@ -285,6 +285,10 @@ export interface AppSettings {
   /** 接管时保存的真实上游（网关地址，非凭证） */
   proxy_claude_upstream: string | null
   proxy_codex_upstream: string | null
+  /** 默认打开页面：last = 上次访问的页面，否则为主窗口页面 id */
+  default_page: string
+  /** 上次访问的主窗口页面；从未记录时为 null */
+  last_page: string | null
 }
 
 export interface ProxyStatusDto {
