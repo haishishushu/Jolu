@@ -1083,16 +1083,10 @@ async fn cleanup_history(app: tauri::AppHandle, db: State<'_, Db>, days: u32) ->
     Ok(result)
 }
 
-/// 导出 / 导入备份的核心逻辑，由 `data_files` 的文件导出、导入命令调用
-async fn export_data(db: State<'_, DbRead>, platform: Option<String>) -> Result<String, String> {
-    data_files::valid_export_scope(platform.as_deref())?;
-    with_reader(db.0.clone(), move |conn| db::export_backup(conn, platform.as_deref())).await
-}
-
-async fn import_data(app: tauri::AppHandle, db: State<'_, Db>, json: String) -> Result<db::ImportSummary, String> {
-    let result = with_database(db.0.clone(), move |conn| db::import_backup(conn, &json)).await?;
-    let _ = app.emit("refresh-requested", ());
-    Ok(result)
+/// 导出备份的核心逻辑，由 `data_files` 的文件导出命令调用；日期区间左闭右开
+async fn export_data(db: State<'_, DbRead>, platform: Option<String>, start_ms: Option<i64>, end_ms: Option<i64>) -> Result<String, String> {
+    data_files::valid_export_scope(platform.as_deref(), start_ms, end_ms)?;
+    with_reader(db.0.clone(), move |conn| db::export_backup(conn, platform.as_deref(), start_ms, end_ms)).await
 }
 
 #[tauri::command]
@@ -2649,7 +2643,6 @@ pub fn run() {
             detect_local_login,
             current_connections,
             read_local_connections,
-            data_files::import_data_file,
             data_files::export_data_file,
             data_files::export_calls_csv,
             stats_overview,
@@ -2716,6 +2709,11 @@ pub fn run() {
             quit_startup,
             take_main_intent,
             fetch_remote_models,
+            // 任务 2.4 开始
+            data_files::preview_import_file,
+            data_files::confirm_import,
+            data_files::discard_import,
+            // 任务 2.4 结束
             updater::check_app_update_available,
             updater::download_app_update,
             updater::install_downloaded_update_and_restart,

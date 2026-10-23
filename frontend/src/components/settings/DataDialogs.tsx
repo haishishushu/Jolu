@@ -1,10 +1,12 @@
 import * as Dialog from "@radix-ui/react-dialog"
 import { useEffect, useState, type ReactNode } from "react"
-import { CircleAlert, Download, Square, SquareCheck, X } from "lucide-react"
+import { CalendarDays, CircleAlert, Download, Square, SquareCheck, X } from "lucide-react"
 import { api, isTauri, type CleanupPreviewDto } from "@/lib/api"
 import { PLATFORMS } from "@/lib/platforms"
 import { RETENTION_OPTIONS, cleanupCutoffDate, formatCount } from "@/lib/settingsPage"
+import { rangeLabel, rangeToMillis, todayRange, type DateRange } from "@/lib/usageStats"
 import { useToast } from "@/components/ui/Toast"
+import { DateRangeDialog } from "@/components/usage/DateRangeDialog"
 import { ActionButton, SelectButton } from "./settingsUi"
 
 function Shell({ width, title, onClose, busy, children }: { width: number; title: string; onClose: () => void; busy?: boolean; children: ReactNode }) {
@@ -30,14 +32,18 @@ function Shell({ width, title, onClose, busy, children }: { width: number; title
   )
 }
 
-/** 导出本地数据：按供应商导出 JSON；日期范围待接入 */
+/** 导出本地数据：按供应商与日期范围导出 JSON（D-27）；不选日期时导出全部 */
 export function ExportDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast()
   const [platform, setPlatform] = useState("all")
+  // null = 全部日期；选定后按 [开始日 0 点, 结束日次日 0 点) 导出，结束日是今天时到当前时刻
+  const [range, setRange] = useState<DateRange | null>(null)
+  const [picking, setPicking] = useState(false)
   const [busy, setBusy] = useState(false)
   const run = () => {
     setBusy(true)
-    api.exportDataFile(platform === "all" ? null : platform)
+    const millis = range ? rangeToMillis(range) : null
+    api.exportDataFile(platform === "all" ? null : platform, millis?.start ?? null, millis?.end ?? null)
       .then((path) => {
         // 用户在保存对话框里取消时什么都没发生，不弹提示
         if (!path) return
@@ -57,13 +63,27 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
       </div>
       <div className="flex items-center gap-4">
         <span className="flex-1 text-[13px] font-medium text-jolu-text">日期范围</span>
-        <span className="text-xs text-jolu-muted">全部日期 · 按日期导出待接入</span>
+        {/* 「全部日期」恢复入口画板未画，待确认 */}
+        {range && <button type="button" disabled={busy} onClick={() => setRange(null)}
+          className="rounded text-xs text-jolu-muted outline-none hover:text-jolu-on focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:opacity-45">全部日期</button>}
+        <ActionButton title="选择导出日期范围" icon={<CalendarDays aria-hidden className="size-3.5 text-jolu-muted" />} disabled={busy} onClick={() => setPicking(true)}
+          className="w-40 justify-start">
+          {range ? rangeLabel(range) : "全部日期"}
+        </ActionButton>
       </div>
       <p className="rounded-[9px] bg-jolu-side p-3.5 text-[11px] text-jolu-muted">导出文件不包含 API Key、登录凭证和原始会话正文。</p>
       <div className="flex justify-end gap-2">
         <ActionButton disabled={busy} onClick={onClose}>取消</ActionButton>
         <ActionButton tone="accent" icon={<Download aria-hidden className="size-3.5" />} busy={busy} disabled={!isTauri} onClick={run}>导出数据</ActionButton>
       </div>
+      {picking && (
+        <DateRangeDialog
+          value={range ?? todayRange()}
+          currentLabel={range ? undefined : "全部日期"}
+          onConfirm={(next) => { setRange(next); setPicking(false) }}
+          onClose={() => setPicking(false)}
+        />
+      )}
     </Shell>
   )
 }

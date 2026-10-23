@@ -48,6 +48,16 @@ export function formatCount(value: number | null | undefined): string | null {
   return value.toLocaleString("en-US")
 }
 
+/** 导入预览的三个数字（画板 100 · 05）：「1,200 条有效 · 180 条重复 · 2 条无效」 */
+export function importCountsText(preview: { valid: number; duplicate: number; invalid: number }): string {
+  return `${formatCount(preview.valid)} 条有效 · ${formatCount(preview.duplicate)} 条重复 · ${formatCount(preview.invalid)} 条无效`
+}
+
+/** 导入完成提示（画板 100 · 05）：跳过 = 重复项 + 无效项 */
+export function importDoneText(summary: { requests_changed: number; skipped: number }): string {
+  return `完成：已导入 ${formatCount(summary.requests_changed)} 条，跳过 ${formatCount(summary.skipped)} 条`
+}
+
 /**
  * 清理截止日期（本地时区，YYYY-MM-DD）。后端按「当前时刻 − days × 24 小时」计算截止点，
  * 预览返回 cutoff_ms 时直接传入 cutoffMs，保证显示与实际删除范围一致。
