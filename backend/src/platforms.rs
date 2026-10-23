@@ -25,6 +25,9 @@ pub fn known(id: &str) -> bool {
 pub fn native(id: &str) -> bool {
     known(id) && !matches!(id, "claude" | "codex" | "custom")
 }
+pub fn uses_native_quota(platform: &str, kind: &str) -> bool {
+    native(platform) && !(matches!(platform,"zcode"|"opencode") && kind=="api")
+}
 pub fn supports(id: &str, capability: &str) -> bool {
     get(id).is_some_and(|p| p.capabilities.iter().any(|c| c == capability))
 }
@@ -37,6 +40,11 @@ pub fn limitation(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn api_plan_quota_is_not_blocked_by_native_platform() {
+        for p in ["zcode","opencode"] {assert!(!uses_native_quota(p,"api"));assert!(uses_native_quota(p,"auth"));}
+        assert!(uses_native_quota("gemini","api"));
+    }
     #[test]
     fn all_ten_platforms_have_unique_ids() {
         assert_eq!(CATALOG.len(), 10);
@@ -57,7 +65,7 @@ mod tests {
         assert!(!known("tare"));
         assert!(!supports("trae", "local_sessions"));
         // OpenCode 已列入目录但尚未接入，不声明任何能力
-        assert!(get("opencode").is_some_and(|p| p.capabilities.is_empty()));
+        assert!(supports("opencode","local_sessions"));
         // 自定义供应商只有用户填写的 API Key 连接，不是本机来源平台
         assert!(known("custom") && !native("custom"));
         assert!(supports("custom", "api_connection") && !supports("custom", "local_sessions"));

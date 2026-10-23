@@ -5,7 +5,7 @@
 //! - Claude API  ：`~/.claude/settings.json` 的 `env.ANTHROPIC_AUTH_TOKEN`（+ `ANTHROPIC_BASE_URL`）
 //! - Claude Auth ：仅选择当前完整授权，拒绝拼接不同账号的 token
 //! - Codex  API  ：`~/.codex/auth.json` 的 `OPENAI_API_KEY`（+ config.toml 当前 provider 的 base_url）
-//! - Codex  Auth ：保留当前完整授权，清除 API 模式覆盖
+//! - Codex  Auth ：恢复该账号已保护的完整授权，清除 API 模式覆盖
 //!
 //! 写入路径与 `creds::read_secret` 的读取路径一一对应；每次写文件前先把原文件
 //! 备份到应用数据目录，写失败不留半截内容（write_atomic 风格）。
@@ -17,18 +17,28 @@ pub struct ApplyNote {
     pub message: String,
 }
 
+/// 同一进程的所有窗口共享一个配置切换锁；仅在 blocking 线程里持有。
+pub(crate) fn serialized_switch<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().map_err(|_| "CLI 配置切换锁不可用，请重启应用")?;
+    work()
+}
+
 pub fn apply_to_cli(
     platform: &str,
     kind: &str,
     secret: &str,
     base_url: Option<&str>,
     backup_dir: &Path,
+    auth_snapshot: Option<&serde_json::Value>,
 ) -> Result<ApplyNote, String> {
+    if crate::validation::isolated() { return Err("隔离验收不修改外部 CLI 登录或配置".into()); }
+    if platform == "codex" { validate_codex_environment(base_url, |key| std::env::var(key).ok())?; }
     match (platform, kind) {
         ("claude", "api") => apply_claude_api(secret, base_url, backup_dir),
         ("claude", _) => apply_claude_auth(secret, backup_dir),
         ("codex", "api") => apply_codex_api(secret, base_url, backup_dir),
-        ("codex", _) => apply_codex_auth(secret, backup_dir),
+        ("codex", _) => apply_codex_auth(secret, backup_dir, auth_snapshot),
         _ => Err(format!("暂不支持把 {platform} 连接写入 CLI 配置")),
     }
 }
@@ -130,10 +140,14 @@ fn apply_codex_api(
     base_url: Option<&str>,
     backup_dir: &Path,
 ) -> Result<ApplyNote, String> {
-    let auth = codex_auth_path()?;
-    let config = codex_config_path()?;
+    apply_codex_api_at(&codex_auth_path()?, &codex_config_path()?, secret, base_url, backup_dir)
+}
+
+fn apply_codex_api_at(auth: &Path, config: &Path, secret: &str, base_url: Option<&str>, backup_dir: &Path) -> Result<ApplyNote, String> {
+    let old_auth = read_optional(auth)?;
+    let old_config = read_optional(config)?;
     let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&auth).map_err(|e| e.to_string())?)
+        serde_json::from_slice(old_auth.as_deref().unwrap_or(b"{}"))
             .map_err(|_| "auth.json 无效")?;
     let object = value.as_object_mut().ok_or("auth.json 不是对象")?;
     object.remove("tokens");
@@ -144,7 +158,7 @@ fn apply_codex_api(
         serde_json::Value::String(secret.into()),
     );
     let document = codex_provider_config(
-        &std::fs::read_to_string(&config).map_err(|e| e.to_string())?,
+        std::str::from_utf8(old_config.as_deref().unwrap_or_default()).map_err(|_| "config.toml 不是 UTF-8")?,
         base_url,
     )?;
     write_pair(
@@ -153,24 +167,25 @@ fn apply_codex_api(
         &config,
         document.into_bytes(),
         backup_dir,
+        (old_auth, old_config),
     )?;
     Ok(ApplyNote {
         message: "Key 与服务地址已一起写入 Codex 配置，新会话生效；原配置已备份".into(),
     })
 }
 
-fn apply_codex_auth(secret: &str, backup_dir: &Path) -> Result<ApplyNote, String> {
-    let auth = codex_auth_path()?;
-    let config = codex_config_path()?;
-    verify_current_auth(&auth, "/tokens/access_token", secret)?;
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&auth).map_err(|e| e.to_string())?)
-            .map_err(|_| "auth.json 无效")?;
-    let object = value.as_object_mut().ok_or("auth.json 不是对象")?;
-    object.remove("OPENAI_API_KEY");
-    object.remove("auth_mode");
+fn apply_codex_auth(secret: &str, backup_dir: &Path, snapshot: Option<&serde_json::Value>) -> Result<ApplyNote, String> {
+    apply_codex_auth_at(&codex_auth_path()?, &codex_config_path()?, secret, backup_dir, snapshot)
+}
+
+fn apply_codex_auth_at(auth: &Path, config: &Path, secret: &str, backup_dir: &Path, snapshot: Option<&serde_json::Value>) -> Result<ApplyNote, String> {
+    let old_auth = read_optional(auth)?;
+    let old_config = read_optional(config)?;
+    let current: serde_json::Value = serde_json::from_slice(old_auth.as_deref().unwrap_or(b"{}"))
+        .map_err(|_| "auth.json 无效")?;
+    let value = restore_codex_bundle(&current, snapshot, secret)?;
     let document = codex_provider_config(
-        &std::fs::read_to_string(&config).map_err(|e| e.to_string())?,
+        std::str::from_utf8(old_config.as_deref().unwrap_or_default()).map_err(|_| "config.toml 不是 UTF-8")?,
         None,
     )?;
     write_pair(
@@ -179,10 +194,17 @@ fn apply_codex_auth(secret: &str, backup_dir: &Path) -> Result<ApplyNote, String
         &config,
         document.into_bytes(),
         backup_dir,
+        (old_auth, old_config),
     )?;
     Ok(ApplyNote {
-        message: "已选择当前本机完整授权及官方服务；未拼接不同账号的 access/refresh token".into(),
+        message: "已恢复该账号的完整授权及官方服务；新会话生效，原配置已加密备份".into(),
     })
+}
+
+fn restore_codex_bundle(current: &serde_json::Value, saved: Option<&serde_json::Value>, secret: &str) -> Result<serde_json::Value, String> {
+    crate::auth_snapshot::complete_codex(current, secret)
+        .or_else(|| saved.and_then(|snapshot| crate::auth_snapshot::complete_codex(snapshot, secret)))
+        .ok_or_else(|| "该账号尚无可恢复的完整授权，请在 Codex 登录此账号后重新同步；不能仅替换 access token".into())
 }
 
 fn verify_current_auth(path: &Path, pointer: &str, secret: &str) -> Result<(), String> {
@@ -195,10 +217,32 @@ fn verify_current_auth(path: &Path, pointer: &str, secret: &str) -> Result<(), S
     Ok(())
 }
 
+fn validate_codex_environment(url: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    let set = |key| env(key).is_some_and(|value| !value.trim().is_empty());
+    if set("CODEX_API_KEY") { return Err("检测到 CODEX_API_KEY 环境覆盖，请清除后再切换账号".into()); }
+    if url.is_none() && set("OPENAI_BASE_URL") {
+        return Err("检测到 OPENAI_BASE_URL 环境覆盖，无法确认官方服务地址；请清除后再切换".into());
+    }
+    Ok(())
+}
+
 fn codex_provider_config(text: &str, url: Option<&str>) -> Result<String, String> {
     let mut document = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|_| "config.toml 格式无效")?;
+    let selected_profile = document.get("profile").map(|item| item.as_str().filter(|name| !name.trim().is_empty())
+        .map(str::to_owned).ok_or("profile 必须是有效名称")).transpose()?;
+    let profile = if let Some(name) = selected_profile.as_deref() {
+        Some(document.get("profiles").and_then(|profiles| profiles.get(name)).and_then(toml_edit::Item::as_table_like)
+            .ok_or("当前 profile 不存在或格式无效，未修改授权")?)
+    } else { None };
+    if profile.is_some_and(|profile| profile.get("model_providers").is_some()) {
+        return Err("当前 profile 内含供应商覆写，无法安全切换；请先整理该 profile 的供应商配置".into());
+    }
+    let store = profile.and_then(|profile| profile.get("cli_auth_credentials_store")).or_else(|| document.get("cli_auth_credentials_store"));
+    if store.is_some_and(|store| store.as_str() != Some("file")) {
+        return Err("当前 Codex 使用非文件授权存储，不能通过 auth.json 切换；请在 Codex 中管理该登录".into());
+    }
     if let Some(url) = url {
         let mut provider = toml_edit::Table::new();
         provider["name"] = toml_edit::value("Jolu");
@@ -215,7 +259,24 @@ fn codex_provider_config(text: &str, url: Option<&str>) -> Result<String, String
         providers.insert("jolu", toml_edit::Item::Table(provider));
         document["model_provider"] = toml_edit::value("jolu");
     } else {
+        if let Some(providers) = document.get_mut("model_providers") {
+            let providers = providers.as_table_like_mut().ok_or("model_providers 格式无效")?;
+            if let Some(provider) = providers.get_mut("openai") {
+                let provider = provider.as_table_like_mut().ok_or("官方供应商覆写格式无效，未修改授权")?;
+                for key in ["base_url", "env_key", "env_key_instructions", "experimental_bearer_token", "auth", "gateway_oauth", "aws", "http_headers", "env_http_headers", "query_params", "model_catalog_url"] {
+                    provider.remove(key);
+                }
+                provider.insert("requires_openai_auth", toml_edit::value(true));
+                provider.insert("wire_api", toml_edit::value("responses"));
+            }
+        }
         document["model_provider"] = toml_edit::value("openai");
+    }
+    // 只调整当前默认 profile 的供应商选择，保留其模型、推理设置和其他 profiles。
+    if let Some(name) = selected_profile {
+        let profile = document.get_mut("profiles").and_then(|profiles| profiles.get_mut(&name)).and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or("当前 profile 格式无效，未修改授权")?;
+        profile.insert("model_provider", toml_edit::value(if url.is_some() { "jolu" } else { "openai" }));
     }
     Ok(document.to_string())
 }
@@ -227,30 +288,30 @@ fn write_pair(
     second: &Path,
     second_bytes: Vec<u8>,
     backup_dir: &Path,
+    expected: (Option<Vec<u8>>, Option<Vec<u8>>),
 ) -> Result<(), String> {
-    write_pair_using(
-        first,
-        first_bytes,
-        second,
-        second_bytes,
-        backup_dir,
-        write_atomic,
-    )
+    write_pair_expected(first, first_bytes, second, second_bytes, backup_dir, expected, write_atomic)
 }
+#[cfg(test)]
 fn write_pair_using(
-    first: &Path,
-    first_bytes: Vec<u8>,
-    second: &Path,
-    second_bytes: Vec<u8>,
-    backup_dir: &Path,
+    first: &Path, first_bytes: Vec<u8>, second: &Path, second_bytes: Vec<u8>, backup_dir: &Path,
+    write: impl FnMut(&Path, Vec<u8>) -> Result<(), String>,
+) -> Result<(), String> {
+    let expected = (read_optional(first)?, read_optional(second)?);
+    write_pair_expected(first, first_bytes, second, second_bytes, backup_dir, expected, write)
+}
+fn write_pair_expected(
+    first: &Path, first_bytes: Vec<u8>, second: &Path, second_bytes: Vec<u8>, backup_dir: &Path,
+    expected: (Option<Vec<u8>>, Option<Vec<u8>>),
     mut write: impl FnMut(&Path, Vec<u8>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let old_first = std::fs::read(first).map_err(|e| e.to_string())?;
-    let old_second = std::fs::read(second).map_err(|e| e.to_string())?;
-    backup_file(first, backup_dir)?;
-    backup_file(second, backup_dir)?;
-    if std::fs::read(first).ok().as_ref() != Some(&old_first)
-        || std::fs::read(second).ok().as_ref() != Some(&old_second)
+    let (old_first, old_second) = expected;
+    if read_optional(first)? != old_first || read_optional(second)? != old_second {
+        return Err("配置在读取后发生变化，请重新读取后再启用".into());
+    }
+    if old_first.is_some() { backup_file(first, backup_dir)?; }
+    if old_second.is_some() { backup_file(second, backup_dir)?; }
+    if read_optional(first)? != old_first || read_optional(second)? != old_second
     {
         return Err("配置在准备期间发生变化，请重新读取后再启用".into());
     }
@@ -261,28 +322,30 @@ fn write_pair_using(
                 "{error}；首个文件被外部修改，无法自动回滚，请从备份恢复"
             ));
         }
-        write(first, old_first).map_err(|rollback| format!("{error}；回滚失败：{rollback}"))?;
+        match old_first {
+            Some(bytes) => write(first, bytes),
+            None => std::fs::remove_file(first).map_err(|e| e.to_string()),
+        }.map_err(|rollback| format!("{error}；回滚失败：{rollback}"))?;
         return Err(format!("{error}；已回滚首个文件"));
     }
     Ok(())
 }
 
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(format!("无法读取配置文件 {}", path.display())),
+    }
+}
+
 /* ─────────────────────────── 通用工具 ─────────────────────────── */
 
 fn claude_home() -> Result<PathBuf, String> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(|| dirs_home().map(|p| p.join(".claude")))
+    crate::creds::claude_dir().ok_or_else(|| "未找到 Claude 配置目录".into())
 }
 fn codex_home() -> Result<PathBuf, String> {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(|| dirs_home().map(|p| p.join(".codex")))
-}
-fn dirs_home() -> Result<PathBuf, String> {
-    crate::creds::home().ok_or_else(|| "未找到用户主目录".to_string())
+    crate::creds::codex_dir().ok_or_else(|| "未找到 Codex 配置目录".into())
 }
 
 /// 读 JSON → 修改 → 备份 → 原子写。文件不存在时如实报错，不代用户创建。
@@ -297,12 +360,15 @@ fn update_json(
         .map_err(|e| format!("{} 不是有效 JSON：{e}", path.display()))?;
     edit(&mut value)?;
     backup_file(path, backup_dir)?;
+    if std::fs::read(path).ok().as_deref() != Some(text.as_bytes()) {
+        return Err("配置在读取后发生变化，请重试".into());
+    }
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|e| format!("{} 序列化失败：{e}", path.display()))?;
     write_atomic(path, bytes)
 }
 
-/// 写前备份：原样复制到应用数据目录的 cli-backups/，文件名带毫秒时间戳。
+/// 写前备份：DPAPI 当前用户加密后写入 cli-backups/；熵为原文件名，便于同用户恢复。
 fn backup_file(path: &Path, backup_dir: &Path) -> Result<(), String> {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return Err("备份失败：文件名无法识别".into());
@@ -312,8 +378,10 @@ fn backup_file(path: &Path, backup_dir: &Path) -> Result<(), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    let target = backup_dir.join(format!("{name}.{stamp}.bak"));
-    std::fs::copy(path, target).map_err(|e| format!("备份 {} 失败：{e}", path.display()))?;
+    let target = backup_dir.join(format!("{name}.{stamp}.bak.dpapi"));
+    let bytes = std::fs::read(path).map_err(|_| "读取备份源文件失败")?;
+    let protected = crate::auth_snapshot::protect(&bytes, name.as_bytes(), true)?;
+    std::fs::write(target, protected).map_err(|_| "保存加密备份失败")?;
     Ok(())
 }
 
@@ -346,6 +414,127 @@ fn write_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(windows)]
+    fn codex_auth_api_auth_round_trip_restores_complete_identity_and_encrypted_backups() {
+        let root = std::env::temp_dir().join(format!("jolu-auth-roundtrip-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let auth = root.join("auth.json"); let config = root.join("config.toml"); let backups = root.join("backups");
+        let saved = serde_json::json!({"tokens":{"access_token":"fixture-a","refresh_token":"refresh-a","id_token":"id-a","account_id":"account-a"},"last_refresh":"2026-10-23T00:00:00Z"});
+        std::fs::write(&auth, serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert!(!config.exists(), "官方 CLI 可尚未创建 config.toml");
+        apply_codex_api_at(&auth, &config, "fixture-api", Some("https://gateway.example/v1"), &backups).unwrap();
+        let api: serde_json::Value = serde_json::from_slice(&std::fs::read(&auth).unwrap()).unwrap();
+        assert!(api.get("tokens").is_none());
+        assert!(apply_codex_auth_at(&auth, &config, "fixture-a", &backups, None).is_err());
+        assert_eq!(api, serde_json::from_slice::<serde_json::Value>(&std::fs::read(&auth).unwrap()).unwrap());
+        apply_codex_auth_at(&auth, &config, "fixture-a", &backups, Some(&saved)).unwrap();
+        assert_eq!(saved, serde_json::from_slice::<serde_json::Value>(&std::fs::read(&auth).unwrap()).unwrap());
+        assert!(std::fs::read_to_string(&config).unwrap().contains("openai"));
+        let mut auth_backups = 0;
+        for file in std::fs::read_dir(&backups).unwrap().map(Result::unwrap) {
+            assert_eq!(file.path().extension().unwrap(), "dpapi");
+            let bytes = std::fs::read(file.path()).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("fixture-a"));
+            if file.file_name().to_string_lossy().starts_with("auth.json.") {
+                let restored = crate::auth_snapshot::protect(&bytes, b"auth.json", false).unwrap();
+                assert!(serde_json::from_slice::<serde_json::Value>(&restored).is_ok());
+                auth_backups += 1;
+            }
+        }
+        assert_eq!(auth_backups, 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_prepared_pair_never_overwrites_a_newer_cli_login() {
+        let root = std::env::temp_dir().join(format!("jolu-pair-stale-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let auth = root.join("auth.json"); let config = root.join("config.toml");
+        std::fs::write(&auth, b"new-login").unwrap();
+        let result = write_pair(&auth, b"stale-result".to_vec(), &config, b"new-config".to_vec(), &root.join("backups"), (Some(b"old-login".to_vec()), None));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&auth).unwrap(), b"new-login");
+        assert!(!config.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_second_write_removes_newly_created_first_file() {
+        let root = std::env::temp_dir().join(format!("jolu-pair-missing-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("auth.json"); let second = root.join("config.toml");
+        let result = write_pair_using(&first, b"created".to_vec(), &second, b"config".to_vec(), &root.join("backups"), |path, bytes| {
+            if path == second { Err("injected failure".into()) } else { write_atomic(path, bytes) }
+        });
+        assert!(result.is_err());
+        assert!(!first.exists() && !second.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn switch_lock_serializes_all_windows() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let active = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..4).map(|_| {
+            let active = active.clone();
+            std::thread::spawn(move || serialized_switch(|| {
+                assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                Ok(())
+            }).unwrap())
+        }).collect();
+        for handle in handles { handle.join().unwrap(); }
+    }
+
+    #[test]
+    fn codex_selected_profile_changes_provider_without_losing_preferences() {
+        let config = "profile='work'\nmodel='global-model'\n[profiles.work]\nmodel_provider='old'\nmodel='profile-model'\nmodel_reasoning_effort='high'\n[profiles.other]\nmodel_provider='untouched'\n";
+        let changed = codex_provider_config(config, Some("https://target.example/v1")).unwrap();
+        let parsed: toml::Value = toml::from_str(&changed).unwrap();
+        assert_eq!(parsed["profiles"]["work"]["model_provider"].as_str(), Some("jolu"));
+        assert_eq!(parsed["profiles"]["work"]["model"].as_str(), Some("profile-model"));
+        assert_eq!(parsed["profiles"]["work"]["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(parsed["profiles"]["other"]["model_provider"].as_str(), Some("untouched"));
+        let official: toml::Value = toml::from_str(&codex_provider_config(&changed, None).unwrap()).unwrap();
+        assert_eq!(official["profiles"]["work"]["model_provider"].as_str(), Some("openai"));
+    }
+
+    #[test]
+    fn codex_official_provider_clears_endpoint_and_auth_overrides() {
+        let config = "model_provider='openai'\n[model_providers.openai]\nname='my-openai'\nbase_url='https://old.example/v1'\nenv_key='OLD_KEY'\nexperimental_bearer_token='old-bearer'\nrequires_openai_auth=false\nrequest_max_retries=3\nhttp_headers={ Authorization='old-header' }\n";
+        let parsed: toml::Value = toml::from_str(&codex_provider_config(config, None).unwrap()).unwrap();
+        let provider = parsed["model_providers"]["openai"].as_table().unwrap();
+        for key in ["base_url", "env_key", "experimental_bearer_token", "http_headers"] { assert!(!provider.contains_key(key), "{key} must not override saved auth"); }
+        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(provider["request_max_retries"].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn ambiguous_codex_profile_or_store_is_rejected_before_auth_changes() {
+        let root = std::env::temp_dir().join(format!("jolu-provider-reject-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let auth = root.join("auth.json"); let config = root.join("config.toml");
+        let original = br#"{"OPENAI_API_KEY":"original-key"}"#;
+        std::fs::write(&auth, original).unwrap();
+        for source in ["profile='missing'", "cli_auth_credentials_store='keyring'", "profile='work'\n[profiles.work.model_providers.old]\nbase_url='https://old.example/v1'"] {
+            std::fs::write(&config, source).unwrap();
+            assert!(apply_codex_api_at(&auth, &config, "replacement-key", Some("https://target.example/v1"), &root.join("backups")).is_err());
+            assert_eq!(std::fs::read(&auth).unwrap(), original);
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), source);
+        }
+        assert!(!root.join("backups").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn environment_overrides_cannot_silently_redirect_official_auth() {
+        assert!(validate_codex_environment(None, |name| (name == "OPENAI_BASE_URL").then(|| "https://old.example/v1".into())).is_err());
+        assert!(validate_codex_environment(Some("https://target.example/v1"), |name| (name == "CODEX_API_KEY").then(|| "other-key".into())).is_err());
+        assert!(validate_codex_environment(None, |_| None).is_ok());
+    }
+
     #[test]
     fn codex_switch_clears_selected_gateway_and_keeps_unrelated_configuration() {
         let original="model = 'test-model'\nmodel_provider = 'old'\n[model_providers.old]\nbase_url = 'https://old.example/v1'\n";

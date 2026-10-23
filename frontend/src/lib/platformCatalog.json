@@ -58,9 +58,14 @@
   {
     "id": "opencode",
     "name": "OpenCode",
-    "availability": "not-integrated",
-    "capabilities": [],
-    "limitation": "待接入：先选模型服务，再用账号登录或套餐 Key 连接；当前程序尚未实现"
+    "availability": "available",
+    "capabilities": [
+      "auth_connection",
+      "api_connection",
+      "local_sessions",
+      "realtime_delta"
+    ],
+    "limitation": "OpenCode 用量支持 JSON / SQLite 消息表；待真机核对。订阅只读检测 OpenAI 登录，不托管 OAuth。"
   },
   {
     "id": "zcode",
@@ -70,7 +75,8 @@
       "auth_connection",
       "local_sessions",
       "subscription_quota",
-      "realtime_delta"
+      "realtime_delta",
+      "api_connection"
     ],
     "limitation": "本机 ZCode BigModel Coding Plan API Key 可查套餐剩余；账号 OAuth 额度未接入"
   },

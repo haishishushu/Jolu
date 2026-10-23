@@ -37,6 +37,8 @@ fn app_data() -> PathBuf {
 
 pub fn sources_at(home: &Path, app: &Path) -> Vec<Source> {
     [
+        ("opencode", "db", "OpenCode", crate::opencode::data_dir(home).join("opencode.db")),
+        ("opencode", "json", "OpenCode JSON", crate::opencode::data_dir(home).join("storage/message")),
         ("gemini", "cli", "Gemini CLI", home.join(".gemini/tmp")),
         ("grok", "cli", "Grok CLI", home.join(".grok/auth.json")),
         (
@@ -118,6 +120,12 @@ pub fn register(
     platform: &str,
     name: Option<&str>,
 ) -> Result<(usize, usize, Vec<String>), String> {
+    if platform=="opencode" {
+        if !crate::opencode::openai_logged_in(){return Err("请先在 OpenCode 中登录 OpenAI".into())}
+        let name=crate::connections::validate_name(name.unwrap_or("OpenCode · OpenAI"))?;
+        let n=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,service) VALUES('monitor:native:opencode:openai','opencode','auth',?1,'OpenAI 订阅','','connected',?2,'openai')",params![name,chrono::Utc::now().timestamp_millis()]).map_err(|e|e.to_string())?;
+        return Ok((n,usize::from(n==0),vec!["只读关联本机登录；不复制或刷新 OAuth 凭证".into()]));
+    }
     if !crate::platforms::native(platform) {
         return Err("不是本机来源平台".into());
     }
@@ -168,6 +176,10 @@ fn register_sources(
 }
 
 pub fn check(id: &str, platform: &str) -> Result<Source, String> {
+    if id=="monitor:native:opencode:openai" && platform=="opencode" {
+        if !crate::opencode::openai_logged_in(){return Err("OpenCode 中未检测到 OpenAI 登录".into())}
+        return Ok(Source{id:"native:opencode:openai".into(),platform:"opencode".into(),name:"OpenAI".into(),available:true,capabilities:vec![],reason:None,path:crate::opencode::data_dir(&home().ok_or("无法定位用户目录")?).join("auth.json")});
+    }
     let key = monitor_id(id).ok_or("该旧连接没有有效的本机来源标识，请重新获取")?;
     let source = sources(platform)
         .into_iter()
@@ -181,6 +193,10 @@ pub fn check(id: &str, platform: &str) -> Result<Source, String> {
 }
 
 fn validate_source(source: &Source) -> Result<(), String> {
+    if source.platform == "opencode" {
+        if source.path.is_dir(){crate::opencode_usage::read_json_files(&source.path)?;}else{let db=readonly(&source.path)?;let layout=crate::opencode_usage::detect_layout(&db)?;crate::opencode_usage::read_usage(&db,layout,i64::MAX)?;}
+        return Ok(());
+    }
     if source.platform == "grok" {
         return crate::creds::local_grok_auth().map(|_| ());
     }
@@ -811,10 +827,15 @@ fn scan_sources(db: &mut impl Store, home: &Path, app: &Path, only: Option<&[Pat
                 |r| r.get(0),
             )
             .unwrap_or(false));
+        let paused = paused || (source.platform=="opencode" && db.write(|conn|conn.query_row("SELECT EXISTS(SELECT 1 FROM connections WHERE id='monitor:native:opencode:openai' AND status='paused')",[],|r|r.get::<_,bool>(0)).unwrap_or(false)));
         if paused {
             continue;
         }
-        let read = if source.platform == "zcode" {
+        let read = if source.platform == "opencode" {
+            // 新旧格式共存时只读 SQLite，避免迁移副本重复统计。只读连接保留 WAL 可见性。
+            if source.path.is_dir() && crate::opencode::data_dir(home).join("opencode.db").exists(){continue}
+            (||->Result<(usize,Vec<String>),String>{let records=if source.path.is_dir(){crate::opencode_usage::read_json_files(&source.path)?}else{let input=readonly(&source.path)?;crate::opencode_usage::read_usage(&input,crate::opencode_usage::detect_layout(&input)?,0)?};db.write(|conn|source_store::write(conn,&records)).map(|n|(n,vec![])).map_err(|e|e.to_string())})()
+        } else if source.platform == "zcode" {
             zcode(db, &source).map(|n| (n, Vec::new()))
         } else {
             scan_files(db, &source, app)
@@ -863,6 +884,15 @@ pub fn scan_changed(db: &mut impl Store, changed: &[PathBuf]) -> ScanResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opencode_pause_stops_collection_and_resume_is_idempotent() {
+        let root=fixture_dir("opencode-paused");let data=crate::opencode::data_dir(&root);std::fs::create_dir_all(&data).unwrap();
+        let source=Connection::open(data.join("opencode.db")).unwrap();source.execute_batch("CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT); INSERT INTO message VALUES('m','s',123,'{\"role\":\"assistant\",\"tokens\":{\"input\":100,\"output\":30}}');").unwrap();
+        let mut db=crate::db::open(&root.join("jolu.db")).unwrap();db.execute("INSERT INTO connections(id,platform,kind,name,label,masked,status,created_ms) VALUES('monitor:native:opencode:openai','opencode','auth','test','','','paused',0)",[]).unwrap();
+        assert_eq!(scan_at(&mut db,&root,&root).records_inserted,0);
+        db.execute("UPDATE connections SET status='connected'",[]).unwrap();assert_eq!(scan_at(&mut db,&root,&root).records_inserted,1);assert_eq!(scan_at(&mut db,&root,&root).records_inserted,0);
+    }
+
     fn fixture_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "jolu-native-{label}-{}-{}",
@@ -1150,7 +1180,7 @@ mod tests {
     fn missing_sources_are_not_created_or_reported_connected() {
         let path = std::env::temp_dir().join(format!("missing-native-{}", std::process::id()));
         let list = sources_at(&path, &path);
-        assert_eq!(list.len(), 8);
+        assert_eq!(list.len(), 10);
         assert!(list.iter().all(|s| !s.available));
         assert!(!path.exists());
         assert!(readonly(&path.join("missing.db")).is_err());

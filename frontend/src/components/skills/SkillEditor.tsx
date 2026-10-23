@@ -110,7 +110,7 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
   }
 
   const save = async () => {
-    if (problems.length || conflict) return
+    if (saving || problems.length || conflict) return
     setSaving(true)
     setError(null)
     try {
@@ -201,18 +201,18 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
       <section className="flex flex-col gap-4 rounded-xl border border-jolu-border bg-jolu-bg p-5">
         <div className="flex gap-4">
           <Field label="名称 *">
-            <input value={name} disabled={editing} onChange={(e) => updateName(e.target.value.trim())} placeholder="例如 api-review" aria-label="名称" className={INPUT_CLASS} />
+            <input value={name} disabled={editing || saving} onChange={(e) => updateName(e.target.value.trim())} placeholder="例如 api-review" aria-label="名称" className={INPUT_CLASS} />
           </Field>
           <Field label="描述 *">
-            <input value={description} onChange={(e) => setContent((text) => setFrontField(text, "description", e.target.value))} placeholder="说明何时使用这个 Skill" aria-label="描述" className={INPUT_CLASS} />
+            <input value={description} disabled={saving} onChange={(e) => setContent((text) => setFrontField(text, "description", e.target.value))} placeholder="说明何时使用这个 Skill" aria-label="描述" className={INPUT_CLASS} />
           </Field>
         </div>
         <div className="flex gap-4">
           <Field label="供应商 *">
-            <FieldSelect label="供应商" value={platform} disabled={editing} onChange={setPlatform} options={SKILL_PLATFORMS.map((id) => ({ value: id, label: providerName(id) }))} />
+            <FieldSelect label="供应商" value={platform} disabled={editing || saving} onChange={setPlatform} options={SKILL_PLATFORMS.map((id) => ({ value: id, label: providerName(id) }))} />
           </Field>
           <Field label="作用范围 *">
-            <FieldSelect label="作用范围" value={scopeKey} disabled={editing} onChange={setScopeKey} options={editing && scope !== "global" && scope !== "project" ? [{ value: scopeKey, label: scopeKey }] : scopeOptions} />
+            <FieldSelect label="作用范围" value={scopeKey} disabled={editing || saving} onChange={setScopeKey} options={editing && scope !== "global" && scope !== "project" ? [{ value: scopeKey, label: scopeKey }] : scopeOptions} />
           </Field>
         </div>
         <p className="truncate text-[11px] text-jolu-muted">
@@ -226,12 +226,13 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
           <div className="flex h-7 items-center justify-between">
             <span className="font-mono text-[13px] font-semibold text-jolu-text">SKILL.md</span>
             <Menu.Root modal={false}>
-              <Menu.Trigger className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
+              <Menu.Trigger disabled={saving} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
                 插入模板<ChevronDown aria-hidden className="size-4" />
               </Menu.Trigger>
               <Menu.Portal>
                 <Menu.Content align="end" sideOffset={6} className="motion-popover z-[100] w-[220px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
                   <Menu.Item
+                    disabled={saving}
                     className="flex h-8 cursor-default select-none items-center gap-2 rounded-md px-2 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side"
                     onSelect={() => setContent(skillTemplate(name, description))}
                   >
@@ -243,6 +244,7 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
             </Menu.Root>
           </div>
           <textarea
+            disabled={saving}
             value={content}
             onChange={(e) => setContent(e.target.value)}
             spellCheck={false}
@@ -278,7 +280,7 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
       )}
 
       {!editing && (
-        <button type="button" role="checkbox" aria-checked={enable} onClick={() => setEnable(!enable)} className="flex h-[34px] items-center gap-2 self-start rounded-md text-xs text-jolu-text outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent">
+        <button type="button" role="checkbox" disabled={saving} aria-checked={enable} onClick={() => setEnable(!enable)} className="flex h-[34px] items-center gap-2 self-start rounded-md text-xs text-jolu-text outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent">
           {enable ? <SquareCheck aria-hidden className="size-4 text-jolu-on" /> : <Square aria-hidden className="size-4 text-jolu-muted" />}
           保存后启用
           <span className="text-[11px] text-jolu-muted">（{platform === "claude" ? "不勾选时放入 Jolu 停用区，工具不会加载，同名副本不受影响" : "不勾选时按这份 SKILL.md 的路径写入 config.toml"}）</span>

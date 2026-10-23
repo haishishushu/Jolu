@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { ArrowLeft, Copy, File, FileText, Folder, FolderOpen, Image, Info, LoaderCircle, Pencil } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { isTauri } from "@/lib/api"
+import { observeActiveRequest } from "@/lib/activeRequest"
 import { skillsApi, type SkillDetailDto, type SkillFileContentDto, type SkillItemDto } from "@/lib/skillsApi"
 import { formatBytes, modifiedLabel, scopeLabel, sourceLabel, statusLabel } from "@/lib/skillsManager"
 import { demoSkillDetail } from "@/mock/skills"
@@ -47,14 +48,14 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
     setError(null)
     setFile("SKILL.md")
     if (!isTauri) return setDetail(demoSkillDetail(item))
-    skillsApi.detail(item.path).then(setDetail, (reason: unknown) => setError(String(reason)))
+    return observeActiveRequest(skillsApi.detail(item.path), setDetail, (reason) => setError(String(reason)))
   }, [item])
 
   useEffect(() => {
     setFileContent(null)
     if (file === "SKILL.md" || !detail) return
     if (!isTauri) return setFileContent({ text: file.endsWith(".png") ? null : `# ${file}\n\n（示例文件内容）`, binary: file.endsWith(".png"), size: 0, truncated: false })
-    skillsApi.file(item.path, file).then(setFileContent, (reason: unknown) => setFileContent({ text: `读取失败：${String(reason)}`, binary: false, size: 0, truncated: false }))
+    return observeActiveRequest(skillsApi.file(item.path, file), setFileContent, (reason) => setFileContent({ text: `读取失败：${String(reason)}`, binary: false, size: 0, truncated: false }))
   }, [file, detail, item.path])
 
   const current = detail?.item ?? item
@@ -97,7 +98,7 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
         </div>
         <Tag>{providerName(current.platform)}</Tag>
         <Tag>{scopeLabel(current)}</Tag>
-        <Tag tone={current.status === "enabled" ? "on" : current.status === "disabled" ? "muted" : "danger"}>{statusLabel(current.status)}</Tag>
+        <Tag tone={current.status === "enabled" ? "on" : (current.status === "disabled" || current.status === "unknown") ? "muted" : "danger"}>{statusLabel(current.status)}</Tag>
       </section>
 
       {error ? (

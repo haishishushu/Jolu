@@ -10,6 +10,7 @@ import { formatTokens, formatUsd, modelDisplayName } from "@/lib/usageStats"
 import { accountLabel } from "@/lib/usageFilters"
 import { demoMessages } from "@/mock/sessionThreads"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
+import { MessageMarkdown } from "./MessageMarkdown"
 import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
 import { providerName } from "@/components/usage/usageControls"
@@ -18,12 +19,13 @@ import type { Connection, PlatformId } from "@/types"
 type DetailTab = "messages" | "info"
 
 /** 会话详情（画板 40 / 42）：消息记录与会话信息两个页签，正文只读 */
-export function SessionDetail({ session, connections, onDrillUsage, onContinue, onCreateAutomation }: {
+export function SessionDetail({ session, connections, onDrillUsage, onContinue, onCreateAutomation, onCompress }: {
   session: SessionItemDto
   connections: readonly Connection[]
   onDrillUsage: () => void
   onContinue: () => void
   onCreateAutomation: () => void
+  onCompress: () => void
 }) {
   const toast = useToast()
   const [tab, setTab] = useState<DetailTab>("messages")
@@ -40,6 +42,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
   const load = () => {
     const current = ++revision.current
     setError(null)
+    setLoadingMore(false)
     if (!isTauri) {
       const demo = demoMessages(session.platform, session.session_id)
       setPage(demo)
@@ -56,10 +59,13 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
       .catch((reason: unknown) => current === revision.current && setError(reason instanceof Error ? reason.message : String(reason)))
   }
 
-  useEffect(load, [session.platform, session.session_id])
+  useEffect(() => {
+    load()
+    return () => { revision.current++ }
+  }, [session.platform, session.session_id])
 
   const loadEarlier = () => {
-    if (!page || !page.offset || !isTauri) return
+    if (!page || !page.offset || !isTauri || loadingMore) return
     setLoadingMore(true)
     const current = revision.current
     api.sessionMessages(session.platform, session.session_id, page.offset)
@@ -68,8 +74,10 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
         setPage({ ...result, total: page.total })
         setMessages((value) => [...result.messages, ...value])
       })
-      .catch((reason: unknown) => toast.danger("读取更早消息失败", reason instanceof Error ? reason.message : String(reason)))
-      .finally(() => setLoadingMore(false))
+      .catch((reason: unknown) => {
+        if (current === revision.current) toast.danger("读取更早消息失败", reason instanceof Error ? reason.message : String(reason))
+      })
+      .finally(() => { if (current === revision.current) setLoadingMore(false) })
   }
 
   const copy = (text: string, what: string) => {
@@ -169,15 +177,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
           <Bot aria-hidden className="size-4" />
           创建自动化
         </button>
-        {/* 压缩会话需要调用模型整理交接文档（画板 48–55），执行链路尚未接入 */}
-        <Tip label="压缩会话待接入">
-          <span className="flex">
-            <button type="button" disabled className="inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-jolu-selected px-3 text-xs font-medium text-jolu-on opacity-45">
-              <FileDown aria-hidden className="size-4" />
-              压缩会话
-            </button>
-          </span>
-        </Tip>
+        <button type="button" onClick={onCompress} className="inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-jolu-selected px-3 text-xs font-medium text-jolu-on outline-none hover:bg-jolu-pressed focus-visible:outline-2 focus-visible:outline-jolu-accent"><FileDown aria-hidden className="size-4"/>压缩会话</button>
         {canContinue(session.platform) && session.has_source
           ? continueButton
           : <Tip label={session.has_source ? `${name} 暂无可靠的继续入口` : "没有可读的源文件，无法定位会话"}><span className="flex">{continueButton}</span></Tip>}
@@ -232,7 +232,7 @@ function MessageView({ message, platform, name }: { message: MessageDto; platfor
           <span className="text-sm font-semibold text-jolu-text">你</span>
           <span className="tnum text-[10px] text-jolu-muted">{clock(message.ts)}</span>
         </div>
-        <p className="whitespace-pre-wrap break-words text-xs leading-[1.6] text-jolu-text">{message.text}</p>
+        <MessageMarkdown text={message.text} />
       </div>
     )
   }
@@ -243,7 +243,7 @@ function MessageView({ message, platform, name }: { message: MessageDto; platfor
         <span className="text-xs font-semibold text-jolu-text">{name}</span>
         <span className="tnum text-[10px] text-jolu-muted">{clock(message.ts)}</span>
       </div>
-      {message.text && <p className="whitespace-pre-wrap break-words text-xs leading-[1.6] text-jolu-text">{message.text}</p>}
+      {message.text && <MessageMarkdown text={message.text} />}
       {message.tools.map((tool, index) => <ToolRow key={index} tool={tool} />)}
     </div>
   )

@@ -14,13 +14,18 @@ import { dateKey } from "@/lib/usageStats"
 import { SideNav } from "@/components/panel/SideNav"
 import { UpdateProvider } from "@/components/panel/UpdateContext"
 import { UpdateDialog } from "@/components/panel/UpdateDialog"
-import { IslandView } from "./IslandView"
-import { ProvidersView } from "./ProvidersView"
-import { SessionsView, type SessionTarget } from "./SessionsView"
-import { AutomationView, type AutomationPrefill, type AutomationTarget } from "./AutomationView"
-import { SkillsView } from "./SkillsView"
-import { UsageView, type UsageRequest } from "./UsageView"
-import { SettingsPage } from "./SettingsPage"
+import { createLazyPage } from "@/components/panel/lazyPage"
+import type { SessionTarget } from "./SessionsView"
+import type { AutomationPrefill, AutomationTarget } from "./AutomationView"
+import type { UsageRequest } from "./UsageView"
+
+const IslandView = createLazyPage(() => import("./IslandView").then((m) => ({ default: m.IslandView })), "灵动岛", "island")
+const ProvidersView = createLazyPage(() => import("./ProvidersView").then((m) => ({ default: m.ProvidersView })), "供应商", "providers")
+const SessionsView = createLazyPage(() => import("./SessionsView").then((m) => ({ default: m.SessionsView })), "会话线程", "sessions")
+const AutomationView = createLazyPage(() => import("./AutomationView").then((m) => ({ default: m.AutomationView })), "自动化", "tasks")
+const SkillsView = createLazyPage(() => import("./SkillsView").then((m) => ({ default: m.SkillsView })), "Skills 管理", "table")
+const UsageView = createLazyPage(() => import("./UsageView").then((m) => ({ default: m.UsageView })), "用量统计", "stats")
+const SettingsPage = createLazyPage(() => import("./SettingsPage").then((m) => ({ default: m.SettingsPage })), "设置", "settings")
 
 /**
  * 主面板窗口（Jolu.pen 模块 A 画板 01–04）：30px 系统标题栏 + 左侧导航 + 内容区。
@@ -273,7 +278,7 @@ export function MainPanelWindow({
       {/* 提示相对整个主窗口上方居中，不随侧栏宽度偏移。 */}
       <ToastViewport className="top-16" />
       {aboutPresence.rendered && <AboutDialog version={aboutPresence.rendered} exiting={aboutPresence.exiting} onClose={() => setAbout(null)} />}
-      <UpdateDialog />
+      <UpdateDialog onViewTasks={() => navigate("automation")} />
     </div>
     </TipProvider>
     </UpdateProvider>

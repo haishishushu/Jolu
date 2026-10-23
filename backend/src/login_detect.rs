@@ -21,6 +21,7 @@ pub struct LoginDetection {
 
 pub fn detect(platform: &str) -> LoginDetection {
     match platform {
+        "opencode" => {let found=crate::opencode::openai_logged_in();LoginDetection {found,sources:if found{vec!["已在 OpenCode 中登录 OpenAI".into()]}else{vec![]},message:(!found).then(||"请先在 OpenCode 中登录 OpenAI".into()),..Default::default()}},
         "claude" => detect_claude(),
         "codex" => detect_codex(),
         other if crate::platforms::native(other) => detect_native(other),
@@ -33,19 +34,34 @@ pub(crate) fn account_for_secret(platform: &str, expected: &str) -> Option<Strin
     if crate::validation::isolated() { return None; }
     match platform {
         "codex" => {
-            let dir = std::env::var_os("CODEX_HOME").map(PathBuf::from)
-                .or_else(|| crate::creds::home().map(|h| h.join(".codex")))?;
+            let dir = crate::creds::codex_dir()?;
             let auth = read_json(dir.join("auth.json"))?;
             account_from_snapshot(platform, expected, &auth, None)
         }
         "claude" => {
-            let home = crate::creds::home()?;
-            let auth = read_json(home.join(".claude").join(".credentials.json"))?;
-            let profile = read_json(home.join(".claude.json"));
+            let auth = read_json(crate::creds::claude_dir()?.join(".credentials.json"))?;
+            let profile = claude_profile_path().and_then(read_json);
             account_from_snapshot(platform, expected, &auth, profile.as_ref())
         }
         _ => None,
     }
+}
+
+/// 只读本机与已保存连接匹配的订阅快照。JWT exp 是令牌有效期，绝不可用作订阅到期。
+pub(crate) fn codex_subscription_for_secret(expected: &str) -> Option<(String, Option<String>)> {
+    if crate::validation::isolated() { return None; }
+    let dir = crate::creds::codex_dir()?;
+    subscription_from_snapshot(expected, &read_json(dir.join("auth.json"))?)
+}
+
+fn subscription_from_snapshot(expected: &str, auth: &Value) -> Option<(String, Option<String>)> {
+    if expected.is_empty() || str_at(auth, &["tokens", "access_token"]).as_deref() != Some(expected) { return None; }
+    let claims = jwt_payload(&str_at(auth, &["tokens", "id_token"])?)?;
+    let parse_date = |name| {
+        let text = str_at(&claims, &["https://api.openai.com/auth", name])?;
+        chrono::DateTime::parse_from_rfc3339(&text).ok().map(|date| date.to_rfc3339())
+    };
+    Some((parse_date("chatgpt_subscription_active_until")?, parse_date("chatgpt_subscription_last_checked")))
 }
 
 fn account_from_snapshot(platform: &str, expected: &str, auth: &Value, profile: Option<&Value>) -> Option<String> {
@@ -71,12 +87,18 @@ fn str_at(v: &Value, path: &[&str]) -> Option<String> {
     cur.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
+fn claude_profile_path() -> Option<PathBuf> {
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|value| !value.is_empty()) {
+        crate::creds::claude_dir().map(|dir| dir.join(".claude.json"))
+    } else { crate::creds::home().map(|home| home.join(".claude.json")) }
+}
+
 fn detect_claude() -> LoginDetection {
-    let Some(home) = crate::creds::home() else {
+    let Some(dir) = crate::creds::claude_dir() else {
         return LoginDetection { message: Some("无法确定用户目录".into()), ..Default::default() };
     };
-    let credentials = read_json(home.join(".claude").join(".credentials.json"));
-    let profile = read_json(home.join(".claude.json"));
+    let credentials = read_json(dir.join(".credentials.json"));
+    let profile = claude_profile_path().and_then(read_json);
     parse_claude(credentials.as_ref(), profile.as_ref())
 }
 
@@ -95,7 +117,7 @@ fn parse_claude(credentials: Option<&Value>, profile: Option<&Value>) -> LoginDe
 }
 
 fn detect_codex() -> LoginDetection {
-    let dir = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| crate::creds::home().map(|h| h.join(".codex")));
+    let dir = crate::creds::codex_dir();
     let Some(dir) = dir else {
         return LoginDetection { message: Some("无法确定用户目录".into()), ..Default::default() };
     };
@@ -127,7 +149,7 @@ fn detect_native(platform: &str) -> LoginDetection {
     LoginDetection { found: true, sources: available, ..Default::default() }
 }
 
-fn jwt_payload(jwt: &str) -> Option<Value> {
+pub(crate) fn jwt_payload(jwt: &str) -> Option<Value> {
     let payload = jwt.split('.').nth(1)?;
     serde_json::from_slice(&base64url_decode(payload)?).ok()
 }
@@ -236,5 +258,21 @@ mod account_isolation_tests {
             .output().unwrap();
         std::fs::remove_dir_all(&root).unwrap();
         assert!(output.status.success(), "isolated account lookup failed");
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    #[test]
+    fn subscription_snapshot_requires_matching_identity_and_explicit_subscription_date() {
+        let auth = serde_json::json!({"tokens":{"access_token":"test-identity", "id_token":"h.eyJleHAiOiA5OTk5OTk5OTk5LCAiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjogeyJjaGF0Z3B0X3N1YnNjcmlwdGlvbl9hY3RpdmVfdW50aWwiOiAiMjAyNi0xMC0yNVQwMDowMDowMFoiLCAiY2hhdGdwdF9zdWJzY3JpcHRpb25fbGFzdF9jaGVja2VkIjogIjIwMjYtMTAtMjBUMDA6MDA6MDBaIn19.s"}});
+        let (expires, checked) = subscription_from_snapshot("test-identity", &auth).unwrap();
+        assert_eq!(expires, "2026-10-25T00:00:00+00:00");
+        assert_eq!(checked.as_deref(), Some("2026-10-20T00:00:00+00:00"));
+        assert!(subscription_from_snapshot("other-identity", &auth).is_none());
+        assert!(subscription_from_snapshot("", &auth).is_none());
+        let expiry_only = serde_json::json!({"tokens":{"access_token":"test-identity", "id_token":"h.eyJleHAiOiA5OTk5OTk5OTk5fQ.s"}});
+        assert!(subscription_from_snapshot("test-identity", &expiry_only).is_none());
     }
 }

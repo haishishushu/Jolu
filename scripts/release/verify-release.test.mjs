@@ -11,11 +11,12 @@ const assets = [
   `${prefix}Linux-x86_64.AppImage`, `${prefix}Linux-x86_64.AppImage.sig`,
   `${prefix}Linux-x86_64.deb`, `${prefix}Linux-x86_64.deb.sig`, "latest.json",
 ].map((name) => ({ name }))
+const signature = Buffer.from("untrusted comment: signature from test key\n" + Buffer.alloc(74).toString("base64") + "\ntrusted comment: test\n" + Buffer.alloc(64).toString("base64")).toString("base64")
 const manifest = {
   version,
   platforms: {
-    "windows-x86_64": { url: `https://github.com/haishishushu/Jolu/releases/download/${tag}/${prefix}Windows-x86_64-Setup.exe` },
-    "linux-x86_64": { url: `https://github.com/haishishushu/Jolu/releases/download/${tag}/${prefix}Linux-x86_64.AppImage` },
+    "windows-x86_64": { signature, url: `https://github.com/haishishushu/Jolu/releases/download/${tag}/${prefix}Windows-x86_64-Setup.exe` },
+    "linux-x86_64": { signature, url: `https://github.com/haishishushu/Jolu/releases/download/${tag}/${prefix}Linux-x86_64.AppImage` },
   },
 }
 
@@ -35,4 +36,22 @@ test("清单仍指向 continuous 时拒绝标为最新", () => {
 
 test("缺少系统安装包时拒绝发布清单", () => {
   assert.throws(() => verifyRelease({ version, tag, manifest, assets: assets.filter((asset) => !asset.name.endsWith("macOS-arm64.dmg")) }), /缺少/)
+})
+
+test("更新清单缺少签名时拒绝发布", () => {
+  const unsigned = structuredClone(manifest)
+  delete unsigned.platforms["windows-x86_64"].signature
+  assert.throws(() => verifyRelease({ version, tag, manifest: unsigned, assets }), /签名/)
+})
+
+test("更新清单不接受伪装同路径的其他主机", () => {
+  const malicious = structuredClone(manifest)
+  malicious.platforms["windows-x86_64"].url = malicious.platforms["windows-x86_64"].url.replace("github.com", "example.com")
+  assert.throws(() => verifyRelease({ version, tag, manifest: malicious, assets }), /官方仓库/)
+})
+
+test("更新清单不接受 HTTP 降级下载", () => {
+  const insecure = structuredClone(manifest)
+  insecure.platforms["windows-x86_64"].url = insecure.platforms["windows-x86_64"].url.replace("https:", "http:")
+  assert.throws(() => verifyRelease({ version, tag, manifest: insecure, assets }), /官方仓库/)
 })

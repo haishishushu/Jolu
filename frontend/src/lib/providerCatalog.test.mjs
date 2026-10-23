@@ -27,12 +27,12 @@ test("供应商顺序与 Jolu.pen 画板 05 一致：自定义供应商在最前
 
 test("连接方式：两种都实现才显示页签，待接入不能连接", () => {
   assert.equal(showsModeTabs(providerEntry("claude")), true)
-  assert.equal(showsModeTabs(providerEntry("zcode")), false)
+  assert.equal(showsModeTabs(providerEntry("zcode")), true)
   assert.equal(defaultMode(providerEntry("zcode")), "subscription")
-  assert.match(singleModeReason(providerEntry("zcode")), /待接入/)
+  assert.equal(singleModeReason(providerEntry("zcode")), null)
   assert.match(singleModeReason(providerEntry("trae")), /暂不支持 API Key/)
   assert.equal(singleModeReason(providerEntry("codex")), null)
-  assert.equal(canConnect(providerEntry("opencode")), false)
+  assert.equal(canConnect(providerEntry("opencode")), true)
   assert.equal(canConnect(providerEntry("trae")), true)
   assert.equal(providerEntry("gemini").baseUrl.locked, true)
 })
@@ -139,3 +139,6 @@ test("模型区忙碌状态：获取与验证互斥，过期请求结束不改�
   assert.equal(modelBusyAfter(busy, { type: "end", current: false }), "fetching")
   assert.equal(canStartVerify("verifying"), false)
 })
+
+test("Qoder 与 WorkBuddy 密钥在原工具配置",()=>{for(const id of ["qoder","workbuddy"]){const p=providerEntry(id);assert.equal(p.apiKey,"none");assert.equal(singleModeReason(p),`${p.name} 的自定义模型在 ${p.name} 客户端内配置，Jolu 不代管密钥。`)}})
+test("ZCode 四种官方地址与鉴权协议匹配",()=>{const p=providerEntry("zcode");assert.equal(p.baseUrlChoices.length,4);for(const c of p.baseUrlChoices)assert.equal(c.protocol,c.value.endsWith("anthropic")?"anthropic":"openai")})

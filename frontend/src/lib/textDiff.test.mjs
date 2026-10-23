@@ -2,6 +2,15 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { lineDiff } from "./textDiff.ts"
 
+test("大块改写按总比较预算降级，保留公共首尾且不分配平方级矩阵", () => {
+  const left = ["prefix", ...Array.from({ length: 1500 }, (_, i) => `old ${i}`), "shared middle", ...Array.from({ length: 1500 }, (_, i) => `old tail ${i}`), "suffix"]
+  const right = ["prefix", ...Array.from({ length: 1500 }, (_, i) => `new ${i}`), "shared middle", ...Array.from({ length: 1500 }, (_, i) => `new tail ${i}`), "suffix"]
+  const diff = lineDiff(left.join("\n"), right.join("\n"))
+  assert.deepEqual(diff.filter((line) => line.kind === "same").map((line) => line.text), ["prefix", "suffix"])
+  assert.equal(diff.filter((line) => line.kind === "del").length, 3001)
+  assert.equal(diff.filter((line) => line.kind === "add").length, 3001)
+})
+
 const short = (lines) => lines.map((l) => `${l.kind} ${l.text}`)
 
 test("按行对比：中间一行被替换", () => {

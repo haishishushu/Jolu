@@ -72,6 +72,8 @@ pub struct SessionList {
 
 /// 源文件定位：会话 → 主记录文件（不含子代理文件）
 pub(crate) fn source_files(conn: &Connection) -> rusqlite::Result<HashMap<(String, String), PathBuf>> {
+    // 隔离库也可能导入过真实路径；不能因路径已在数据库里就信任它。
+    if crate::validation::isolated() { return Ok(HashMap::new()); }
     let mut stmt = conn.prepare("SELECT path, parser_session_id FROM scan_state")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
     let mut out: HashMap<(String, String), PathBuf> = HashMap::new();
@@ -106,6 +108,7 @@ fn mtime(path: &Path) -> Option<u64> {
 
 /// 读源文件开头找 cwd：Claude 每行顶层带 cwd，Codex 在 session_meta.payload.cwd
 pub(crate) fn read_cwd(path: &Path) -> Option<String> {
+    if crate::validation::isolated() { return None; }
     let stamp = mtime(path)?;
     if let Some((cached, cwd)) = CWD_CACHE.lock().ok()?.get(path) {
         if *cached == stamp {
@@ -128,6 +131,7 @@ pub(crate) fn read_cwd(path: &Path) -> Option<String> {
 }
 
 fn file_contains(path: &Path, needle: &str) -> bool {
+    if crate::validation::isolated() { return false; }
     let Ok(meta) = std::fs::metadata(path) else { return false };
     if meta.len() > SEARCH_FILE_LIMIT {
         return false;
@@ -648,8 +652,12 @@ fn parse_codex_with<I: IntoIterator<Item = String>>(lines: I, limits: Limits) ->
     out
 }
 
-pub(crate) fn read_lines(path: &Path) -> Vec<String> {
-    std::fs::File::open(path).map(|f| BufReader::new(f).lines().map_while(Result::ok).collect()).unwrap_or_default()
+pub(crate) fn read_lines(path: &Path) -> Result<Vec<String>, String> {
+    if crate::validation::isolated() { return Err("隔离验收不读取用户会话文件".into()); }
+    let file = std::fs::File::open(path).map_err(|error| format!("无法打开会话文件：{error}"))?;
+    // 任一行读取失败都不能把此前内容当作完整会话，更不能据此生成交接。
+    BufReader::new(file).lines().collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| format!("读取会话文件失败：{error}"))
 }
 
 /// 会话主记录文件；源文件不存在时为 None
@@ -668,18 +676,18 @@ pub(crate) fn parse_detail(platform: &str, lines: &[String]) -> Vec<Message> {
 }
 
 /// 消息分页：`before` 为 None 取最后 `limit` 条，否则取序号 `before` 之前的 `limit` 条
-pub fn messages(conn: &Connection, platform: &str, session_id: &str, before: Option<usize>, limit: usize) -> rusqlite::Result<MessagePage> {
-    let files = source_files(conn)?;
+pub fn messages(conn: &Connection, platform: &str, session_id: &str, before: Option<usize>, limit: usize) -> Result<MessagePage, String> {
+    let files = source_files(conn).map_err(|error| error.to_string())?;
     let file = files.get(&(platform.to_string(), session_id.to_string())).filter(|p| p.exists()).cloned();
     let all = match (&file, platform) {
-        (Some(p), "claude") => parse_claude(read_lines(p)),
-        (Some(p), "codex") => parse_codex(read_lines(p)),
+        (Some(p), "claude") => parse_claude(read_lines(p)?),
+        (Some(p), "codex") => parse_codex(read_lines(p)?),
         _ => Vec::new(),
     };
     let total = all.len();
     let end = before.unwrap_or(total).min(total);
     let start = end.saturating_sub(limit);
-    let (cost, priced_requests, requests, models) = session_cost(conn, platform, session_id)?;
+    let (cost, priced_requests, requests, models) = session_cost(conn, platform, session_id).map_err(|error| error.to_string())?;
     Ok(MessagePage {
         available: file.is_some(),
         total,
@@ -794,6 +802,28 @@ pub fn continue_session(conn: &Connection, platform: &str, session_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_read_failure_is_not_reported_as_partial_success() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("jolu-message-read-{}-{nonce}", std::process::id()));
+        let folder = root.join(".claude");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("broken-session.jsonl");
+        let mut bytes = b"{\"type\":\"user\",\"message\":{\"content\":\"valid first line\"}}\n".to_vec();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_lines(&path).unwrap().len(), 1);
+        bytes.extend_from_slice(&[0xff, b'\n']);
+        std::fs::write(&path, bytes).unwrap();
+        let conn = crate::db::open(Path::new(":memory:")).unwrap();
+        conn.execute("INSERT INTO scan_state(path, offset, mtime, parser_session_id) VALUES(?1, 0, 0, 'broken-session')", [path.to_string_lossy().as_ref()]).unwrap();
+        let result = messages(&conn, "claude", "broken-session", None, 40);
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_lines(&path).is_err(), "missing files must not become an empty successful read");
+        std::fs::remove_dir(&folder).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        assert!(result.is_err(), "a file read failure must not return a successful partial conversation");
+    }
 
     fn lines(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

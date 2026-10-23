@@ -9,6 +9,7 @@ import {
   type UpdatePhase,
   type UpdateProgress,
 } from "@/lib/updateState"
+import { useSettings } from "@/hooks/useSettings"
 import { UpdateContext, type UpdateContextValue } from "./UpdateContextBase"
 
 /**
@@ -33,11 +34,14 @@ const MOCK_INFO: UpdateInfo = {
 }
 
 export function UpdateProvider({ children }: { children: ReactNode }) {
+  const cfg = useSettings()
   const [phase, setPhase] = useState<UpdatePhase>("idle")
   const [info, setInfo] = useState<UpdateInfo | null>(null)
   const [progress, setProgress] = useState<UpdateProgress>({ downloaded: 0, total: null })
   const [dismissed, setDismissed] = useState<string | null>(() => readDismissedVersion())
   const [error, setError] = useState<string | null>(null)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const cancelRequested = useRef(false)
   const busy = useRef(false)
   const timers = useRef<number[]>([])
 
@@ -59,6 +63,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
 
   const checkNow = useCallback(async () => {
     if (!UPDATES_ENABLED || busy.current) return false
+    if (phase === "downloaded") return true
     busy.current = true
     setPhase("checking")
     setError(null)
@@ -76,10 +81,13 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       busy.current = false
       setPhase((current) => (current === "checking" ? "idle" : current))
     }
-  }, [applyCheck])
+  }, [applyCheck, phase])
 
   const startDownload = useCallback(() => {
     if (busy.current) return
+    setDialogOpen(true)
+    if (phase === "downloaded") return
+    cancelRequested.current = false
     if (!isTauri) {
       // 预览：模拟下载，完成后等待用户点击安装。
       busy.current = true
@@ -88,6 +96,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       setProgress({ downloaded: 0, total: 18.2 * 1024 * 1024 })
       const step = 1024 * 1024
       const tick = (downloaded: number) => {
+        if (cancelRequested.current) return
         setProgress({ downloaded: Math.min(downloaded, 18.2 * 1024 * 1024), total: 18.2 * 1024 * 1024 })
         if (downloaded < 18.2 * 1024 * 1024) {
           timers.current.push(window.setTimeout(() => tick(downloaded + step * 2), 120))
@@ -110,6 +119,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     void unlisten
       .then((unsubscribe) => {
         off = unsubscribe
+        if (cancelRequested.current) throw new Error("更新下载已取消")
         return api.downloadAppUpdate()
       })
       .then((dto) => {
@@ -117,14 +127,43 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
         setPhase("downloaded")
       })
       .catch((reason) => {
-        setError(`下载更新失败：${String(reason)}`)
-        setPhase("downloadError")
+        if (cancelRequested.current || String(reason).includes("更新下载已取消")) {
+          setError(null)
+          setPhase("idle")
+          setDialogOpen(false)
+        } else {
+          setError(`下载更新失败：${String(reason)}`)
+          setPhase("downloadError")
+        }
       })
       .finally(() => {
         busy.current = false
         off?.()
       })
-  }, [applyCheck])
+  }, [applyCheck, phase])
+
+  const closeDialog = useCallback(() => {
+    if (busy.current) return
+    setDialogOpen(false)
+    if (phase === "downloadError" || phase === "ready") setPhase("idle")
+  }, [phase])
+
+  const cancelDownload = useCallback(() => {
+    if (phase !== "downloading") return
+    cancelRequested.current = true
+    if (!isTauri) {
+      timers.current.forEach((timer) => window.clearTimeout(timer))
+      timers.current = []
+      busy.current = false
+      setPhase("idle")
+      setDialogOpen(false)
+      return
+    }
+    void api.cancelAppUpdateDownload().catch((reason) => {
+      cancelRequested.current = false
+      setError(`取消下载失败：${String(reason)}`)
+    })
+  }, [phase])
 
   const installDownloaded = useCallback(() => {
     if (busy.current) return
@@ -153,17 +192,23 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     setDismissed(info.availableVersion)
   }, [info])
 
+  const checkRef = useRef(checkNow)
+  checkRef.current = checkNow
+
   // 启动 1 秒后静默检查；失败不打扰（画布标注：静默重试下次启动）
   useEffect(() => {
-    if (!UPDATES_ENABLED) return
+    if (!UPDATES_ENABLED || !cfg.ready || !cfg.settings.auto_check_updates) return
     const timer = window.setTimeout(() => {
-      void checkNow().catch(() => {})
+      void checkRef.current().catch(() => {})
     }, 1000)
     return () => window.clearTimeout(timer)
-  }, [checkNow])
+  }, [cfg.ready, cfg.settings.auto_check_updates])
 
   const value = useMemo<UpdateContextValue>(
     () => ({
+      dialogOpen,
+      closeDialog,
+      cancelDownload,
       phase,
       info,
       progress,
@@ -175,7 +220,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       installDownloaded,
       dismiss,
     }),
-    [phase, info, progress, dismissed, error, checkNow, startDownload, installDownloaded, dismiss],
+    [dialogOpen, closeDialog, cancelDownload, phase, info, progress, dismissed, error, checkNow, startDownload, installDownloaded, dismiss],
   )
 
   return <UpdateContext.Provider value={value}>{children}</UpdateContext.Provider>

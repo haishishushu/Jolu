@@ -109,7 +109,7 @@ export function ProviderMenu({ value, platforms, onChange }: { value: string; pl
               return row(id, providerName(id), p?.detected ? `${p.count} 个安装项` : "未检测到目录", true, <PlatformLogo platform={id} size={18} />)
             })}
             {PENDING_SKILL_PROVIDERS.filter((p) => show(p.name)).map((p) => row(p.id, p.name, "待接入", false, <PlatformLogo platform={p.id as PlatformId} size={18} />))}
-            {show("自定义") && row("custom", "自定义", "待接入", false, (
+            {show("自定义") && row("custom", "自定义", "只读扫描", true, (
               <span className="relative grid size-5 place-items-center rounded-md bg-jolu-selected text-jolu-on">
                 <Hexagon className="absolute size-4" />
                 <Code className="size-2.5" />

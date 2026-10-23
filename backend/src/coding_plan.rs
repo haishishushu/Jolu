@@ -283,7 +283,7 @@ fn zhipu_state_from_body(body: &serde_json::Value) -> QuotaState {
     if windows.is_empty() {
         return QuotaState::Failed { reason: "智谱未返回可识别的套餐额度窗口".into() };
     }
-    QuotaState::Ok { windows, plan: level }
+    QuotaState::Ok { windows, plan: level, account: None }
 }
 
 /// 查询智谱套餐额度（个人版）。
@@ -366,7 +366,7 @@ fn query_kimi(api_key: &str) -> QuotaState {
                 Ok(v) => {
                     let windows = parse_kimi_windows(&v);
                     if windows.is_empty() { QuotaState::Failed { reason: "Kimi 未返回可识别的额度窗口".into() } }
-                    else { QuotaState::Ok { windows, plan: None } }
+                    else { QuotaState::Ok { windows, plan: None, account: None } }
                 }
                 Err(e) => QuotaState::Failed { reason: format!("Kimi 用量响应格式无法解析: {e}") },
             },
@@ -434,7 +434,7 @@ fn query_minimax(api_key: &str, cn: bool) -> QuotaState {
                     }
                     let windows = parse_minimax_windows(&v);
                     if windows.is_empty() { QuotaState::Failed { reason: "MiniMax 未返回可识别的额度窗口".into() } }
-                    else { QuotaState::Ok { windows, plan: None } }
+                    else { QuotaState::Ok { windows, plan: None, account: None } }
                 }
                 Err(e) => QuotaState::Failed { reason: format!("MiniMax 用量响应格式无法解析: {e}") },
             },
@@ -499,7 +499,7 @@ fn query_zenmux(base_url: &str, api_key: &str) -> QuotaState {
                         Some(data) => {
                             let (windows, plan) = parse_zenmux_windows(data);
                             if windows.is_empty() { QuotaState::Failed { reason: "ZenMux 未返回可识别的额度窗口".into() } }
-                            else { QuotaState::Ok { windows, plan } }
+                            else { QuotaState::Ok { windows, plan, account: None } }
                         }
                         None => QuotaState::Failed { reason: "ZenMux 响应缺少 data 字段".into() },
                     }
@@ -567,7 +567,7 @@ fn query_opencode_go(api_key: &str) -> QuotaState {
                         if windows.is_empty() {
                             QuotaState::Failed { reason: "OpenCode Go 用量响应形态不认识（上游曾变更过结构）".into() }
                         } else {
-                            QuotaState::Ok { windows, plan: None }
+                            QuotaState::Ok { windows, plan: None, account: None }
                         }
                     }
                     Err(e) => QuotaState::Failed { reason: format!("OpenCode Go 用量响应格式无法解析: {e}") },
@@ -592,7 +592,7 @@ mod tests {
     fn pick_probe_hit_prefers_priority_order_over_completion_order() {
         let ok = |key: &str| QuotaState::Ok { windows: vec![QuotaWindow {
             key: key.into(), window_name: "w".into(), used_percent: Some(1.0), amount_text: None, remaining_text: None, resets_at: None,
-        }], plan: None };
+        }], plan: None, account: None };
         let failed = |reason: &str| QuotaState::Failed { reason: reason.into() };
         // 完成顺序打乱：低优先级先完成也必须按 PROBE_ORDER 优先级取智谱
         let results = vec![
@@ -847,7 +847,7 @@ mod tests {
         let key = crate::creds::read_secret("claude", "api").expect("缺少本机 Key");
         let state = query_zhipu("https://open.bigmodel.cn/api/anthropic", &key);
         assert!(matches!(state, QuotaState::Ok { .. }), "{state:?}");
-        if let QuotaState::Ok { windows, plan } = state {
+        if let QuotaState::Ok { windows, plan, .. } = state {
             for w in windows {
                 println!("{} used={:?} amount={:?} has_reset={}", w.key, w.used_percent, w.amount_text, w.resets_at.is_some());
             }

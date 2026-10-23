@@ -13,6 +13,9 @@ pub struct Settings {
     /// 仅 Windows 自动启动时不显示主面板；灵动岛仍按显示偏好运行。
     #[serde(default = "default_silent_startup")]
     pub silent_startup: bool,
+    /// 仅控制启动时静默检查；手动检查仍可用，发布总开关独立。
+    #[serde(default = "yes")]
+    pub auto_check_updates: bool,
     /// 灵动岛当前显示的平台。与设置里「灵动岛显示配置」是同一个值
     pub island_platform: String,
     #[serde(default = "default_kind")]
@@ -147,6 +150,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             silent_startup: true,
+            auto_check_updates: true,
             island_platform: "claude".into(),
             island_kind: default_kind(),
             island_connection_id: None,
@@ -337,6 +341,20 @@ mod tests {
         assert!(settings.dock_enabled);
         assert_eq!(settings.theme, "light");
         assert_eq!(settings.island_connection_name, None);
+    }
+
+    #[test]
+    fn auto_update_preference_defaults_on_and_survives_reload() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.auto_check_updates);
+        let dir = std::env::temp_dir().join(format!("jolu-auto-update-settings-{}", std::process::id()));
+        let store = super::Store::load(&dir);
+        for enabled in [false, true] {
+            store.try_update(|settings| settings.auto_check_updates = enabled).unwrap();
+            assert_eq!(super::Store::load(&dir).get().auto_check_updates, enabled);
+        }
+        std::fs::remove_file(dir.join("settings.json")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

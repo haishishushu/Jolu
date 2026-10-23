@@ -3,17 +3,10 @@ import type { SkillItemDto, SkillPlatformDto, SkillProjectDto, SkillRootDto, Ski
 /** 模块 F · Skills 管理的纯逻辑：筛选、统计、文案、frontmatter 与 Markdown 预览 */
 
 /** 已核对目录与启停方式的工具，与后端 `skills.rs` 的 `SPECS` 一致（Context7：Claude Code / Codex） */
-export const SKILL_PLATFORMS = ["claude", "codex"] as const
+export const SKILL_PLATFORMS = ["claude", "codex", "gemini", "opencode", "qoder", "trae", "zcode", "workbuddy"] as const
 
 /** 画板 76 的供应商菜单：没有可靠目录依据的工具标「待接入」 */
-export const PENDING_SKILL_PROVIDERS: { id: string; name: string }[] = [
-  { id: "gemini", name: "Gemini" },
-  { id: "grok", name: "Grok" },
-  { id: "opencode", name: "OpenCode" },
-  { id: "zcode", name: "ZCode" },
-  { id: "qoder", name: "Qoder" },
-  { id: "workbuddy", name: "WorkBuddy" },
-]
+export const PENDING_SKILL_PROVIDERS: { id: string; name: string }[] = [{ id: "grok", name: "Grok" }]
 
 export function projectLabel(path: string | null): string {
   if (!path) return "项目"
@@ -44,6 +37,7 @@ export function sourceLabel(source: SkillSource): string {
 }
 
 const STATUS_LABELS: Record<SkillStatus, string> = {
+  unknown: "启停待核对",
   enabled: "已启用",
   disabled: "已停用",
   conflict: "同名待确认",
@@ -140,6 +134,8 @@ export function scanLocation(scanned: readonly string[]): string {
 
 /** 启停开关不可用的原因；null 表示可以切换 */
 export function toggleBlocked(item: Pick<SkillItemDto, "platform" | "status" | "disabled_by" | "readonly" | "scope" | "symlink">): string | null {
+  if (["qoder", "trae", "zcode", "workbuddy", "custom"].includes(item.platform)) return "启停由原工具管理"
+  if (item.platform === "gemini" && item.readonly) return "共享目录只读，请在原工具中管理"
   if (item.status === "invalid") return "格式异常，修复后才能启用"
   if (item.disabled_by === "tool") return "由工具配置停用：这条配置按名称生效，会影响所有同名副本；请在配置文件中修改"
   if (item.platform === "claude" && item.scope === "synced") return "claude.ai 同步的 Skill 请在 claude.ai 中开关"

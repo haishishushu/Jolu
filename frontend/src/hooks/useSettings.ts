@@ -13,6 +13,7 @@ import type { NetworkMode } from "@/lib/networkSettings"
  */
 const DEFAULTS: AppSettings = {
   silent_startup: true,
+  auto_check_updates: true,
   island_platform: "claude",
   island_kind: "api",
   island_connection_id: null,
@@ -62,6 +63,7 @@ interface SharedSettings {
 let shared: SharedSettings = { settings: DEFAULTS, ready: !isTauri, loading: isTauri, error: null }
 /** 每收到一次推送递增；读取或保存期间若有更新的推送，较旧的响应不能覆盖它。 */
 let revision = 0
+let reloadRevision = 0
 let subscribed = false
 const listeners = new Set<() => void>()
 
@@ -73,12 +75,17 @@ function publish(patch: Partial<SharedSettings>) {
 async function reloadShared() {
   if (!isTauri) return
   const started = revision
+  const request = ++reloadRevision
+  const current = () => revision === started && reloadRevision === request
   publish({ loading: true })
   try {
     const next = await api.getSettings()
-    if (revision === started) publish({ settings: next, error: null, ready: true })
-  } catch (reason) { publish({ error: `设置读取失败：${String(reason)}` }) }
-  finally { publish({ loading: false }) }
+    if (current()) publish({ settings: next, error: null, ready: true })
+  } catch (reason) {
+    if (current()) publish({ error: `设置读取失败：${String(reason)}` })
+  } finally {
+    if (current()) publish({ loading: false })
+  }
 }
 
 function ensureSubscribed() {
@@ -87,7 +94,7 @@ function ensureSubscribed() {
   // 先订阅再读初值；读取期间收到的新快照不能被较旧的响应覆盖。
   void listenEvent<AppSettings>("settings-changed", (next) => {
     revision++
-    publish({ settings: next, ready: true })
+    publish({ settings: next, ready: true, error: null, loading: false })
   }).then(() => reloadShared()).catch((reason) => {
     subscribed = false
     publish({ error: `设置同步失败：${String(reason)}`, loading: false })
@@ -143,6 +150,7 @@ export function useSettings() {
   const setDockEnabled = useCallback((on: boolean) => save("dock_enabled", () => api.setDockEnabled(on)), [save])
   const setTopmost = useCallback((on: boolean) => save("always_on_top", () => api.islandTopmost(on)), [save])
   const setIslandVisible = useCallback((visible: boolean) => save("island_visible", () => api.setIslandVisibility(visible)), [save])
+  const setAutoCheckUpdates = useCallback((on: boolean) => save("auto_check_updates", () => api.setAutoCheckUpdates(on)), [save])
   const setSilentStartup = useCallback((on: boolean) => save("silent_startup", () => api.setSilentStartup(on)), [save])
   const setProxy = useCallback(
     (port: number, enabled: boolean, fallbackDirect: boolean) => save("proxy", () => api.setProxy(port, enabled, fallbackDirect)),
@@ -171,6 +179,6 @@ export function useSettings() {
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
+  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setAutoCheckUpdates, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
 }
 
