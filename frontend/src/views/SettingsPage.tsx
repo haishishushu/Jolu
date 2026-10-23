@@ -90,8 +90,6 @@ export function SettingsPage({ section, navigationRequest, onOpenSkills }: {
               </button>
             )
           })}
-          <span className="mt-6 text-[10px] text-jolu-muted">仅保存到此设备</span>
-          <span className="text-[10px] text-jolu-muted">Jolu · 桌面端</span>
         </nav>
 
         <section aria-label={current.label} className="flex min-w-0 flex-1 flex-col gap-4">
