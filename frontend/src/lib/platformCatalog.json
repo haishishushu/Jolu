@@ -105,5 +105,14 @@
       "auth_connection"
     ],
     "limitation": "只提供本机来源检测；企业成员额度需管理员授权，个人额度未验证"
+  },
+  {
+    "id": "custom",
+    "name": "自定义供应商",
+    "availability": "available",
+    "capabilities": [
+      "api_connection"
+    ],
+    "limitation": "自定义供应商只验证模型接口，不支持查询额度与余额"
   }
 ]

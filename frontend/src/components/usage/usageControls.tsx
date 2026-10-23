@@ -119,7 +119,8 @@ export function MenuFilter({ value, options, onChange, label, trailingChevron }:
 export const ALL = "__all__"
 
 export function providerOptions(): MenuOption[] {
-  return [{ value: ALL, label: "全部供应商" }, ...PROVIDERS.map((p) => ({ value: p.id, label: p.name }))]
+  // 自定义供应商没有本机用量来源，不进用量筛选
+  return [{ value: ALL, label: "全部供应商" }, ...PROVIDERS.filter((p) => p.id !== "custom").map((p) => ({ value: p.id, label: p.name }))]
 }
 
 /** 账号筛选：多选（画板 38「账号筛选」）；勾选「全部账号」即清空选择 */

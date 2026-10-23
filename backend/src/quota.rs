@@ -730,7 +730,39 @@ pub fn official_api_usage(platform: &str, secret: &str) -> ApiUsageState {
     } else { result }
 }
 
+/// 保存 / 恢复 / 更换 Key 前的连接校验。`model` 是连接的默认模型（获取所得或手填）。
 pub fn validate_connection(
+    platform: &str,
+    kind: &str,
+    secret: &str,
+    base_url: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), String> {
+    validate_connection_with(platform, kind, model, || validate_remote(platform, kind, secret, base_url))
+}
+
+/// 自定义供应商（D-11）：以「获取模型成功」或「手填模型」作为接口可达的依据，不调用额度接口；
+/// 其他平台照旧走 `remote`（额度 / 模型接口）校验。
+fn validate_connection_with(
+    platform: &str,
+    kind: &str,
+    model: Option<&str>,
+    remote: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if platform != "custom" {
+        return remote();
+    }
+    if kind != "api" {
+        return Err("自定义供应商只支持 API Key 连接".into());
+    }
+    if model.is_some_and(|m| !m.trim().is_empty()) {
+        Ok(())
+    } else {
+        Err("请先获取模型并选择，或手动填写模型 ID".into())
+    }
+}
+
+fn validate_remote(
     platform: &str,
     kind: &str,
     secret: &str,
@@ -1179,3 +1211,29 @@ mod official_connection_tests {
     }
 
 }
+
+// 任务 3.4 开始：自定义供应商的保存校验
+#[cfg(test)]
+mod custom_validation_tests {
+    use super::*;
+
+    fn no_quota() -> Result<(), String> {
+        panic!("自定义供应商不应调用额度或余额接口")
+    }
+
+    #[test]
+    fn custom_validation_uses_models() {
+        assert_eq!(validate_connection_with("custom", "api", Some("gpt-4.1-mini"), no_quota), Ok(()));
+        // 没有获取到模型、也没有手填模型时不能保存，同样不去查额度
+        assert!(validate_connection_with("custom", "api", None, no_quota).is_err());
+        assert!(validate_connection_with("custom", "api", Some("  "), no_quota).is_err());
+        assert!(validate_connection_with("custom", "auth", Some("m"), no_quota).is_err());
+    }
+
+    #[test]
+    fn other_platforms_keep_remote_validation() {
+        assert_eq!(validate_connection_with("codex", "api", Some("m"), || Err("远程校验".into())), Err("远程校验".into()));
+        assert_eq!(validate_connection_with("claude", "api", None, || Ok(())), Ok(()));
+    }
+}
+// 任务 3.4 结束

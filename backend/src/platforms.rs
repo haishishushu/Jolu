@@ -21,8 +21,9 @@ pub fn get(id: &str) -> Option<&'static Platform> {
 pub fn known(id: &str) -> bool {
     get(id).is_some()
 }
+/// 使用本机来源的平台。自定义供应商（`custom`）只有用户填写的 API Key 连接，不属于本机来源。
 pub fn native(id: &str) -> bool {
-    known(id) && !matches!(id, "claude" | "codex")
+    known(id) && !matches!(id, "claude" | "codex" | "custom")
 }
 pub fn supports(id: &str, capability: &str) -> bool {
     get(id).is_some_and(|p| p.capabilities.iter().any(|c| c == capability))
@@ -37,8 +38,8 @@ pub fn limitation(id: &str) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn all_nine_platforms_have_unique_ids() {
-        assert_eq!(CATALOG.len(), 9);
+    fn all_ten_platforms_have_unique_ids() {
+        assert_eq!(CATALOG.len(), 10);
         for id in [
             "claude",
             "codex",
@@ -49,6 +50,7 @@ mod tests {
             "trae",
             "qoder",
             "workbuddy",
+            "custom",
         ] {
             assert_eq!(CATALOG.iter().filter(|p| p.id == id).count(), 1);
         }
@@ -56,5 +58,8 @@ mod tests {
         assert!(!supports("trae", "local_sessions"));
         // OpenCode 已列入目录但尚未接入，不声明任何能力
         assert!(get("opencode").is_some_and(|p| p.capabilities.is_empty()));
+        // 自定义供应商只有用户填写的 API Key 连接，不是本机来源平台
+        assert!(known("custom") && !native("custom"));
+        assert!(supports("custom", "api_connection") && !supports("custom", "local_sessions"));
     }
 }

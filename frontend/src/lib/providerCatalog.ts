@@ -21,6 +21,8 @@ export interface ProviderEntry {
 }
 
 export const PROVIDERS: readonly ProviderEntry[] = [
+  // 自定义供应商（D-11）：只有 API Key 方式，协议与地址由用户填写，不预填 Base URL
+  { id: "custom", name: "自定义供应商", access: "名称 / Base URL / API Key", subscription: "none", apiKey: "ready" },
   { id: "claude", name: "Claude Code", access: "订阅账号 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.anthropic.com", locked: false } },
   { id: "codex", name: "Codex", access: "订阅账号 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.openai.com/v1", locked: false } },
   { id: "gemini", name: "Gemini", access: "账号授权 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://generativelanguage.googleapis.com/v1beta/openai", locked: true } },
@@ -60,6 +62,101 @@ export function singleModeReason(entry: ProviderEntry): string | null {
   if (entry.apiKey === "none") return `${entry.name} 暂不支持 API Key；当前只提供订阅连接。`
   if (entry.subscription === "pending") return "订阅连接待接入；当前只提供 API Key 连接。"
   return null
+}
+
+/** 自定义供应商的接口协议（D-11）：决定获取模型时的鉴权头 */
+export type ApiProtocol = "openai" | "anthropic"
+
+export const API_PROTOCOLS: readonly ApiProtocol[] = ["openai", "anthropic"]
+
+export function protocolLabel(protocol: ApiProtocol | null): string {
+  if (protocol === "openai") return "OpenAI 兼容"
+  if (protocol === "anthropic") return "Anthropic 兼容"
+  return "未记录协议"
+}
+
+/** Base URL 输入框示例：OpenAI 兼容服务通常带 /v1，Anthropic 兼容服务填根地址 */
+export function protocolBaseUrlHint(protocol: ApiProtocol): string {
+  return protocol === "anthropic" ? "https://api.example.com" : "https://api.example.com/v1"
+}
+
+/**
+ * 自定义供应商获取模型失败后是否改为手填模型 ID（画板 29A 状态 A「模型接口不可用」）。
+ * 401 / 403 说明密钥或权限被拒，手填模型也无法使用，保留错误让用户检查 Key（画板 27「获取失败 · 401」）。
+ */
+export function fallsBackToManualModel(error: string): boolean {
+  return !/HTTP 40[13]\b/.test(error)
+}
+
+/** 获取模型失败后是否提供「手动填写模型」入口：自定义供应商的密钥被拒（401 / 403）时不提供 */
+export function canEnterManualModel(platformId: PlatformId, error: string): boolean {
+  return platformId !== "custom" || fallsBackToManualModel(error)
+}
+
+/**
+ * 请求闸门：每次发起请求取一个序号，返回时只有最新序号的结果有效。
+ * 地址、密钥变化或组件卸载时调用 invalidate，让进行中的获取 / 验证结果全部作废。
+ */
+export function requestGate() {
+  let current = 0
+  return {
+    begin: () => ++current,
+    isCurrent: (token: number) => token === current,
+    invalidate: () => { current++ },
+  }
+}
+
+/**
+ * 编辑弹窗模型区的忙碌状态：获取与验证共用一个请求闸门，所以同一时刻只有一种进行中状态。
+ * 新请求开始即替换旧状态；结束时只有闸门里仍是最新的请求才回到空闲，过期请求结束不改状态。
+ */
+export type ModelBusy = "idle" | "fetching" | "verifying"
+
+export function modelBusyAfter(
+  busy: ModelBusy,
+  event: { type: "start"; kind: "fetching" | "verifying" } | { type: "end"; current: boolean },
+): ModelBusy {
+  if (event.type === "start") return event.kind
+  return event.current ? "idle" : busy
+}
+
+/** 获取或验证进行中时不能开始验证（「验证模型」「继续验证」都禁用） */
+export function canStartVerify(busy: ModelBusy): boolean {
+  return busy === "idle"
+}
+
+/** 获取模型失败的提示文案：后端原因已带前缀时不重复 */
+export function modelFetchErrorText(error: string): string {
+  return error.startsWith("获取模型失败") ? error : `获取模型失败：${error}`
+}
+
+/** 编辑已保存连接的草稿（画板 27「编辑已保存的连接」） */
+export interface EditDraft {
+  platformId: PlatformId
+  kind: "auth" | "api"
+  nameChanged: boolean
+  nameValid: boolean
+  /** 新填写的 API Key；空串表示不更换 */
+  newSecret: string
+  model: string
+  /** 模型是用新密钥获取到的，或手填后已「验证模型」通过 */
+  modelReady: boolean
+}
+
+/**
+ * 编辑保存规则（画板 27）：留空不覆盖已保存密钥；更换后重新获取模型；仅改名称无需重新验证。
+ * 自定义供应商的后端校验只看「有模型」（D-11），所以「更换密钥后必须重新获取或验证模型」由前端把关；
+ * 其他平台更换密钥时由后端照常验证。
+ */
+export function editSaveState(draft: EditDraft): { canSave: boolean; needsModel: boolean; reason: string | null } {
+  const replacing = draft.newSecret.trim() !== ""
+  const needsModel = draft.platformId === "custom" && draft.kind === "api" && replacing
+  if (!draft.nameValid) return { canSave: false, needsModel, reason: null }
+  if (!draft.nameChanged && !replacing) return { canSave: false, needsModel, reason: null }
+  if (needsModel && !(draft.modelReady && draft.model.trim())) {
+    return { canSave: false, needsModel, reason: "更换密钥后请重新获取模型；模型接口不可用时手填模型 ID 并验证模型。" }
+  }
+  return { canSave: true, needsModel, reason: null }
 }
 
 /** 卡片右上角数量徽标 */
