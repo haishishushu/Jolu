@@ -22,10 +22,10 @@ export function CardTitle({ title, note, children }: { title: string; note?: Rea
 }
 
 /** 四项指标卡：名称 11px、数值 25px、说明 10px */
-export function MetricCard({ label, value, note }: { label: string; value: string; note: ReactNode }) {
+export function MetricCard({ icon, label, value, note }: { icon?: ReactNode; label: string; value: string; note: ReactNode }) {
   return (
     <Card className="flex h-[100px] flex-col gap-2 p-3.5">
-      <span className="text-[11px] text-jolu-muted">{label}</span>
+      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-jolu-muted">{icon && <span aria-hidden className="grid size-3.5 shrink-0 place-items-center [&_svg]:size-3.5">{icon}</span>}<span className="truncate">{label}</span></span>
       <span className="tnum truncate text-[25px] font-semibold leading-none text-jolu-text">{value}</span>
       <span className="truncate text-[10px] text-jolu-muted">{note}</span>
     </Card>

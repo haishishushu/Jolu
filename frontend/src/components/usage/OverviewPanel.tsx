@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { ChevronRight } from "lucide-react"
+import { ChevronRight, CircleDollarSign, Layers, Repeat2, Target } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { bucketLabel, changeText, formatPercent, formatTokens, formatUsd, modelDisplayName, share } from "@/lib/usageStats"
 import { projectName } from "@/lib/sessionThreads"
@@ -33,17 +33,19 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
     <>
       <div className="grid grid-cols-4 gap-3">
         <MetricCard
+          icon={<Layers />}
           label="总 Token"
           value={formatTokens(data.tokens.total)}
           note={`本机记录${change ? ` · ${isToday ? "较昨天同时段" : "较上一周期"} ${change}` : ""}`}
         />
-        <MetricCard label="调用次数" value={String(data.requests)} note={`成功率 ${formatPercent(success)} · ${data.failed} 次失败`} />
+        <MetricCard icon={<Repeat2 />} label="调用次数" value={String(data.requests)} note={`成功率 ${formatPercent(success)} · ${data.failed} 次失败`} />
         <MetricCard
+          icon={<CircleDollarSign />}
           label="估算费用 · USD"
           value={formatUsd(data.cost.priced_requests ? data.cost.amount : null)}
           note={`已计价 ${data.cost.priced_requests} / ${data.cost.requests} 次 · 不含月费`}
         />
-        <MetricCard label="输入缓存命中率" value={formatPercent(data.cache_hit_rate)} note="缓存读取 / 全部输入 Token" />
+        <MetricCard icon={<Target />} label="输入缓存命中率" value={formatPercent(data.cache_hit_rate)} note="缓存读取 / 全部输入 Token" />
       </div>
 
       <div className="grid h-[250px] grid-cols-[minmax(0,644fr)_minmax(0,348fr)] gap-4">
