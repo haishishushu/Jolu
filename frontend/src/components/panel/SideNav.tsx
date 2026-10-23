@@ -43,6 +43,7 @@ function NavItem({ entry, active, collapsed, onClick }: { entry: MainPageItem; a
   const button = (
     <button
       type="button"
+      data-icon-motion={entry.id}
       aria-current={active ? "page" : undefined}
       aria-label={collapsed ? entry.label : undefined}
       onClick={onClick}
