@@ -1203,8 +1203,13 @@ pub fn finish(conn: &Connection, run_id: i64, outcome: &Outcome, p: &Progress, n
     Ok(())
 }
 
+/// 只改仍在启动流程里的运行（排队中，或刚认领为执行中）；启动途中被删除或取消的运行不再写入
 fn set_attention(conn: &Connection, run_id: i64, kind: &str, reason: &str, now: i64) -> rusqlite::Result<()> {
-    conn.execute("UPDATE automation_runs SET status='attention', block_kind=?2, reason=?3 WHERE id=?1", params![run_id, kind, reason])?;
+    let n = conn.execute(
+        "UPDATE automation_runs SET status='attention', block_kind=?2, reason=?3 WHERE id=?1 AND status IN ('queued','running')",
+        params![run_id, kind, reason],
+    )?;
+    if n == 0 { return Ok(()); }
     add_event(conn, run_id, now, "attention", "需要处理", Some(reason))
 }
 
@@ -1399,19 +1404,83 @@ pub fn act(conn: &Connection, id: i64, action: &str, now: i64) -> Result<Option<
     }
 }
 
+/// 删除任务（任务 2.9）：在一个事务里删除任务、它的全部运行记录和事件；用量统计（`requests` 等表）不动。
+/// 有执行中的运行时拒绝；排队或等待额度的运行先转为已取消再删除。调度线程只认 `status='queued'` 的运行
+/// （见 [`claim_run`]），`startable`、`due_checks` 与合并额度检查都按库里现存的运行查询，删除后自然不再出现。
+pub fn delete_task(conn: &mut Connection, task_id: i64) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let tx = conn.transaction().map_err(e)?;
+    if load_task(&tx, task_id).map_err(e)?.is_none() { return Err("任务不存在".into()); }
+    let running: bool = tx
+        .query_row("SELECT EXISTS(SELECT 1 FROM automation_runs WHERE task_id = ?1 AND status = 'running')", [task_id], |r| r.get(0))
+        .map_err(e)?;
+    if running { return Err("任务正在运行，请先停止".into()); }
+    tx.execute("UPDATE automation_runs SET status='cancelled', next_check_at=NULL WHERE task_id = ?1 AND status IN ('queued','waiting')", [task_id]).map_err(e)?;
+    tx.execute("DELETE FROM automation_events WHERE run_id IN (SELECT id FROM automation_runs WHERE task_id = ?1)", [task_id]).map_err(e)?;
+    tx.execute("DELETE FROM automation_runs WHERE task_id = ?1", [task_id]).map_err(e)?;
+    tx.execute("DELETE FROM automation_tasks WHERE id = ?1", [task_id]).map_err(e)?;
+    tx.commit().map_err(e)
+}
+
+/// 启动前认领运行：只有仍在排队、且所属任务处于启用状态（未暂停、未取消）的运行才转为执行中。
+/// 认领发生在拉起进程之前，运行在这之间被删除、取消或任务被暂停时认领失败，不会启动执行器
+pub fn claim_run(conn: &Connection, run_id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE automation_runs SET status='running', block_kind=NULL, reason=NULL
+         WHERE id=?1 AND status='queued'
+           AND EXISTS(SELECT 1 FROM automation_tasks t WHERE t.id = automation_runs.task_id AND t.state = 'active')",
+        [run_id],
+    )?;
+    Ok(n == 1)
+}
+
+/// 执行中的进程登记与停止请求。认领到写入进程 ID 之间有一个窗口：这期间收到的停止请求
+/// 先留下标记，登记进程时发现标记就立即结束进程，按「已取消」收尾
+#[derive(Default)]
+struct Procs {
+    /// 运行 ID → 进程 ID
+    pids: HashMap<i64, u32>,
+    /// 已请求停止的运行
+    stopping: HashSet<i64>,
+}
+
+impl Procs {
+    /// 认领前清掉同一运行上一轮遗留的停止标记（续跑的运行沿用原来的运行 ID）
+    fn clear_stop(&mut self, run_id: i64) {
+        self.stopping.remove(&run_id);
+    }
+
+    /// 请求停止：留下标记；进程已登记时返回进程 ID，由调用方结束进程树
+    fn request_stop(&mut self, run_id: i64) -> Option<u32> {
+        self.stopping.insert(run_id);
+        self.pids.get(&run_id).copied()
+    }
+
+    /// 登记进程；返回 true 表示登记前已有停止请求，需要立即结束
+    fn register(&mut self, run_id: i64, pid: u32) -> bool {
+        self.pids.insert(run_id, pid);
+        self.stopping.contains(&run_id)
+    }
+
+    /// 进程退出：注销，返回是否因停止请求结束
+    fn exited(&mut self, run_id: i64) -> bool {
+        self.pids.remove(&run_id);
+        self.stopping.remove(&run_id)
+    }
+}
+
 /* ─────────────────────────── 调度器 ─────────────────────────── */
 
 struct Engine {
     wake: Mutex<bool>,
     cv: Condvar,
-    /// 执行中的进程：运行 ID → 进程 ID
-    procs: Mutex<HashMap<i64, u32>>,
-    stopping: Mutex<HashSet<i64>>,
+    /// 执行中的进程与停止请求，同一把锁，避免「先停止、后登记」时漏掉停止请求
+    procs: Mutex<Procs>,
 }
 
 fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
-    ENGINE.get_or_init(|| Engine { wake: Mutex::new(false), cv: Condvar::new(), procs: Mutex::new(HashMap::new()), stopping: Mutex::new(HashSet::new()) })
+    ENGINE.get_or_init(|| Engine { wake: Mutex::new(false), cv: Condvar::new(), procs: Mutex::new(Procs::default()) })
 }
 
 static SCHEMA_READY: AtomicBool = AtomicBool::new(false);
@@ -1545,6 +1614,12 @@ fn start_run(app: &AppHandle, run_id: i64) {
             format!("{name} 不是 {} 当前登录的账号；Jolu 不会自动切换账号，请在供应商页启用该账号后重试。", display_name(&task.platform)),
         );
     }
+    // 先认领再拉起进程：认领之后删除会被拒绝（运行中），认领之前被删除或取消则不启动
+    engine().procs.lock().unwrap_or_else(|p| p.into_inner()).clear_stop(run_id);
+    match with_conn(&db, |conn| claim_run(conn, run_id).map_err(|e| e.to_string())) {
+        Ok(true) => {}
+        _ => return,
+    }
     let session = run.session_id.clone();
     let prompt = if run.resume_pending { RESUME_PROMPT.to_string() } else { task.prompt.clone() };
     let args = build_args(&task.platform, task.model.as_deref(), session.as_deref());
@@ -1562,19 +1637,21 @@ fn start_run(app: &AppHandle, run_id: i64) {
     let resumed = run.resume_pending;
     let _ = with_conn(&db, |conn| {
         conn.execute(
-            "UPDATE automation_runs SET status='running', block_kind=NULL, reason=NULL, started_at=COALESCE(started_at, ?2), exec_started_at=?2 WHERE id=?1",
+            "UPDATE automation_runs SET started_at=COALESCE(started_at, ?2), exec_started_at=?2 WHERE id=?1",
             params![run_id, now],
         ).map_err(|e| e.to_string())?;
         let (title, detail) = if resumed { ("恢复原会话", "继续未完成的任务") } else if session.is_some() { ("开始执行", "在所选会话中追加任务指令") } else { ("开始执行", "新建会话") };
         add_event(conn, run_id, now, "start", title, Some(detail)).map_err(|e| e.to_string())
     });
-    engine().procs.lock().unwrap_or_else(|p| p.into_inner()).insert(run_id, child.id());
+    // 认领后、登记前收到的停止请求：登记时立即结束进程树，不写入提示词；进程退出后按「已取消」收尾
+    let stop_now = engine().procs.lock().unwrap_or_else(|p| p.into_inner()).register(run_id, child.id());
+    if stop_now { kill_tree(child.id()); }
     emit(app);
 
     let app = app.clone();
     let platform = task.platform.clone();
     std::thread::spawn(move || {
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = child.stdin.take().filter(|_| !stop_now) {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let stderr = child.stderr.take().map(|mut err| std::thread::spawn(move || {
@@ -1608,9 +1685,7 @@ fn start_run(app: &AppHandle, run_id: i64) {
         }
         let exit_ok = child.wait().map(|s| s.success()).unwrap_or(false);
         let stderr_tail = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
-        let e = engine();
-        e.procs.lock().unwrap_or_else(|p| p.into_inner()).remove(&run_id);
-        let stopped = e.stopping.lock().unwrap_or_else(|p| p.into_inner()).remove(&run_id);
+        let stopped = engine().procs.lock().unwrap_or_else(|p| p.into_inner()).exited(run_id);
         let outcome = classify(&progress, exit_ok, &stderr_tail, stopped);
         if let Err(error) = with_conn(&db, |conn| finish(conn, run_id, &outcome, &progress, now_ms()).map_err(|e| e.to_string())) {
             eprintln!("[自动化] 记录运行结果失败：{error}");
@@ -1620,11 +1695,14 @@ fn start_run(app: &AppHandle, run_id: i64) {
     });
 }
 
-/// 结束整个进程树（执行器会再拉起子进程）
+/// 停止运行：进程已登记时结束整个进程树；还没登记（刚认领、正在拉起）时留下停止标记，登记时再结束
 fn kill_run(run_id: i64) {
-    let e = engine();
-    let Some(pid) = e.procs.lock().unwrap_or_else(|p| p.into_inner()).get(&run_id).copied() else { return };
-    e.stopping.lock().unwrap_or_else(|p| p.into_inner()).insert(run_id);
+    let pid = engine().procs.lock().unwrap_or_else(|p| p.into_inner()).request_stop(run_id);
+    if let Some(pid) = pid { kill_tree(pid); }
+}
+
+/// 结束整个进程树（执行器会再拉起子进程）
+fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1659,6 +1737,23 @@ pub async fn automation_create(app: AppHandle, input: TaskInput) -> Result<i64, 
 #[tauri::command]
 pub async fn automation_update(app: AppHandle, id: i64, input: TaskInput) -> Result<(), String> {
     blocking(&app, move |conn| update_task(conn, id, &input, now_ms())).await?;
+    emit(&app);
+    kick();
+    Ok(())
+}
+
+/// 删除任务及其运行记录（任务 2.9）；执行中的任务需先停止
+#[tauri::command]
+pub async fn automation_delete(app: AppHandle, task_id: i64) -> Result<(), String> {
+    let db = shared(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = db.lock().map_err(|e| e.to_string())?;
+        if !SCHEMA_READY.load(Ordering::Acquire) {
+            ensure_schema(&conn).map_err(|e| e.to_string())?;
+            SCHEMA_READY.store(true, Ordering::Release);
+        }
+        delete_task(&mut conn, task_id)
+    }).await.map_err(|e| e.to_string())??;
     emit(&app);
     kick();
     Ok(())
@@ -2274,5 +2369,154 @@ mod tests {
         assert_eq!(task.missed_at, Some(ms(&tz, 2026, 10, 23, 9, 0)));
         assert!(active_run(&conn, id).unwrap().is_none());
         recover(&conn, late).unwrap();
+    }
+
+    /* ── 任务 2.9：删除任务 ── */
+
+    fn count(conn: &Connection, sql: &str, id: i64) -> i64 {
+        conn.query_row(sql, [id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn delete_task_removes_runs_keeps_usage() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute_batch("CREATE TABLE requests (id INTEGER PRIMARY KEY, platform TEXT NOT NULL, ts INTEGER NOT NULL); INSERT INTO requests (platform, ts) VALUES ('claude', 1);").unwrap();
+        let now = 1_000_000;
+        let id = create_task(&conn, &input("now"), now).unwrap();
+        let first = active_run(&conn, id).unwrap().unwrap().id;
+        set_status(&conn, first, "completed");
+        act(&conn, id, "run", now + 10).unwrap();
+        let second = active_run(&conn, id).unwrap().unwrap().id;
+        add_event(&conn, second, now + 20, "log", "执行日志", None).unwrap();
+        let other = create_task(&conn, &input("now"), now + 30).unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM automation_runs WHERE task_id = ?1", id), 2);
+        assert!(count(&conn, "SELECT COUNT(*) FROM automation_events WHERE run_id IN (SELECT id FROM automation_runs WHERE task_id = ?1)", id) >= 3);
+
+        delete_task(&mut conn, id).unwrap();
+        assert!(load_task(&conn, id).unwrap().is_none());
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM automation_runs WHERE task_id = ?1", id), 0);
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM automation_events WHERE run_id IN (?1, ?2)", params![first, second], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "两条运行的事件都已删除");
+        let usage: i64 = conn.query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0)).unwrap();
+        assert_eq!(usage, 1, "用量统计保留");
+        assert!(load_task(&conn, other).unwrap().is_some() && active_run(&conn, other).unwrap().is_some(), "其他任务不受影响");
+        assert_eq!(delete_task(&mut conn, id).unwrap_err(), "任务不存在");
+    }
+
+    #[test]
+    fn delete_running_task_rejected() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let id = create_task(&conn, &input("now"), now).unwrap();
+        let run = active_run(&conn, id).unwrap().unwrap().id;
+        set_status(&conn, run, "running");
+        let events = count(&conn, "SELECT COUNT(*) FROM automation_events WHERE run_id = ?1", run);
+        assert_eq!(delete_task(&mut conn, id).unwrap_err(), "任务正在运行，请先停止");
+        assert!(load_task(&conn, id).unwrap().is_some());
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "running", "数据不变");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM automation_events WHERE run_id = ?1", run), events);
+    }
+
+    #[test]
+    fn delete_waiting_task_cancels_wait() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let waiting = create_task(&conn, &input("quota"), now).unwrap();
+        let wait_run = active_run(&conn, waiting).unwrap().unwrap().id;
+        let next = queued(&conn, "c1", r"D:\work\next", true, now + 1);
+        assert!(startable(&conn).unwrap().is_empty(), "等待额度挡住同账号");
+        assert_eq!(due_checks(&conn, now + 10).unwrap().0, vec!["c1".to_string()]);
+
+        delete_task(&mut conn, waiting).unwrap();
+        assert!(load_run(&conn, wait_run).unwrap().is_none());
+        assert_eq!(startable(&conn).unwrap(), vec![next], "删除后不再挡住账号，也不会被启动");
+        assert!(due_checks(&conn, now + 20).unwrap().0.is_empty(), "等待检查列表里不再出现");
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        assert!(!apply_account_check(&conn, "c1", Some(wait_run), now, &ok, now + 30).unwrap(), "拿旧 id 检查不会复活运行");
+
+        let queued_task = load_run(&conn, next).unwrap().unwrap().task_id;
+        delete_task(&mut conn, queued_task).unwrap();
+        assert!(startable(&conn).unwrap().is_empty(), "排队中的任务删除后不再启动");
+        assert!(!claim_run(&conn, next).unwrap(), "调度线程拿着旧 id 也认领不到");
+    }
+
+    #[test]
+    fn claim_run_only_takes_queued() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let run = queued(&conn, "c1", r"D:\work\a", true, 1_000_000);
+        assert!(claim_run(&conn, run).unwrap());
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "running");
+        assert!(!claim_run(&conn, run).unwrap(), "已认领的运行不重复启动");
+
+        // 续跑：执行中额度耗尽 → 等待（resume_pending）→ 额度恢复转回排队，沿用原运行 ID，可以再次认领
+        let now = 1_000_000;
+        conn.execute("UPDATE automation_runs SET exec_started_at=?2 WHERE id=?1", params![run, now]).unwrap();
+        let p = Progress { session_id: Some("s-1".into()), ..Default::default() };
+        finish(&conn, run, &Outcome::Limit { resets_at: Some(now + 60_000), message: "usage limit".into() }, &p, now + 5_000).unwrap();
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        assert!(apply_check(&conn, run, &ok, now + 100_000).unwrap());
+        let resumed = load_run(&conn, run).unwrap().unwrap();
+        assert_eq!((resumed.status.as_str(), resumed.resume_pending), ("queued", true));
+        assert!(claim_run(&conn, run).unwrap(), "续跑的运行能被认领");
+    }
+
+    #[test]
+    fn claim_run_skips_paused_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let run = queued(&conn, "c1", r"D:\work\a", true, now);
+        let task = load_run(&conn, run).unwrap().unwrap().task_id;
+        act(&conn, task, "pause", now + 1).unwrap();
+        assert!(!claim_run(&conn, run).unwrap(), "暂停后认领失败");
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "queued", "仍保持排队，恢复后再启动");
+        act(&conn, task, "resume", now + 2).unwrap();
+        assert!(claim_run(&conn, run).unwrap(), "恢复后可以认领");
+    }
+
+    #[test]
+    fn set_attention_ignores_cancelled_and_deleted_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let run = queued(&conn, "c1", r"D:\work\a", true, now);
+        let task = load_run(&conn, run).unwrap().unwrap().task_id;
+        act(&conn, task, "cancel", now + 1).unwrap();
+        let events = count(&conn, "SELECT COUNT(*) FROM automation_events WHERE run_id = ?1", run);
+        set_attention(&conn, run, "tool_missing", "未检测到执行器", now + 2).unwrap();
+        assert_eq!(load_run(&conn, run).unwrap().unwrap().status, "cancelled", "已取消的运行不改回需要处理");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM automation_events WHERE run_id = ?1", run), events, "也不写事件");
+
+        let other = queued(&conn, "c1", r"D:\work\b", true, now + 3);
+        let other_task = load_run(&conn, other).unwrap().unwrap().task_id;
+        delete_task(&mut conn, other_task).unwrap();
+        set_attention(&conn, other, "tool_missing", "未检测到执行器", now + 4).unwrap();
+        assert!(load_run(&conn, other).unwrap().is_none());
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM automation_events WHERE run_id = ?1", other), 0, "已删除的运行不留孤儿事件");
+    }
+
+    #[test]
+    fn stop_requested_before_register_kills_on_register() {
+        let mut procs = Procs::default();
+        procs.clear_stop(7);
+        assert_eq!(procs.request_stop(7), None, "进程还没登记：只留下停止标记");
+        assert!(procs.register(7, 4242), "登记时发现停止请求，需要立即结束");
+        assert!(procs.exited(7), "退出时按已停止收尾");
+        assert!(!procs.exited(7), "标记随退出清除");
+
+        // 正常顺序：先登记再停止，返回进程 ID 由调用方结束
+        assert!(!procs.register(8, 5151));
+        assert_eq!(procs.request_stop(8), Some(5151));
+        assert!(procs.exited(8));
+
+        // 上一轮遗留的标记（续跑沿用运行 ID）在认领前清掉，不会误杀新一轮
+        procs.request_stop(9);
+        procs.clear_stop(9);
+        assert!(!procs.register(9, 6161));
+        assert!(!procs.exited(9));
     }
 }

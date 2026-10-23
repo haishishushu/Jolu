@@ -15,6 +15,7 @@ import { RunList } from "@/components/automation/RunList"
 import { RunDetail } from "@/components/automation/RunDetail"
 import { TaskDialog, type TaskDialogRequest } from "@/components/automation/TaskDialog"
 import { CancelTaskDialog } from "@/components/automation/CancelTaskDialog"
+import { DeleteTaskDialog } from "@/components/automation/DeleteTaskDialog"
 
 /** 会话线程「创建自动化」带入的会话（画板 72） */
 export interface AutomationPrefill {
@@ -49,6 +50,7 @@ export function AutomationView({ active, prefill, onOpenSession, onOpenProviders
   const [route, setRoute] = useState<Route>({ kind: "list" })
   const [dialog, setDialog] = useState<TaskDialogRequest | null>(null)
   const [cancelling, setCancelling] = useState<TaskItemDto | null>(null)
+  const [deleting, setDeleting] = useState<TaskItemDto | null>(null)
   const [runFilter, setRunFilter] = useState<RunFilterDto>({ range: "today", status: null, connection: null, task: null })
   const [runPage, setRunPage] = useState(1)
   const [stopping, setStopping] = useState(false)
@@ -138,6 +140,7 @@ export function AutomationView({ active, prefill, onOpenSession, onOpenProviders
           onAction={(action) => doAction(task.data!.item.id, action)}
           onEdit={() => editTask(task.data!.item)}
           onCancel={() => setCancelling(task.data!.item)}
+          onDelete={() => setDeleting(task.data!.item)}
           onOpenRun={(id) => setRoute({ kind: "run", id, back: route })}
           onOpenSession={onOpenSession}
           onOpenProviders={onOpenProviders}
@@ -182,6 +185,7 @@ export function AutomationView({ active, prefill, onOpenSession, onOpenProviders
                 onEdit={editTask}
                 onAction={(item, action) => void doAction(item.id, action)}
                 onCancel={setCancelling}
+                onDelete={setDeleting}
               />
             ) : !overview.error && <LoadingCard title="正在读取任务" />}
             <p className="text-[10px] text-jolu-muted">{isTauri ? "" : "示例数据 · "}本地任务需要 Jolu 后台运行；休眠与关机期间停止调度，重新打开后检查待执行任务。</p>
@@ -234,6 +238,25 @@ export function AutomationView({ active, prefill, onOpenSession, onOpenProviders
             setCancelling(null)
             toast.success("已取消任务", "保留运行记录和已经完成的文件修改")
             refreshAll()
+          }}
+        />
+      )}
+      {deleting && (
+        <DeleteTaskDialog
+          name={deleting.name}
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => {
+            if (!isTauri) {
+              setDeleting(null)
+              toast.info("已删除任务", "浏览器预览不执行实际操作")
+              return
+            }
+            // 失败时抛出，由弹窗显示原因；成功后关闭弹窗和任务详情并刷新列表（画板 68 第 10 格），不另弹提示
+            await automationApi.deleteTask(deleting.id)
+            setDeleting(null)
+            if (taskId === deleting.id) setRoute({ kind: "list" })
+            overview.refresh()
+            if (tab === "runs") runs.refresh()
           }}
         />
       )}

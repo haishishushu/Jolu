@@ -19,7 +19,7 @@ import type { PlatformId } from "@/types"
  * 任务详情（画板 62「等待额度与续跑详情」）：恢复时间与检查状态、继续执行的位置、执行内容，
  * 右栏为账号额度、同账号队列与等待策略。其他状态沿用同一布局，主卡片按状态切换。
  */
-export function TaskDetail({ detail, now, account, onBack, onAction, onEdit, onCancel, onOpenRun, onOpenSession, onOpenProviders }: {
+export function TaskDetail({ detail, now, account, onBack, onAction, onEdit, onCancel, onDelete, onOpenRun, onOpenSession, onOpenProviders }: {
   detail: TaskDetailDto
   now: number
   account: AccountRef | undefined
@@ -27,6 +27,7 @@ export function TaskDetail({ detail, now, account, onBack, onAction, onEdit, onC
   onAction: (action: TaskAction) => Promise<void>
   onEdit: () => void
   onCancel: () => void
+  onDelete: () => void
   onOpenRun: (runId: number) => void
   onOpenSession: (platform: string, sessionId: string) => void
   onOpenProviders: () => void
@@ -77,6 +78,7 @@ export function TaskDetail({ detail, now, account, onBack, onAction, onEdit, onC
           onEdit={onEdit}
           onQueue={() => document.getElementById("automation-queue")?.scrollIntoView({ behavior: "smooth", block: "center" })}
           onCancel={onCancel}
+          onDelete={onDelete}
           trigger={
             <button type="button" aria-label="任务更多操作" className="grid size-[30px] place-items-center rounded-lg bg-jolu-side text-jolu-muted outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
               <Ellipsis aria-hidden className="size-4" />

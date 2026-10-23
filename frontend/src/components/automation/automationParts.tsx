@@ -1,8 +1,9 @@
 import * as Menu from "@radix-ui/react-dropdown-menu"
+import * as Tooltip from "@radix-ui/react-tooltip"
 import type { ReactNode } from "react"
-import { Ellipsis, Info, ListOrdered, Pause, Pencil, Play, RotateCcw, Square, X, type LucideIcon } from "lucide-react"
+import { Ellipsis, Info, ListOrdered, Pause, Pencil, Play, RotateCcw, Square, Trash2, X, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { taskStatus, type Tone } from "@/lib/automation"
+import { canDeleteTask, DELETE_BLOCKED_TIP, taskStatus, type Tone } from "@/lib/automation"
 import type { TaskAction, TaskItemDto } from "@/lib/automationApi"
 
 export const TONE: Record<Tone, string> = {
@@ -101,24 +102,29 @@ export function QuotaBar({ label, value, note, percent, blocking }: { label: str
 
 const MENU_CLASS = "motion-popover z-[100] min-w-[168px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover"
 const ITEM_CLASS = "flex h-8 cursor-default select-none items-center gap-2 rounded-md px-2 text-[11px] text-jolu-text outline-none data-[highlighted]:bg-jolu-side data-[disabled]:opacity-40 [&_svg]:size-3.5 [&_svg]:text-jolu-muted"
+/** 危险项（删除任务）：文字与图标都用危险色 */
+const DANGER_ITEM_CLASS = ITEM_CLASS.replace("text-jolu-text", "text-jolu-danger").replace("[&_svg]:text-jolu-muted", "[&_svg]:text-jolu-danger")
 
 /**
- * 任务更多操作（画板 68 第 08 格）：编辑任务 / 暂停等待 / 查看账号队列 / 取消任务；
+ * 任务更多操作（画板 68 第 08 格）：编辑任务 / 暂停等待 / 查看账号队列 / 取消任务，分隔线后为危险色的「删除任务」；
  * 已暂停时为「恢复任务」，运行中为「停止运行」。没有进行中的运行时可立即运行（已错过为「补跑」、失败为「重试」）。
+ * 运行中「删除任务」禁用，悬浮或聚焦时显示原因（第 12 格）；为了能悬浮、聚焦，用 aria-disabled 而不是 disabled。
  */
-export function TaskMenu({ item, now, onAction, onEdit, onQueue, onCancel, trigger }: {
+export function TaskMenu({ item, now, onAction, onEdit, onQueue, onCancel, onDelete, trigger }: {
   item: TaskItemDto
   now: number
   onAction: (action: TaskAction) => void
   onEdit: () => void
   onQueue: () => void
   onCancel: () => void
+  onDelete: () => void
   trigger?: ReactNode
 }) {
   const running = item.active?.status === "running"
   const cancelled = item.state === "cancelled"
   const status = taskStatus(item, now)
   const canRun = !cancelled && item.state !== "paused" && (!item.active || item.active.status === "attention")
+  const deletable = canDeleteTask(item.active?.status ?? item.state)
   const runLabel = item.active?.status === "attention" ? "重新排队" : item.missed_at ? "补跑" : status.label === "失败" ? "重试" : "立即运行"
   return (
     <Menu.Root modal={false}>
@@ -142,6 +148,21 @@ export function TaskMenu({ item, now, onAction, onEdit, onQueue, onCancel, trigg
           {canRun && <Menu.Item className={ITEM_CLASS} onSelect={() => onAction(item.active ? "retry" : "run")}><RotateCcw aria-hidden />{runLabel}</Menu.Item>}
           <Menu.Item className={ITEM_CLASS} onSelect={onQueue}><ListOrdered aria-hidden />查看账号队列</Menu.Item>
           <Menu.Item className={ITEM_CLASS} disabled={cancelled} onSelect={onCancel}><X aria-hidden />取消任务</Menu.Item>
+          <Menu.Separator className="mx-2 my-1 h-px bg-jolu-border" />
+          {deletable ? (
+            <Menu.Item className={DANGER_ITEM_CLASS} onSelect={onDelete}><Trash2 aria-hidden />删除任务</Menu.Item>
+          ) : (
+            <Tooltip.Root>
+              <Tooltip.Trigger asChild>
+                <Menu.Item className={cn(DANGER_ITEM_CLASS, "opacity-40 data-[highlighted]:bg-transparent")} aria-disabled onSelect={(e) => e.preventDefault()}><Trash2 aria-hidden />删除任务</Menu.Item>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content side="bottom" align="start" sideOffset={6} collisionPadding={8} className="motion-popover z-[120] rounded-md bg-jolu-text px-2.5 py-[7px] text-[11px] text-jolu-bg">
+                  {DELETE_BLOCKED_TIP}
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
+          )}
         </Menu.Content>
       </Menu.Portal>
     </Menu.Root>
