@@ -94,20 +94,21 @@ export function useExitPresence<T>(value: T | null, duration = 140) {
   return { rendered: value ?? retained, exiting: value === null && retained !== null }
 }
 
-/** 只在交互标识变化时重播，不重挂载内容，不影响表单、焦点与滚动位置。 */
-export function useContentMotion(key: string, duration = 180, distance = 4) {
+/** 标识变化时淡入，不重挂载内容；默认不位移，避免改变后代 fixed 弹窗的定位。 */
+export function useContentMotion(key: string, duration = 220, distance = 0, animateOnMount = false) {
   const ref = useRef<HTMLDivElement>(null)
-  const previousKey = useRef(key)
+  const previousKey = useRef<string | null>(animateOnMount ? null : key)
   const interrupted = useRef<{ opacity: string; transform: string } | null>(null)
   useLayoutEffect(() => {
     if (previousKey.current === key) return
-    previousKey.current = key
     const element = ref.current
-    if (!element || reducedMotion()) { interrupted.current = null; return }
+    if (!element) return
+    previousKey.current = key
+    if (reducedMotion()) { interrupted.current = null; return }
     const start = interrupted.current
     interrupted.current = null
     const animation = element.animate([
-      { opacity: start?.opacity ?? 0.85, ...(distance ? { transform: start?.transform ?? `translateY(${distance}px)` } : {}) },
+      { opacity: start?.opacity ?? 0.35, ...(distance ? { transform: start?.transform ?? `translateY(${distance}px)` } : {}) },
       { opacity: 1, ...(distance ? { transform: "translateY(0)" } : {}) },
     ], { duration, easing: MOTION_EASE })
     const query = window.matchMedia("(prefers-reduced-motion: reduce)")
@@ -122,6 +123,8 @@ export function useContentMotion(key: string, duration = 180, distance = 4) {
         interrupted.current = { opacity: style.opacity, transform: style.transform }
       } else interrupted.current = null
       animation.cancel()
+      // StrictMode 的 setup → cleanup → setup 也需要恢复首次淡入。
+      previousKey.current = null
       query.removeEventListener("change", stop)
       observer.disconnect()
     }

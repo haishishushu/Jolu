@@ -611,16 +611,19 @@ fieldset[data-saving="true"] :disabled:not([disabled]) {
 }
 html.reduce-motion [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
 
-/* 主窗口的异步占位：保留尺寸，快请求不闪骨架。 */
-@keyframes skeleton-reveal { from { opacity: 0; } to { opacity: 1; } }
+/* 首帧就有占位；只让柔光移动，不把等待阶段隐藏成空白。 */
 @keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
-.skeleton-content { animation: skeleton-reveal 160ms ease-out 150ms both; }
+.skeleton-content { opacity: 1; }
 .skeleton-bar {
   background-color: var(--jolu-side);
   background-image: linear-gradient(100deg, transparent 20%, var(--jolu-track) 50%, transparent 80%);
   background-size: 200% 100%;
   animation: skeleton-shimmer 1500ms ease-in-out infinite;
 }
+/* 日历只驱动一个动画层，避免数百个小格分别运行渐变动画。 */
+@keyframes skeleton-calendar-pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+.skeleton-calendar { animation: skeleton-calendar-pulse 1600ms ease-in-out infinite; }
+.skeleton-calendar .skeleton-bar { animation: none; background-image: none; }
 html:not(.island-window) :where(button, [role="tab"], [role="menuitem"], [role="option"], a) {
   transition-property: background-color, border-color, color, opacity, box-shadow, filter;
   transition-duration: 140ms;
@@ -635,10 +638,12 @@ html:not(.island-window) .motion-button:not(:disabled):active { transform: scale
 @media (prefers-reduced-motion: reduce) {
   .skeleton-content { animation: none; }
   .skeleton-bar { animation: none; background-image: none; }
+  .skeleton-calendar { animation: none; }
   html:not(.island-window) .motion-button:not(:disabled):active { transform: none; }
 }
 html.reduce-motion .skeleton-content { animation: none; }
 html.reduce-motion .skeleton-bar { animation: none; background-image: none; }
+html.reduce-motion .skeleton-calendar { animation: none; }
 html.reduce-motion .motion-button:not(:disabled):active { transform: none; }
 
 .motion-dialog[data-state="closed"] { transition-duration: 140ms; }
@@ -722,3 +727,57 @@ html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"])[
   html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"]) { transition: none; }
 }
 html.reduce-motion :is([role="menuitemradio"], [role="menuitemcheckbox"]) { transition: none; }
+
+/* 主窗口开关：2px 等距留白、细内描边、轻浮起的圆点。 */
+.jolu-switch {
+  --switch-width: 36px;
+  --switch-height: 20px;
+  --switch-thumb: 16px;
+  --switch-offset: 0px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--switch-width);
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  outline: none;
+}
+.jolu-switch[data-size="compact"] { --switch-width: 30px; --switch-height: 18px; --switch-thumb: 14px; height: 28px; }
+.jolu-switch[aria-checked="true"] { --switch-offset: calc(var(--switch-width) - var(--switch-thumb) - 4px); }
+.jolu-switch-track {
+  display: block;
+  width: var(--switch-width);
+  height: var(--switch-height);
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--jolu-track);
+  box-shadow: inset 0 0 0 1px #0000000a;
+  transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+.dark .jolu-switch-track { box-shadow: inset 0 0 0 1px #ffffff0a; }
+.jolu-switch[aria-checked="true"] .jolu-switch-track { background: var(--jolu-accent); }
+.jolu-switch-thumb {
+  display: block;
+  width: var(--switch-thumb);
+  height: var(--switch-thumb);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px #00000026, 0 0 0 0.5px #00000008;
+  transform: translateX(var(--switch-offset));
+  transition: transform 180ms var(--motion-ease);
+}
+.jolu-switch:not(:disabled):hover .jolu-switch-track { box-shadow: inset 0 0 0 20px #0000000a; }
+.dark .jolu-switch:not(:disabled):hover .jolu-switch-track { box-shadow: inset 0 0 0 20px #ffffff0d; }
+.jolu-switch:not(:disabled):active .jolu-switch-thumb { transform: translateX(var(--switch-offset)) scale(0.92); }
+.jolu-switch:focus-visible { outline: 2px solid var(--jolu-accent); outline-offset: 3px; }
+.jolu-switch:disabled { cursor: not-allowed; opacity: 0.45; }
+@media (prefers-reduced-motion: reduce) {
+  .jolu-switch-track, .jolu-switch-thumb { transition: none; }
+  .jolu-switch:not(:disabled):active .jolu-switch-thumb { transform: translateX(var(--switch-offset)); }
+}
+html.reduce-motion .jolu-switch-track, html.reduce-motion .jolu-switch-thumb { transition: none; }
+html.reduce-motion .jolu-switch:not(:disabled):active .jolu-switch-thumb { transform: translateX(var(--switch-offset)); }

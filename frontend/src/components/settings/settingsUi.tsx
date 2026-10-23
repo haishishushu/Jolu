@@ -48,25 +48,7 @@ export function SettingsRow({ title, desc, control, className, descClassName }: 
   )
 }
 
-/** 开关 36×20，内边距 3、滑块 14（画板 86「开关开启 / 关闭」） */
-export function Switch({ on, onChange, disabled, label }: { on: boolean; onChange?: (next: boolean) => void; disabled?: boolean; label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={disabled || !onChange}
-      onClick={() => onChange?.(!on)}
-      className={cn(
-        "motion-toggle flex h-5 w-9 shrink-0 items-center rounded-full p-[3px] outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
-        on ? "bg-jolu-accent" : "bg-jolu-track",
-      )}
-    >
-      <span className="motion-toggle-thumb size-3.5 rounded-full bg-white" style={{ transform: `translateX(${on ? 16 : 0}px)` }} />
-    </button>
-  )
-}
+export { JoluSwitch as Switch } from "@/components/ui/JoluSwitch"
 
 /** 160×34 的下拉按钮（「上次访问的页面」「5 分钟」等） */
 export function SelectButton({ value, options, onChange, label, disabled, className, triggerLabel }: {
