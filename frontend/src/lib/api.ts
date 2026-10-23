@@ -87,6 +87,8 @@ export interface ConnectionDto {
   model: string | null
   effort: string | null
   context_1m: boolean | null
+  /** 自定义供应商的接口协议；其他平台为 null */
+  protocol: "openai" | "anthropic" | null
 }
 
 export interface FetchResult {
@@ -453,10 +455,15 @@ export const api = {
     model?: string | null
     effort?: string | null
     context_1m?: boolean | null
+    /** 自定义供应商必填：openai / anthropic */
+    protocol?: "openai" | "anthropic" | null
   }) => invoke<string>("add_connection", { input }),
-  /** 「获取模型」：用用户填写的地址与 Key 拉取网关模型列表（画布 18）。Tauri 参数走 camelCase */
-  fetchRemoteModels: (platform: string, base_url: string, secret: string) =>
-    invoke<string[]>("fetch_remote_models", { platform, baseUrl: base_url, secret }),
+  /** 「获取模型」：用用户填写的地址与 Key 拉取网关模型列表（画布 18）。Tauri 参数走 camelCase；protocol 只对自定义供应商有意义 */
+  fetchRemoteModels: (platform: string, base_url: string, secret: string, protocol: "openai" | "anthropic" | null = null) =>
+    invoke<string[]>("fetch_remote_models", { platform, baseUrl: base_url, secret, protocol }),
+  /** 「验证模型」：自定义供应商手填模型 ID 时发送一次最小请求，可能产生少量 API 用量，须用户确认后调用 */
+  verifyCustomModel: (base_url: string, secret: string, protocol: "openai" | "anthropic", model: string) =>
+    invoke<void>("verify_custom_model", { baseUrl: base_url, secret, protocol, model }),
   setConnectionPaused: (id: string, paused: boolean) => invoke<void>("set_connection_paused", { id, paused }),
   /** 启用连接：把凭证与地址写入对应 CLI 的配置文件（cc-switch 式切换），返回说明文案 */
   enableConnection: (id: string) => invoke<string>("enable_connection", { id }),

@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { AlertTriangle, Check, ChevronDown, LoaderCircle, Pencil, Plus, RefreshCw, Search, Ticket, Trash2, X } from "lucide-react"
+import { AlertTriangle, Check, ChevronDown, CircleAlert, LoaderCircle, Pencil, Plus, RefreshCw, Search, Ticket, Trash2, X } from "lucide-react"
 import { api, isTauri, type QuotaWindowDto } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { PROVIDERS, providerEntry, validateConnectionName } from "@/lib/providerCatalog"
+import { PROVIDERS, editSaveState, fallsBackToManualModel, modelFetchErrorText, protocolLabel, providerEntry, requestGate, canStartVerify, modelBusyAfter, validateConnectionName, type ModelBusy } from "@/lib/providerCatalog"
 import { filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle } from "@/lib/accountDisplay"
 import { remainingPercent } from "@/lib/quota"
 import { useConnections } from "@/hooks/useConnections"
@@ -13,6 +13,7 @@ import { useBalance, useQuota, type BalanceResult, type QuotaResult } from "@/ho
 import { SelectField } from "@/components/ui/SelectField"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { JoluButton } from "@/components/ui/JoluButton"
+import { ModelPicker } from "@/components/providers/ConnectDialog"
 import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
 import type { Connection, PlatformId } from "@/types"
@@ -148,10 +149,16 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
           account={editing}
           others={accounts.filter((a) => a.id !== editing.id)}
           onClose={() => setEditing(null)}
-          onSave={async (name, secret) => {
-            if (name !== editing.baseName) await conn.rename(editing.id, name)
-            if (secret) await conn.replaceApiKey(editing.id, secret)
-            toast.success(`已保存 ${name}`, secret ? "密钥已更换并通过验证" : undefined)
+          onSave={async (name, secret, model) => {
+            if (secret && model) {
+              // 自定义供应商更换密钥：密钥与重新获取 / 验证过的模型一起保存（画板 27）
+              await api.updateConnection({ id: editing.id, name, base_url: editing.baseUrl, secret, model, effort: editing.effort, context_1m: editing.context1m })
+              await conn.reload()
+            } else {
+              if (name !== editing.baseName) await conn.rename(editing.id, name)
+              if (secret) await conn.replaceApiKey(editing.id, secret)
+            }
+            toast.success(`已保存 ${name}`, secret ? (model ? "密钥与默认模型已更新" : "密钥已更换并通过验证") : undefined)
             setEditing(null)
           }}
         />
@@ -256,8 +263,10 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
   // 两个查询都在卡片层发起：刷新按钮刷新的就是卡片正在显示的数据（画板 23）
   const zcodeLocal = account.platformId === "zcode" && account.kind === "auth"
   const quota = useQuota(account.kind === "auth" && !paused && !zcodeLocal ? account.id : null, zcodeLocal && !paused ? "zcode" : false)
-  const balance = useBalance(account.kind === "api" && account.baseUrl && !paused ? account.id : null)
-  const refresh = account.kind === "api" ? (account.baseUrl ? balance : null) : quota
+  // 自定义供应商不查余额（D-11），不发起余额查询，也不显示刷新按钮
+  const custom = account.platformId === "custom"
+  const balance = useBalance(account.kind === "api" && account.baseUrl && !paused && !custom ? account.id : null)
+  const refresh = account.kind === "api" ? (account.baseUrl && !custom ? balance : null) : quota
   return (
     <article className={cn("flex min-w-0 flex-col gap-3 rounded-xl border bg-jolu-bg p-[18px]", current ? "border-jolu-accent" : "border-jolu-border")}>
       <div className="flex min-h-[34px] items-center gap-2.5">
@@ -265,7 +274,7 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="truncate text-sm font-semibold text-jolu-text" title={account.baseName}>{account.baseName}</span>
           <span className="truncate text-[11px] text-jolu-muted">
-            {account.kind === "api" ? `${account.baseUrl ? "自定义 API" : "官方 API"} · 用于 ${entry.name}` : `${entry.name} 订阅账号`}
+            {custom ? `${protocolLabel(account.protocol)} · ${entry.name}` : account.kind === "api" ? `${account.baseUrl ? "自定义 API" : "官方 API"} · 用于 ${entry.name}` : `${entry.name} 订阅账号`}
           </span>
         </div>
         {current && <Badge tone="on">当前使用</Badge>}
@@ -366,7 +375,7 @@ function ApiMetrics({ account, balance }: { account: Connection; balance: Balanc
       <div className="flex flex-col gap-1 rounded-lg bg-jolu-selected px-3 py-2.5">
         <div className="flex items-center justify-between text-[11px]">
           <span className="text-jolu-on">可用余额</span>
-          <span className="text-[10px] text-jolu-muted">{state?.state === "ok" ? (balance.stale ? "刷新失败 · 显示上次金额" : "供应商返回") : ""}</span>
+          <span className="text-[10px] text-jolu-muted">{account.platformId === "custom" ? "不支持查询" : state?.state === "ok" ? (balance.stale ? "刷新失败 · 显示上次金额" : "供应商返回") : ""}</span>
         </div>
         {state?.state === "ok" ? (
           <div className="flex items-baseline gap-2">
@@ -377,7 +386,9 @@ function ApiMetrics({ account, balance }: { account: Connection; balance: Balanc
           <div className="flex flex-col gap-0.5">
             <span className="text-[26px] font-semibold text-jolu-muted">—</span>
             <span className="text-[11px] text-jolu-muted">
-              {!account.baseUrl ? "官方直连不提供余额查询，不显示为 0。"
+              {/* 自定义供应商不查余额（画板 29A 状态 B，同画板 23「余额状态 · 不支持查询」） */}
+              {account.platformId === "custom" ? "此服务未提供可用的余额查询方式，不显示为 0。"
+                : !account.baseUrl ? "官方直连不提供余额查询，不显示为 0。"
                 : balance.loading ? "正在获取余额…"
                 : state ? `此服务未提供可用的余额查询：${state.reason}` : "还没有余额数据。查询成功后显示金额和币种。"}
             </span>
@@ -559,20 +570,30 @@ function RemoveDialog({ account, current, alternatives, islandUsers, onClose, on
   )
 }
 
-/** 编辑已保存的连接（画板 27）：只改名称无需重新验证；密钥留空不覆盖，更换时由后端验证 */
+/**
+ * 编辑已保存的连接（画板 27）：留空不覆盖已保存密钥；更换后重新获取模型；仅改名称无需重新验证。
+ * 其他平台更换密钥由后端验证；自定义供应商的后端只看「有模型」（D-11），所以更换密钥后必须用新密钥
+ * 重新获取模型，或在模型接口不可用时手填模型 ID 并「验证模型」，才能保存（editSaveState）。
+ */
 function EditDialog({ account, others, onClose, onSave }: {
   account: Connection
   others: Connection[]
   onClose: () => void
-  onSave: (name: string, secret: string | null) => Promise<void>
+  onSave: (name: string, secret: string | null, model: string | null) => Promise<void>
 }) {
   const entry = providerEntry(account.platformId)
   const [name, setName] = useState(account.baseName)
   const [replacing, setReplacing] = useState(false)
   const [secret, setSecret] = useState("")
+  const [model, setModel] = useState(account.model ?? "")
+  const [modelReady, setModelReady] = useState(false)
   const nameError = validateConnectionName(name, others, account.platformId, account.kind)
-  const changed = name.trim() !== account.baseName || (replacing && secret.trim() !== "")
-  const confirm = useConfirm(() => onSave(name.trim(), replacing && secret.trim() ? secret.trim() : null))
+  const newSecret = replacing ? secret.trim() : ""
+  const save = editSaveState({
+    platformId: account.platformId, kind: account.kind, nameChanged: name.trim() !== account.baseName,
+    nameValid: !nameError, newSecret, model, modelReady,
+  })
+  const confirm = useConfirm(() => onSave(name.trim(), newSecret || null, save.needsModel ? model.trim() : null))
   return (
     <ConfirmShell
       title="编辑已保存的连接"
@@ -581,7 +602,7 @@ function EditDialog({ account, others, onClose, onSave }: {
       busy={confirm.busy}
       footer={<>
         <JoluButton variant="outline" disabled={confirm.busy} onClick={onClose}>取消</JoluButton>
-        <JoluButton variant="primary" disabled={confirm.busy || !changed || Boolean(nameError)} onClick={() => void confirm.run()}>
+        <JoluButton variant="primary" disabled={confirm.busy || !save.canSave} onClick={() => void confirm.run()}>
           {confirm.busy && <LoaderCircle aria-hidden className="animate-spin" />}
           保存
         </JoluButton>
@@ -596,18 +617,164 @@ function EditDialog({ account, others, onClose, onSave }: {
         <div className="flex flex-col gap-[7px]">
           <span className="text-xs font-medium text-jolu-text">API Key</span>
           {replacing ? (
-            <input type="password" value={secret} onChange={(event) => setSecret(event.target.value)} placeholder="粘贴新的 API Key" spellCheck={false} autoComplete="off" className="h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
+            <input type="password" value={secret} onChange={(event) => { setSecret(event.target.value); setModelReady(false) }} placeholder="粘贴新的 API Key" spellCheck={false} autoComplete="off" className="h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
           ) : (
             <div className="flex h-10 items-center justify-between rounded-lg border border-jolu-border bg-jolu-side px-3 text-[13px] text-jolu-muted">
               <span>已保存 · {account.masked || "••••"}</span>
               <JoluButton size="sm" variant="neutral" className="h-7" onClick={() => setReplacing(true)}>更换密钥</JoluButton>
             </div>
           )}
-          <span className="text-[11px] text-jolu-muted">留空不覆盖已保存密钥；仅改名称无需重新验证。</span>
+          <span className="text-[11px] text-jolu-muted">{save.needsModel || account.platformId === "custom" ? "留空不覆盖已保存密钥；更换后重新获取模型。仅改名称无需重新验证。" : "留空不覆盖已保存密钥；仅改名称无需重新验证。"}</span>
         </div>
       )}
+      {save.needsModel && account.baseUrl && (
+        <CustomModelSection
+          // 密钥变化后旧的获取 / 验证结果作废：用 key 重置整个区域
+          key={newSecret}
+          baseUrl={account.baseUrl}
+          secret={newSecret}
+          protocol={account.protocol ?? "openai"}
+          model={model}
+          onModel={(next, ready) => { setModel(next); setModelReady(ready) }}
+        />
+      )}
+      {save.reason && <p className="text-[11px] text-jolu-muted">{save.reason}</p>}
       {confirm.error && <p role="alert" className="text-xs text-jolu-danger">{confirm.error}</p>}
     </ConfirmShell>
+  )
+}
+
+/**
+ * 自定义供应商更换密钥后的模型区（画板 27「地址或密钥已变更」「接口不支持模型列表」）：
+ * 用新密钥重新获取模型并选择；模型接口不可用时手填模型 ID，确认后「验证模型」（可能产生少量 API 用量）。
+ */
+function CustomModelSection({ baseUrl, secret, protocol, model, onModel }: {
+  baseUrl: string
+  secret: string
+  protocol: "openai" | "anthropic"
+  model: string
+  onModel: (model: string, ready: boolean) => void
+}) {
+  const [models, setModels] = useState<string[]>([])
+  const [fetchError, setFetchError] = useState<string | null>(null)
+  const [manual, setManual] = useState(false)
+  const [askVerify, setAskVerify] = useState(false)
+  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; text: string } | null>(null)
+  // 获取与验证共用一个闸门：Key 变化会让本组件以新 key 重新挂载，卸载时作废进行中的请求，
+  // 旧 Key 的获取 / 验证结果回来后不会把新 Key 标记为已验证。
+  // 忙碌状态只有一个（modelBusyAfter）：新请求开始即替换，过期请求结束不改状态，不会残留「获取中」
+  const gate = useRef(requestGate()).current
+  const [busy, setBusy] = useState<ModelBusy>("idle")
+  const fetching = busy === "fetching"
+  const verifying = busy === "verifying"
+  const start = (kind: "fetching" | "verifying") => setBusy((b) => modelBusyAfter(b, { type: "start", kind }))
+  const finish = (id: number) => {
+    // 请求结束这一刻判断是否仍是最新请求，再交给状态更新
+    const current = gate.isCurrent(id)
+    setBusy((b) => modelBusyAfter(b, { type: "end", current }))
+  }
+
+  useEffect(() => () => gate.invalidate(), [gate])
+
+  const fetchModels = async () => {
+    const id = gate.begin()
+    start("fetching")
+    setFetchError(null)
+    setVerifyResult(null)
+    try {
+      const list = await api.fetchRemoteModels("custom", baseUrl, secret, protocol)
+      if (!gate.isCurrent(id)) return
+      setModels(list)
+      setManual(false)
+      // 新列表包含原默认模型时保留选择，否则需要重新选择
+      onModel(list.includes(model) ? model : "", list.includes(model))
+    } catch (reason) {
+      if (!gate.isCurrent(id)) return
+      setFetchError(String(reason))
+      if (fallsBackToManualModel(String(reason))) { setManual(true); onModel(model, false) }
+    } finally {
+      finish(id)
+    }
+  }
+
+  const verify = async () => {
+    if (!canStartVerify(busy)) return
+    const id = gate.begin()
+    const target = model.trim()
+    setAskVerify(false)
+    start("verifying")
+    setVerifyResult(null)
+    try {
+      await api.verifyCustomModel(baseUrl, secret, protocol, target)
+      if (!gate.isCurrent(id)) return
+      setVerifyResult({ ok: true, text: "验证通过：服务已接受该模型的请求。" })
+      onModel(target, true)
+    } catch (reason) {
+      if (!gate.isCurrent(id)) return
+      setVerifyResult({ ok: false, text: String(reason) })
+      onModel(target, false)
+    } finally {
+      finish(id)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {manual && fetchError && (
+        <div role="alert" className="flex items-center gap-2.5 rounded-lg bg-jolu-danger-soft px-2.5 py-2 text-[11px] text-jolu-danger">
+          <CircleAlert aria-hidden className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 break-all">{modelFetchErrorText(fetchError)}</span>
+        </div>
+      )}
+      <span className="text-xs font-medium text-jolu-text">{manual ? "模型 ID *" : "默认模型 *"}</span>
+      <div className="flex gap-2">
+        {manual ? (
+          <input
+            value={model}
+            // 验证期间锁定模型 ID，避免验证结果对应的不是当前填写的模型
+            disabled={verifying}
+            onChange={(event) => { onModel(event.target.value, false); setVerifyResult(null) }}
+            placeholder="输入服务支持的完整模型 ID"
+            aria-label="模型 ID"
+            spellCheck={false}
+            autoComplete="off"
+            className="h-10 min-w-0 flex-1 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent disabled:bg-jolu-side disabled:text-jolu-muted"
+          />
+        ) : (
+          <ModelPicker models={models} value={models.length ? model : ""} onChange={(next) => onModel(next, true)} />
+        )}
+        {manual && (
+          <JoluButton variant="outline" className="h-10 px-3" disabled={!model.trim() || !canStartVerify(busy) || !isTauri} onClick={() => setAskVerify(true)}>
+            {verifying && <LoaderCircle aria-hidden className="animate-spin" />}
+            验证模型
+          </JoluButton>
+        )}
+        <JoluButton variant="soft" className="h-10 w-[116px] px-3" disabled={fetching || !secret || !isTauri} onClick={() => void fetchModels()}>
+          {fetching ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}
+          {models.length ? "重新获取" : "获取模型"}
+        </JoluButton>
+      </div>
+      {askVerify && (
+        <div role="alertdialog" aria-label="验证模型" className="flex items-center gap-3 rounded-[10px] border border-jolu-border bg-jolu-side px-4 py-2.5 text-xs text-jolu-text">
+          <span className="min-w-0 flex-1">验证会向服务发送一次最小请求，可能产生少量 API 用量。</span>
+          <JoluButton size="sm" variant="outline" onClick={() => setAskVerify(false)}>取消</JoluButton>
+          <JoluButton size="sm" variant="soft" disabled={!canStartVerify(busy)} onClick={() => void verify()}>继续验证</JoluButton>
+        </div>
+      )}
+      {fetching ? (
+        <span role="status" className="flex items-center gap-1.5 text-[11px] text-jolu-muted">
+          <LoaderCircle aria-hidden className="size-3 animate-spin" />正在获取可用模型…
+        </span>
+      ) : verifyResult ? (
+        <span role={verifyResult.ok ? "status" : "alert"} className={cn("text-[11px]", verifyResult.ok ? "text-jolu-on" : "text-jolu-danger")}>{verifyResult.text}</span>
+      ) : fetchError && !manual ? (
+        <span role="alert" className="text-[11px] text-jolu-danger">{modelFetchErrorText(fetchError)}</span>
+      ) : (
+        <span className="text-[11px] text-jolu-muted">
+          {manual ? "模型接口不支持枚举时才展示。验证可能产生少量 API 用量，先提示再执行。" : "旧模型列表标记失效；重新获取后再选择默认模型。"}
+        </span>
+      )}
+    </div>
   )
 }
 

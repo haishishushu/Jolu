@@ -36,6 +36,7 @@ function toConnection(d: ConnectionDto): Connection {
     model: d.model,
     effort: d.effort,
     context1m: d.context_1m,
+    protocol: d.protocol ?? null,
   }
 }
 
