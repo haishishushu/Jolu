@@ -103,10 +103,12 @@ function ConnectGrid({ counts, loading, error, onConnect, onRetry }: {
         </div>
       )}
       <div className="grid grid-cols-4 gap-4">
-        <CustomProviderCard />
-        {PROVIDERS.map((entry) => (
-          <ProviderCard key={entry.id} entry={entry} count={loading || error ? null : counts.get(entry.id) ?? 0} onConnect={() => onConnect(entry.id)} />
-        ))}
+        {PROVIDERS.map((entry) => {
+          const count = loading || error ? null : counts.get(entry.id) ?? 0
+          return entry.id === "custom"
+            ? <CustomProviderCard key={entry.id} count={count} onConnect={() => onConnect(entry.id)} />
+            : <ProviderCard key={entry.id} entry={entry} count={count} onConnect={() => onConnect(entry.id)} />
+        })}
       </div>
       <p className="flex items-center gap-2.5 rounded-[10px] bg-jolu-side p-4 text-xs text-jolu-muted">
         <Info aria-hidden className="size-[17px] shrink-0" />
@@ -159,8 +161,11 @@ function ProviderCard({ entry, count, onConnect }: { entry: ProviderEntry; count
   )
 }
 
-/** 自定义供应商：Jolu.pen 只有卡片，没有连接弹窗设计，入口暂标待接入 */
-function CustomProviderCard() {
+/**
+ * 自定义供应商卡片（画板 05 第一张）：徽标「自定义」、按钮「添加自定义」，点击打开 API Key 连接弹窗（D-11）。
+ * 已有连接时徽标改显示账号数量（待确认：画板 05 只画了未连接时的「自定义」徽标）。
+ */
+function CustomProviderCard({ count, onConnect }: { count: number | null; onConnect: () => void }) {
   return (
     <Card
       logo={
@@ -169,19 +174,15 @@ function CustomProviderCard() {
           <Code aria-hidden className="size-3" />
         </span>
       }
-      badge="自定义"
+      badge={count ? connectionBadge(count) : "自定义"}
       badgeTone="on"
       title="自定义供应商"
       desc="名称 / Base URL / API Key"
       action={
-        <Tip label="自定义供应商待接入（连接弹窗待补设计稿）">
-          <span className="flex">
-            <JoluButton variant="soft" className="w-full" disabled>
-              <Plus aria-hidden />
-              添加自定义
-            </JoluButton>
-          </span>
-        </Tip>
+        <JoluButton variant="soft" className="w-full" onClick={onConnect}>
+          <Plus aria-hidden />
+          添加自定义
+        </JoluButton>
       }
     />
   )

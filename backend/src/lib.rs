@@ -1159,7 +1159,8 @@ async fn connection_quota(app: tauri::AppHandle, db: State<'_, Db>, id: String, 
     }).await? else {
         return Ok(quota::QuotaState::Failed { reason: "连接不存在".into() });
     };
-    if platforms::native(&c.platform) {
+    // 自定义供应商（任务 3.4）不查额度，与本机来源平台一样返回「不支持」
+    if platforms::native(&c.platform) || c.platform == "custom" {
         if c.platform == "grok" && c.kind == "auth" {
             return tauri::async_runtime::spawn_blocking(move || cached_query(&QUOTA_CACHE,id,force,quota_cache_outcome,grok_quota::local_grok_quota)).await.map_err(|e|e.to_string());
         }
@@ -1271,6 +1272,9 @@ async fn connection_api_usage(app: tauri::AppHandle, db: State<'_, Db>, id: Stri
             reason: "Auth 连接使用订阅额度与本机会话统计，不查询组织 API 用量".into(),
         });
     }
+    if c.platform == "custom" {
+        return Ok(quota::ApiUsageState::Unsupported { reason: platforms::limitation(&c.platform) });
+    }
     if c.base_url.as_deref().is_some_and(|base| !base.is_empty()) {
         return Ok(quota::ApiUsageState::Unsupported {
             reason: "自建网关继续使用网关额度与余额接口".into(),
@@ -1321,7 +1325,8 @@ async fn connection_balance(app: tauri::AppHandle, db: State<'_, Db>, id: String
     }).await? else {
         return Ok(quota::BalanceState::Failed { reason: "连接不存在".into() });
     };
-    if platforms::native(&c.platform) {
+    // 自定义供应商（任务 3.4）不查余额：显示「不支持查询」
+    if platforms::native(&c.platform) || c.platform == "custom" {
         return Ok(quota::BalanceState::Unsupported {reason:platforms::limitation(&c.platform)});
     }
     let Some(secret) = c.secret.filter(|s| !s.trim().is_empty()) else {
@@ -1497,12 +1502,26 @@ async fn list_connections(db: State<'_, DbRead>) -> Result<Vec<connections::Conn
 /// 「获取模型」（画布 18）：用用户填写的地址与 Key 拉取网关模型列表。
 /// Key 只在本命令内使用，不落库、不打印。
 #[tauri::command]
-async fn fetch_remote_models(platform: String, base_url: String, secret: String) -> Result<Vec<String>, String> {
-    // Gemini / Grok 走各自官方 OpenAI 兼容的 /models（Bearer 鉴权）
-    if !matches!(platform.as_str(), "claude" | "codex" | "gemini" | "grok") {
+async fn fetch_remote_models(platform: String, base_url: String, secret: String, protocol: Option<String>) -> Result<Vec<String>, String> {
+    // Gemini / Grok 走各自官方 OpenAI 兼容的 /models（Bearer 鉴权）；自定义供应商按所选协议鉴权
+    if !matches!(platform.as_str(), "claude" | "codex" | "gemini" | "grok" | "custom") {
         return Err("不支持的平台".into());
     }
-    tauri::async_runtime::spawn_blocking(move || connections::fetch_models(&platform, &base_url, &secret))
+    // 协议只对自定义供应商有效，其他平台忽略传入值（任务 4.3 再按需放开）
+    let protocol = if platform == "custom" { protocol } else { None };
+    tauri::async_runtime::spawn_blocking(move || connections::fetch_models(&platform, protocol.as_deref(), &base_url, &secret))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 「验证模型」（任务 3.4，画板 27）：自定义供应商的模型接口不可用、手填模型 ID 时，由用户确认后发送一次最小请求。
+/// 可能产生少量 API 用量；Key 只在本命令内使用，不落库、不打印。
+#[tauri::command]
+async fn verify_custom_model(base_url: String, secret: String, protocol: String, model: String) -> Result<(), String> {
+    if !matches!(protocol.as_str(), "openai" | "anthropic") {
+        return Err("协议只能是 OpenAI 兼容或 Anthropic 兼容".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || connections::verify_model(&protocol, &base_url, &secret, &model))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1603,12 +1622,17 @@ async fn update_connection(
             .filter(|value| !value.is_empty());
         let base_changed = final_base != current.base_url;
         let key_changed = new_secret.as_deref().is_some_and(|s| Some(s) != current.secret.as_deref());
+        // 自定义供应商换 Key / 地址须同时提供模型；可达性由前端获取或验证模型保证（任务 3.4）
+        if base_changed || key_changed {
+            connections::check_custom_key_change(&current.platform, model.as_deref())?;
+        }
         if base_changed || key_changed {
             let platform = current.platform.clone();
             let probe_secret = new_secret.clone().or_else(|| current.secret.clone()).ok_or("该连接没有保存凭证，请填写 API Key")?;
             let probe_base = final_base.clone();
+            let probe_model = model.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                quota::validate_connection(&platform, "api", &probe_secret, probe_base.as_deref())
+                quota::validate_connection(&platform, "api", &probe_secret, probe_base.as_deref(), probe_model.as_deref())
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -1656,8 +1680,9 @@ async fn add_connection(app: tauri::AppHandle, db: State<'_, Db>, input: connect
     let kind = input.kind.clone();
     let secret = input.secret.clone().ok_or("连接尚未准备好凭证")?;
     let base_url = input.base_url.clone();
+    let model = input.model.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        quota::validate_connection(&platform, &kind, &secret, base_url.as_deref())
+        quota::validate_connection(&platform, &kind, &secret, base_url.as_deref(), model.as_deref())
     }).await.map_err(|e| e.to_string())??;
     let id = with_database(db.0.clone(), move |conn| {
         connections::add(conn, input)
@@ -1693,7 +1718,7 @@ async fn set_connection_paused(app: tauri::AppHandle, db: State<'_, Db>, id: Str
         } else {
         let secret = current.secret.ok_or("该连接没有保存凭证，请在 CC Switch 中配置后重新读取")?;
         tauri::async_runtime::spawn_blocking(move || {
-            quota::validate_connection(&current.platform, &current.kind, &secret, current.base_url.as_deref())
+            quota::validate_connection(&current.platform, &current.kind, &secret, current.base_url.as_deref(), current.model.as_deref())
         }).await.map_err(|e| e.to_string())??;
         }
     }
@@ -1753,11 +1778,14 @@ async fn replace_api_key(
     }).await? else { return Err("连接不存在".into()); };
     if current.paused { return Err("连接已断开，请先重新连接".into()); }
     if current.kind != "api" { return Err("该连接不是 API Key 连接".into()); }
+    // 自定义供应商只能通过「编辑」带上重新获取或验证过的模型更换 Key（update_connection，任务 3.4）
+    connections::check_custom_key_change(&current.platform, None)?;
     let platform = current.platform;
     let base_url = current.base_url;
+    let model = current.model;
     let probe_secret = secret.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        quota::validate_connection(&platform, "api", &probe_secret, base_url.as_deref())
+        quota::validate_connection(&platform, "api", &probe_secret, base_url.as_deref(), model.as_deref())
     }).await.map_err(|e| e.to_string())??;
     let replace_id = id.clone();
     with_database(db.0.clone(), move |conn| connections::replace_api_key(conn, &replace_id, &secret)).await?;
@@ -2700,7 +2728,10 @@ pub fn run() {
             fetch_remote_models,
             updater::check_app_update_available,
             updater::download_app_update,
-            updater::install_downloaded_update_and_restart
+            updater::install_downloaded_update_and_restart,
+            // 任务 3.4 开始
+            verify_custom_model,
+            // 任务 3.4 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();

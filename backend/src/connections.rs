@@ -18,16 +18,16 @@ mod manual_models_tests {
 
     #[test]
     fn models_endpoint_normalizes_base_and_rejects_non_http() {
-        assert_eq!(models_endpoint("https://gw.test", None).unwrap(), "https://gw.test/v1/models");
-        assert_eq!(models_endpoint("https://gw.test/", None).unwrap(), "https://gw.test/v1/models");
-        assert_eq!(models_endpoint("https://gw.test/v1", None).unwrap(), "https://gw.test/v1/models");
-        assert_eq!(models_endpoint("https://gw.test/v1/", Some("claude-sonnet-4-5")).unwrap(), "https://gw.test/v1/models/claude-sonnet-4-5");
+        assert_eq!(models_endpoint("https://gw.test", "openai", None).unwrap(), "https://gw.test/v1/models");
+        assert_eq!(models_endpoint("https://gw.test/", "openai", None).unwrap(), "https://gw.test/v1/models");
+        assert_eq!(models_endpoint("https://gw.test/v1", "openai", None).unwrap(), "https://gw.test/v1/models");
+        assert_eq!(models_endpoint("https://gw.test/v1/", "openai", Some("claude-sonnet-4-5")).unwrap(), "https://gw.test/v1/models/claude-sonnet-4-5");
         assert_eq!(
-            models_endpoint("https://generativelanguage.googleapis.com/v1beta/openai/", None).unwrap(),
+            models_endpoint("https://generativelanguage.googleapis.com/v1beta/openai/", "openai", None).unwrap(),
             "https://generativelanguage.googleapis.com/v1beta/openai/models"
         );
-        assert!(models_endpoint("ftp://gw.test", None).is_err());
-        assert!(models_endpoint("not a url", None).is_err());
+        assert!(models_endpoint("ftp://gw.test", "openai", None).is_err());
+        assert!(models_endpoint("not a url", "openai", None).is_err());
     }
 }
 
@@ -48,7 +48,7 @@ mod gateway_tests {
     #[test]
     fn local_registration_is_deduplicated_and_does_not_enable_connections() {
         let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
-        let input = |key: &str| NewConnection { platform: "claude".into(), kind: "api".into(), name: "local".into(), secret: Some(key.into()), base_url: Some("https://example.test".into()), model: None, effort: None, context_1m: None };
+        let input = |key: &str| NewConnection { platform: "claude".into(), kind: "api".into(), name: "local".into(), secret: Some(key.into()), base_url: Some("https://example.test".into()), model: None, effort: None, context_1m: None, protocol: None };
         let (id, added) = register_local(&db, input("sk-first-1234")).unwrap();
         assert!(added);
         assert!(selectable_creds(&db, &id).is_err());
@@ -74,7 +74,7 @@ mod gateway_tests {
         let id = add(&db, NewConnection {
             platform: "claude".into(), kind: "api".into(), name: "pause test".into(),
             secret: Some("synthetic-pause-key".into()), base_url: None,
-            model: None, effort: None, context_1m: None,
+            model: None, effort: None, context_1m: None, protocol: None,
         }).unwrap();
         db.execute("UPDATE connections SET status = 'paused' WHERE id = ?1", [&id]).unwrap();
         touch_sync(&db, &id).unwrap();
@@ -96,7 +96,7 @@ mod gateway_tests {
         let id = add(&db, NewConnection {
             platform: "codex".into(), kind: "api".into(), name: "saved connection".into(),
             secret: Some("synthetic-preserved-key".into()), base_url: Some("https://example.test".into()),
-            model: None, effort: None, context_1m: None,
+            model: None, effort: None, context_1m: None, protocol: None,
         }).unwrap();
         set_paused(&db, &id, true).unwrap();
         assert!(query_creds(&db, &id).is_err());
@@ -116,7 +116,7 @@ mod gateway_tests {
     fn official_native_keys_require_explicit_credentials_and_supported_platform() {
         let input=|platform: &str, kind: &str, secret: Option<&str>| NewConnection {
             platform:platform.into(), kind:kind.into(), name:"official test".into(),
-            secret:secret.map(str::to_string),base_url:None,model:None,effort:None,context_1m:None,
+            secret:secret.map(str::to_string),base_url:None,model:None,effort:None,context_1m:None,protocol:None,
         };
         for platform in ["gemini","grok"] {
             assert!(prepare_new(input(platform,"api",Some("synthetic-key"))).is_ok());
@@ -131,7 +131,7 @@ mod gateway_tests {
         let connection = |base: &str| NewConnection {
             platform: "claude".into(), kind: "api".into(), name: "HTTP gateway test".into(),
             secret: Some("synthetic-test-key".into()), base_url: Some(base.into()),
-            model: None, effort: None, context_1m: None,
+            model: None, effort: None, context_1m: None, protocol: None,
         };
         for base in ["http://api.example.com", "http://192.168.1.2:8080", "http://localhost:8000", "https://api.example.com", "HTTP://api.example.com"] {
             assert!(prepare_new(connection(base)).is_ok(), "should accept {base}");
@@ -160,6 +160,7 @@ mod rename_tests {
             model: None,
             effort: None,
             context_1m: None,
+            protocol: None,
         }
     }
 
@@ -201,6 +202,7 @@ mod rename_tests {
             model: None,
             effort: None,
             context_1m: None,
+            protocol: None,
         };
         // 用户填了名称：覆盖自动生成名，并去首尾空白
         let renamed = with_custom_name(vec![input("Claude API Key")], Some("  我的连接  ".into())).unwrap();
@@ -234,6 +236,7 @@ mod local_sync_tests {
             model: None,
             effort: None,
             context_1m: None,
+            protocol: None,
         }
     }
 
@@ -323,6 +326,229 @@ mod local_sync_tests {
     }
 }
 
+// 任务 3.4 开始：自定义供应商与协议鉴权
+#[cfg(test)]
+mod custom_provider_tests {
+    use super::*;
+
+    fn custom(protocol: Option<&str>, base: Option<&str>, secret: Option<&str>) -> NewConnection {
+        NewConnection {
+            platform: "custom".into(),
+            kind: "api".into(),
+            name: "公司网关".into(),
+            secret: secret.map(Into::into),
+            base_url: base.map(Into::into),
+            model: Some("gpt-4.1-mini".into()),
+            effort: None,
+            context_1m: None,
+            protocol: protocol.map(Into::into),
+        }
+    }
+
+    fn headers(protocol: &str) -> reqwest::header::HeaderMap {
+        let client = reqwest::blocking::Client::new();
+        apply_auth(client.get("https://gw.test/v1/models"), protocol, "synthetic-key").build().unwrap().headers().clone()
+    }
+
+    #[test]
+    fn anthropic_protocol_headers() {
+        let h = headers("anthropic");
+        assert_eq!(h.get("x-api-key").unwrap(), "synthetic-key");
+        assert!(h.contains_key("anthropic-version"));
+        assert!(!h.contains_key("authorization"));
+        let h = headers("openai");
+        assert_eq!(h.get("authorization").unwrap(), "Bearer synthetic-key");
+        assert!(!h.contains_key("x-api-key"));
+    }
+
+    /// 本机一次性 HTTP 桩：按给定状态与响应体回复，并把收到的请求原文（含请求体）交回给测试检查。
+    fn serve_once(status: &'static str, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        serve_once_with(status, body, String::new())
+    }
+
+    /// 返回 3xx 与 Location 的桩，用于确认客户端不跟随重定向
+    fn serve_once_with_location(status: &'static str, location: String) -> (String, std::thread::JoinHandle<String>) {
+        serve_once_with(status, "{}", format!("Location: {location}\r\n"))
+    }
+
+    fn serve_once_with(status: &'static str, body: &'static str, extra_headers: String) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            let header_end = loop {
+                if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") { break at + 4; }
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 { break request.len(); }
+                request.extend_from_slice(&buf[..n]);
+            };
+            let head = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+            let length = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+            while request.len() < header_end + length {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 { break; }
+                request.extend_from_slice(&buf[..n]);
+            }
+            let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            stream.write_all(reply.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request).to_lowercase()
+        });
+        (base, handle)
+    }
+
+    fn serve_models_once() -> (String, std::thread::JoinHandle<String>) {
+        serve_once("200 OK", r#"{"data":[{"id":"model-a"},{"id":"model-b"},{"id":"model-a"}]}"#)
+    }
+
+    #[test]
+    fn verify_model_sends_one_minimal_request_per_protocol() {
+        let (base, server) = serve_once("200 OK", r#"{"id":"msg_1"}"#);
+        assert_eq!(verify_model("anthropic", &base, "synthetic-key", " claude-x "), Ok(()));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("post /v1/messages "), "{request}");
+        assert!(request.contains("x-api-key: synthetic-key") && !request.contains("authorization:"));
+        assert!(request.contains(r#""model":"claude-x""#) && request.contains(r#""max_tokens":1"#));
+
+        let (base, server) = serve_once("200 OK", r#"{"id":"chatcmpl-1"}"#);
+        assert_eq!(verify_model("openai", &format!("{base}/v1"), "synthetic-key", "gpt-x"), Ok(()));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("post /v1/chat/completions "), "{request}");
+        assert!(request.contains("authorization: bearer synthetic-key") && request.contains(r#""model":"gpt-x""#));
+    }
+
+    #[test]
+    fn verify_model_explains_rejections_without_echoing_the_key() {
+        let (base, server) = serve_once("401 Unauthorized", r#"{"error":{"message":"invalid api key"}}"#);
+        let err = verify_model("openai", &base, "synthetic-key", "gpt-x").unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("401") && err.contains("API Key") && !err.contains("synthetic-key"), "{err}");
+
+        let (base, server) = serve_once("404 Not Found", r#"{"error":{"message":"model not found"}}"#);
+        let err = verify_model("openai", &base, "synthetic-key", "gpt-x").unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("404") && err.contains("model not found"), "{err}");
+
+        assert!(verify_model("openai", "https://gw.test", "synthetic-key", "  ").is_err());
+    }
+
+    #[test]
+    fn versioned_openai_bases_are_not_given_another_v1() {
+        let models = |base: &str, protocol: &str| models_endpoint(base, protocol, None).unwrap();
+        // OpenAI 兼容：以 /v<数字> 结尾视为已带版本（智谱 /paas/v4、火山 /api/v3 等）
+        assert_eq!(models("https://open.example.cn/api/paas/v4", "openai"), "https://open.example.cn/api/paas/v4/models");
+        assert_eq!(models("https://open.example.cn/api/paas/v4/", "openai"), "https://open.example.cn/api/paas/v4/models");
+        assert_eq!(models("https://generativelanguage.googleapis.com/v1beta/openai", "openai"), "https://generativelanguage.googleapis.com/v1beta/openai/models");
+        assert_eq!(models("https://gw.test", "openai"), "https://gw.test/v1/models");
+        assert_eq!(models("https://gw.test/api/v3beta", "openai"), "https://gw.test/api/v3beta/v1/models");
+        assert_eq!(api_endpoint("https://ark.example.com/api/v3", "openai", "/chat/completions").unwrap(), "https://ark.example.com/api/v3/chat/completions");
+        // Anthropic 兼容保持原规则：只有 /v1（或 /openai）结尾不再补 /v1
+        assert_eq!(models("https://open.example.cn/api/anthropic", "anthropic"), "https://open.example.cn/api/anthropic/v1/models");
+        assert_eq!(models("https://gw.test/v1", "anthropic"), "https://gw.test/v1/models");
+        assert_eq!(models("https://gw.test/api/v4", "anthropic"), "https://gw.test/api/v4/v1/models");
+    }
+
+    #[test]
+    fn official_prefilled_bases_keep_their_models_endpoint() {
+        // providerCatalog.ts 的官方预填地址；协议与 fetch_models 一样由 auth_protocol 决定
+        let models = |platform: &str, base: &str| models_endpoint(base, auth_protocol(platform, None), None).unwrap();
+        assert_eq!(models("codex", "https://api.openai.com/v1"), "https://api.openai.com/v1/models");
+        assert_eq!(models("grok", "https://api.x.ai/v1"), "https://api.x.ai/v1/models");
+        assert_eq!(models("claude", "https://api.anthropic.com"), "https://api.anthropic.com/v1/models");
+    }
+
+    #[test]
+    fn redirects_are_refused_without_following_or_leaking_the_key() {
+        // 跳转目标：若客户端跟随重定向，这里会收到带 Key 的第二次请求
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let location = format!("http://{}/v1/models", target.local_addr().unwrap());
+        let (base, server) = serve_once_with_location("302 Found", location.clone());
+        let err = fetch_models("custom", Some("anthropic"), &base, "synthetic-key").unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("重定向") && err.contains("302") && err.contains("最终地址"), "{err}");
+        assert!(!err.contains(&location) && !err.contains("synthetic-key"), "{err}");
+
+        let (base, server) = serve_once_with_location("307 Temporary Redirect", location.clone());
+        let err = verify_model("openai", &base, "synthetic-key", "gpt-x").unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("重定向") && err.contains("307") && !err.contains(&location), "{err}");
+        assert!(matches!(target.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock), "不应向跳转目标发送请求");
+    }
+
+    #[test]
+    fn service_error_message_is_scrubbed_of_the_key() {
+        let (base, server) = serve_once("400 Bad Request", r#"{"error":{"message":"bad key synthetic-key for model"}}"#);
+        let err = verify_model("openai", &base, "synthetic-key", "gpt-x").unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("bad key **** for model") && !err.contains("synthetic-key"), "{err}");
+        // 连接失败的报错不带 URL（URL 里可能有 userinfo / query 凭证）；端口 9 在本机无人监听
+        let err = fetch_models("custom", Some("openai"), "http://user:pass@127.0.0.1:9/v1?key=secret-q", "synthetic-key").unwrap_err();
+        assert!(!err.contains("pass") && !err.contains("secret-q"), "{err}");
+        let err = verify_model("openai", "http://user:pass@127.0.0.1:9/v1?key=secret-q", "synthetic-key", "gpt-x").unwrap_err();
+        assert!(!err.contains("pass") && !err.contains("secret-q"), "{err}");
+    }
+
+    #[test]
+    fn custom_key_change_requires_a_new_model() {
+        assert!(check_custom_key_change("custom", None).is_err());
+        assert!(check_custom_key_change("custom", Some("  ")).is_err());
+        assert_eq!(check_custom_key_change("custom", Some("gpt-x")), Ok(()));
+        assert_eq!(check_custom_key_change("codex", None), Ok(()));
+    }
+
+    #[test]
+    fn fetch_models_sends_selected_protocol_headers_to_custom_service() {
+        let (base, server) = serve_models_once();
+        assert_eq!(fetch_models("custom", Some("anthropic"), &base, "synthetic-key").unwrap(), vec!["model-a", "model-b"]);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("get /v1/models "), "{request}");
+        assert!(request.contains("x-api-key: synthetic-key") && request.contains("anthropic-version:"));
+        assert!(!request.contains("authorization:"));
+
+        let (base, server) = serve_models_once();
+        assert_eq!(fetch_models("custom", Some("openai"), &format!("{base}/v1/"), "synthetic-key").unwrap().len(), 2);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("get /v1/models "), "{request}");
+        assert!(request.contains("authorization: bearer synthetic-key") && !request.contains("x-api-key"));
+    }
+
+    #[test]
+    fn auth_protocol_follows_platform_then_saved_protocol() {
+        assert_eq!(auth_protocol("claude", None), "anthropic");
+        assert_eq!(auth_protocol("codex", None), "openai");
+        assert_eq!(auth_protocol("custom", Some("anthropic")), "anthropic");
+        assert_eq!(auth_protocol("custom", Some("openai")), "openai");
+        assert_eq!(auth_protocol("custom", None), "openai");
+    }
+
+    #[test]
+    fn custom_connection_requires_protocol_base_and_explicit_key() {
+        assert!(prepare_new(custom(Some("openai"), Some("https://gw.test/v1/"), Some(" sk-custom-1234 "))).is_ok());
+        assert!(prepare_new(custom(None, Some("https://gw.test/v1"), Some("sk-custom-1234"))).is_err());
+        assert!(prepare_new(custom(Some("gemini"), Some("https://gw.test/v1"), Some("sk-custom-1234"))).is_err());
+        assert!(prepare_new(custom(Some("openai"), None, Some("sk-custom-1234"))).is_err());
+        assert!(prepare_new(custom(Some("openai"), Some("https://gw.test/v1"), None)).is_err());
+        assert!(prepare_new(NewConnection { kind: "auth".into(), ..custom(Some("openai"), Some("https://gw.test"), Some("sk-custom-1234")) }).is_err());
+    }
+
+    #[test]
+    fn custom_connection_saves_protocol_and_model() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let input = prepare_new(custom(Some("anthropic"), Some("https://gw.test/"), Some("sk-custom-1234"))).unwrap();
+        let id = add(&db, input).unwrap();
+        let dto = list(&db).unwrap().into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!((dto.platform.as_str(), dto.protocol.as_deref(), dto.base_url.as_deref()), ("custom", Some("anthropic"), Some("https://gw.test")));
+        assert_eq!(dto.model.as_deref(), Some("gpt-4.1-mini"));
+        // 恢复查询 / 更换 Key 的校验靠保存的模型（D-11）
+        assert_eq!(creds_of(&db, &id).unwrap().unwrap().model.as_deref(), Some("gpt-4.1-mini"));
+    }
+}
+// 任务 3.4 结束
+
 /// 返回给前端的连接。**不含** secret 字段——这是刻意的，不要加。
 #[derive(Debug, Serialize)]
 pub struct ConnectionDto {
@@ -344,6 +570,8 @@ pub struct ConnectionDto {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub context_1m: Option<bool>,
+    /// 自定义供应商的接口协议：openai / anthropic；其他平台为 None
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +590,9 @@ pub struct NewConnection {
     pub effort: Option<String>,
     #[serde(default)]
     pub context_1m: Option<bool>,
+    /// 接口协议：openai（Bearer）或 anthropic（x-api-key）；自定义供应商必填
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 /// 脱敏：保留可识别的前缀与末 4 位，中间固定 4 个星号。
@@ -414,13 +645,14 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
         model: r.get("model")?,
         effort: r.get("effort")?,
         context_1m: r.get("context_1m")?,
+        protocol: r.get("protocol")?,
     })
 }
 
 pub fn list(conn: &Sql) -> rusqlite::Result<Vec<ConnectionDto>> {
     let now = chrono::Local::now().timestamp_millis();
     let mut stmt = conn.prepare(
-        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m
+        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol
          FROM connections ORDER BY created_ms ASC",
     )?;
     let rows = stmt
@@ -443,6 +675,13 @@ pub fn prepare_new(mut c: NewConnection) -> Result<NewConnection, String> {
     if !crate::platforms::known(&c.platform) {
         return Err("不支持的平台标识".into());
     }
+    // 自定义供应商（D-11）：只接受用户显式填写的地址与 Key，不读取本机凭证
+    if c.platform == "custom" {
+        if c.kind != "api" { return Err("自定义供应商只支持 API Key 连接".into()); }
+        if c.secret.as_deref().map_or(true, |s| s.trim().is_empty()) { return Err("请填写 API Key".into()); }
+        if c.base_url.as_deref().map_or(true, |s| s.trim().is_empty()) { return Err("请填写 Base URL".into()); }
+    }
+    c.protocol = valid_protocol(&c.platform, c.protocol.take())?;
     if crate::platforms::native(&c.platform) && !(c.kind == "api" && crate::provider_key::supported(&c.platform)) { return Err("该平台请通过本机来源获取，不保存猜测的登录凭证".into()); }
     // 仅获取型平台（画布 18 后续）：凭证只能来自本机读取
     if crate::creds::is_fetch_only_platform(&c.platform) && c.kind != "auth" && !crate::provider_key::supported(&c.platform) {
@@ -482,6 +721,16 @@ pub fn prepare_new(mut c: NewConnection) -> Result<NewConnection, String> {
     Ok(c)
 }
 
+/// 协议只认 openai / anthropic；自定义供应商必须选择其一。
+fn valid_protocol(platform: &str, protocol: Option<String>) -> Result<Option<String>, String> {
+    match protocol.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p @ ("openai" | "anthropic")) => Ok(Some(p.to_string())),
+        Some(_) => Err("协议只能是 OpenAI 兼容或 Anthropic 兼容".into()),
+        None if platform == "custom" => Err("请选择接口协议".into()),
+        None => Ok(None),
+    }
+}
+
 fn normalized_base(platform: &str, kind: &str, base: Option<String>) -> Option<String> {
     if kind == "auth" { return None; }
     base.filter(|value| {
@@ -512,9 +761,9 @@ pub fn add(conn: &Sql, c: NewConnection) -> Result<String, String> {
 
     conn.execute(
         "INSERT INTO connections
-           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12)",
-        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now],
+           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13)",
+        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol],
     ).map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -522,22 +771,22 @@ pub fn add(conn: &Sql, c: NewConnection) -> Result<String, String> {
 /// 移除连接：只删凭证与配置，**历史统计保留**（§6.3）。
 /// requests 表按 platform 存储、不关联 connection_id，因此这里天然不会碰到统计数据。
 /// 「获取模型」：从网关拉取可用模型列表。
-/// Claude 走 x-api-key + anthropic-version，OpenAI 兼容网关走 Bearer；
+/// Claude 与 Anthropic 兼容的自定义供应商走 x-api-key + anthropic-version，OpenAI 兼容网关走 Bearer；
 /// 两家的 /v1/models 响应同为 {"data": [{"id": ...}]}，取 id 即可。
-pub fn fetch_models(platform: &str, base_url: &str, secret: &str) -> Result<Vec<String>, String> {
-    let url = models_endpoint(base_url, None)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = apply_auth(client.get(&url), platform, secret)
+pub fn fetch_models(platform: &str, protocol: Option<&str>, base_url: &str, secret: &str) -> Result<Vec<String>, String> {
+    let protocol = auth_protocol(platform, protocol);
+    let url = models_endpoint(base_url, protocol, None)?;
+    let resp = apply_auth(keyed_client(10)?.get(&url), protocol, secret)
         .send()
-        .map_err(|e| format!("无法连接网关：{e}"))?;
+        .map_err(|e| format!("无法连接网关：{}", e.without_url()))?;
     let status = resp.status();
+    if status.is_redirection() {
+        return Err(redirect_error(status));
+    }
     if !status.is_success() {
         return Err(format!("获取模型失败：HTTP {status}，请检查 Key 与地址"));
     }
-    let body: serde_json::Value = resp.json().map_err(|e| format!("响应解析失败：{e}"))?;
+    let body: serde_json::Value = resp.json().map_err(|e| format!("响应解析失败：{}", e.without_url()))?;
     let ids = body
         .get("data")
         .and_then(|d| d.as_array())
@@ -565,27 +814,103 @@ pub fn fetch_models(platform: &str, base_url: &str, secret: &str) -> Result<Vec<
 /// {base} → {base}/v1/models[/{model}]。用户可能填 https://gw.test
 /// 或已带 /v1 的地址，两种都归一；仅接受 HTTP(S)。
 /// 「获取模型」与「获取强度」（effort_map）共用。
-pub(crate) fn models_endpoint(base_url: &str, model: Option<&str>) -> Result<String, String> {
+pub(crate) fn models_endpoint(base_url: &str, protocol: &str, model: Option<&str>) -> Result<String, String> {
+    let tail = match model {
+        Some(m) => format!("/models/{m}"),
+        None => "/models".to_string(),
+    };
+    api_endpoint(base_url, protocol, &tail)
+}
+
+/// {base} → {base}/v1{tail}；已带 /v1（或 Gemini 的 /openai）时直接拼接。仅接受 HTTP(S)。
+/// OpenAI 兼容地址以 /v<数字> 结尾（智谱 /paas/v4、火山 /api/v3 等）视为已带版本，不再补 /v1；
+/// Anthropic 兼容保持只认 /v1 的规则。
+fn api_endpoint(base_url: &str, protocol: &str, tail: &str) -> Result<String, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let parsed = reqwest::Url::parse(trimmed).map_err(|_| "网关地址格式无效".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("网关地址必须使用 HTTP 或 HTTPS".into());
     }
-    let tail = match model {
-        Some(m) => format!("/models/{m}"),
-        None => "/models".to_string(),
-    };
+    let versioned = protocol != "anthropic" && trimmed.rsplit('/').next().is_some_and(|last| {
+        last.len() > 1 && last.starts_with('v') && last[1..].bytes().all(|b| b.is_ascii_digit())
+    });
     // Gemini 的 OpenAI 兼容地址以 /openai 结尾，模型列表直接挂在其下（/v1beta/openai/models）
-    if trimmed.ends_with("/v1") || trimmed.ends_with("/openai") {
+    if versioned || trimmed.ends_with("/v1") || trimmed.ends_with("/openai") {
         Ok(format!("{trimmed}{tail}"))
     } else {
         Ok(format!("{trimmed}/v1{tail}"))
     }
 }
 
-/// 平台鉴权头：Claude 走 x-api-key + anthropic-version，OpenAI 兼容走 Bearer。「获取强度」共用。
-pub(crate) fn apply_auth(req: reqwest::blocking::RequestBuilder, platform: &str, secret: &str) -> reqwest::blocking::RequestBuilder {
-    if platform == "claude" {
+/// 「验证模型」（画板 27「接口不支持模型列表」）：模型接口不可用、用户手填模型 ID 时，
+/// 由用户确认后发送**一次**最小请求（max_tokens = 1）确认地址、密钥与模型可用。可能产生少量 API 用量，
+/// 只在用户点击并确认后调用；Key 只用于本次请求，错误信息不回显 Key。
+pub fn verify_model(protocol: &str, base_url: &str, secret: &str, model: &str) -> Result<(), String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("请填写模型 ID".into());
+    }
+    let anthropic = protocol == "anthropic";
+    let protocol = if anthropic { "anthropic" } else { "openai" };
+    let url = api_endpoint(base_url, protocol, if anthropic { "/messages" } else { "/chat/completions" })?;
+    let body = serde_json::json!({ "model": model, "max_tokens": 1, "messages": [{ "role": "user", "content": "ping" }] });
+    let resp = apply_auth(keyed_client(30)?.post(&url), protocol, secret)
+        .json(&body)
+        .send()
+        .map_err(|e| format!("无法连接服务：{}", e.without_url()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    if status.is_redirection() {
+        return Err(redirect_error(status));
+    }
+    // 服务返回的错误说明（截断）有助于判断是模型 ID 还是参数问题；服务若回显了 Key，先打码
+    let detail = resp.json::<serde_json::Value>().ok()
+        .and_then(|v| v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string))
+        .map(|m| if secret.is_empty() { m } else { m.replace(secret, "****") })
+        .map(|m| format!("：{}", m.chars().take(160).collect::<String>()))
+        .unwrap_or_default();
+    Err(match status.as_u16() {
+        401 | 403 => format!("验证失败：HTTP {status}，API Key 无效或没有该模型的权限{detail}"),
+        404 => format!("验证失败：HTTP {status}，服务未找到该模型或接口，请检查模型 ID 与 Base URL{detail}"),
+        429 => format!("验证失败：HTTP {status}，服务限流或额度不足，请稍后再试{detail}"),
+        _ => format!("验证失败：HTTP {status}{detail}"),
+    })
+}
+
+/// 带 Key 请求用的客户端：**不跟随重定向**。reqwest 跨主机跳转只删 Authorization 等头、不删 x-api-key，
+/// https 跳到同主机 http 时还会明文发出 Key（先例：provider_key.rs、quota.rs）。
+fn keyed_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.without_url().to_string())
+}
+
+/// 3xx 一律不跟随，也不回显 Location（目标地址可能带凭证）
+fn redirect_error(status: reqwest::StatusCode) -> String {
+    format!("服务返回重定向（HTTP {status}），请填写最终地址")
+}
+
+/// 自定义供应商更换 API Key 时必须同时带上模型：后端校验只看「有模型」（D-11），
+/// 新 Key 的可达性由前端用新 Key 获取模型或「验证模型」保证（画板 27）。
+pub(crate) fn check_custom_key_change(platform: &str, model: Option<&str>) -> Result<(), String> {
+    if platform != "custom" || model.is_some_and(|m| !m.trim().is_empty()) {
+        return Ok(());
+    }
+    Err("自定义供应商更换 API Key 后，请在「编辑」中用新密钥重新获取模型或验证手填模型，再保存".into())
+}
+
+/// 鉴权协议：Claude 固定为 anthropic；其他平台按保存的协议，未记录时按 OpenAI 兼容。
+pub(crate) fn auth_protocol(platform: &str, protocol: Option<&str>) -> &'static str {
+    if platform == "claude" || protocol == Some("anthropic") { "anthropic" } else { "openai" }
+}
+
+/// 鉴权头：anthropic 走 x-api-key + anthropic-version，其余（OpenAI 兼容）走 Bearer。
+pub(crate) fn apply_auth(req: reqwest::blocking::RequestBuilder, protocol: &str, secret: &str) -> reqwest::blocking::RequestBuilder {
+    if protocol == "anthropic" {
         req.header("x-api-key", secret).header("anthropic-version", "2023-06-01")
     } else {
         req.header("Authorization", format!("Bearer {secret}"))
@@ -643,11 +968,12 @@ pub(crate) struct Creds {
     pub kind: String,
     pub secret: Option<String>,
     pub base_url: Option<String>,
+    pub model: Option<String>,
 }
 
 pub(crate) fn creds_of(conn: &Sql, id: &str) -> rusqlite::Result<Option<Creds>> {
     conn.query_row(
-        "SELECT name, platform, kind, secret, base_url, status FROM connections WHERE id = ?1",
+        "SELECT name, platform, kind, secret, base_url, status, model FROM connections WHERE id = ?1",
         params![id],
         |r| {
             let platform: String = r.get(1)?;
@@ -660,6 +986,7 @@ pub(crate) fn creds_of(conn: &Sql, id: &str) -> rusqlite::Result<Option<Creds>> 
                 kind: r.get(2)?,
                 secret: r.get(3)?,
                 base_url,
+                model: r.get(6)?,
             })
         },
     )

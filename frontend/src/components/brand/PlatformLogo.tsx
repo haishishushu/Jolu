@@ -1,3 +1,4 @@
+import { Code, Hexagon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { PlatformId } from "@/types"
 import qoderLogo from "@/assets/platforms/qoder.svg"
@@ -80,6 +81,21 @@ export function PlatformLogo({ platform, size = 16, className }: PlatformLogoPro
         alt={platform}
         className={cn("shrink-0 object-contain", className)}
       />
+    )
+  }
+
+  // 自定义供应商：与 Skills 供应商菜单（skillParts）同一个六边形 + 代码标识，不是品牌图形
+  if (platform === "custom") {
+    return (
+      <span
+        role="img"
+        aria-label="自定义供应商"
+        style={{ width: size, height: size, borderRadius: size * 0.27 }}
+        className={cn("relative grid shrink-0 place-items-center bg-jolu-selected text-jolu-on", className)}
+      >
+        <Hexagon aria-hidden style={{ width: size * 0.8, height: size * 0.8 }} className="absolute" />
+        <Code aria-hidden style={{ width: size * 0.5, height: size * 0.5 }} />
+      </span>
     )
   }
 
