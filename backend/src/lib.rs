@@ -2721,6 +2721,10 @@ pub fn run() {
             set_default_page,
             remember_page,
             // 任务 2.1 结束
+            // 任务 2.7 开始
+            skills::skills_import_git,
+            skills::skills_import_git_cleanup,
+            // 任务 2.7 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
