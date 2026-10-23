@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { shouldReduceMotion } from "./appearance.ts"
 
 export const MOTION_EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)"
-export const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches
+/** 系统「减少动画」或主窗口 `<html>` 上的 reduce-motion（设置 · 外观）任一生效；灵动岛窗口不会有该 class */
+export const reducedMotion = () => shouldReduceMotion(window.matchMedia("(prefers-reduced-motion: reduce)").matches, document.documentElement)
 
 /**
  * 刷新柔光掠过整卡的周期，与 index.css 的 island-refresh-shimmer 同一数值。

@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, useSyncExternalStore } from "react"
 import { api, isTauri, listenEvent, type AppSettings } from "@/lib/api"
 import type { DefaultPage } from "@/lib/mainNavigation"
 import { settingsApi } from "@/lib/settingsApi"
+import { normalizeDensity } from "@/lib/appearance"
 
 /**
  * 持久化设置（§2.6 / §7.3）
@@ -37,6 +38,9 @@ const DEFAULTS: AppSettings = {
   proxy_codex_upstream: null,
   default_page: "last",
   last_page: null,
+  main_zoom: 100,
+  list_density: "comfortable",
+  reduce_motion: false,
 }
 
 interface SharedSettings {
@@ -134,9 +138,13 @@ export function useSettings() {
     return api.setDisplayPreferences(next.island_opacity, next.island_scale, next.island_shrink_scale, next.refresh_minutes)
   }), [save])
   const setDefaultPage = useCallback((page: DefaultPage) => save(() => settingsApi.setDefaultPage(page)), [save])
+  const setAppearance = useCallback((patch: Partial<Pick<AppSettings, "main_zoom" | "list_density" | "reduce_motion">>) => save(async () => {
+    const next = { ...await api.getSettings(), ...patch }
+    return settingsApi.setAppearancePreferences(next.main_zoom, normalizeDensity(next.list_density), next.reduce_motion)
+  }), [save])
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage }
+  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance }
 }
 

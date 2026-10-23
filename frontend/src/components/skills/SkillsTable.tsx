@@ -51,7 +51,7 @@ export function SkillsTable({ items, total, selected, busy, showPlatform, onSele
         return (
           <div
             key={key}
-            className={cn(COLS, "h-[55px] border-t border-jolu-border px-3.5 transition-colors hover:bg-jolu-stage", checked && "bg-jolu-selected hover:bg-jolu-selected")}
+            className={cn(COLS, "h-[55px] border-t border-jolu-border px-3.5 [.density-compact_&]:h-[44px] transition-colors hover:bg-jolu-stage", checked && "bg-jolu-selected hover:bg-jolu-selected")}
           >
             <button type="button" role="checkbox" aria-checked={checked} aria-label={`选择 ${item.name}`} onClick={() => onSelect(item)} className="grid size-5 place-items-center rounded outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent">
               {checked ? <SquareCheck aria-hidden className="size-3.5 text-jolu-on" /> : <Square aria-hidden className="size-3.5 text-jolu-muted" />}

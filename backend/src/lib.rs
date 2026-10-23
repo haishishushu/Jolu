@@ -2156,6 +2156,7 @@ fn show_main(app: &tauri::AppHandle) {
     match window {
         Ok(window) => {
             let _ = window.set_icon(tray_icon::taskbar(window.scale_factor().unwrap_or(1.0)));
+            if let Some(cfg) = app.try_state::<Cfg>() { let _ = apply_main_zoom(&window, cfg.0.get().main_zoom); } // 任务 2.2
             if let Some(saved) = app.try_state::<Cfg>().and_then(|cfg| cfg.0.get().main_window) {
                 if let Err(error) = main_window::restore(&window, &saved) {
                     eprintln!("[窗口] 恢复主面板位置失败: {error}");
@@ -2723,6 +2724,9 @@ pub fn run() {
             set_default_page,
             remember_page,
             // 任务 2.1 结束
+            // 任务 2.2 开始
+            set_appearance_preferences,
+            // 任务 2.2 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -2829,3 +2833,28 @@ pub fn run() {
     });
 }
 
+// 任务 2.2 开始
+/// 界面缩放只作用于 `main` 窗口（D-21）；灵动岛、菜单等窗口各自独立，保持原大小。
+fn apply_main_zoom(window: &WebviewWindow, zoom: u16) -> Result<(), String> {
+    window.set_zoom(f64::from(zoom) / 100.0).map_err(|error| {
+        eprintln!("[窗口] 设置主面板缩放失败: {error}");
+        error.to_string()
+    })
+}
+
+/// 外观（画板 88）：界面缩放、列表密度、减少动效一起保存；主窗口已打开时立即应用缩放。
+#[tauri::command]
+fn set_appearance_preferences(app: tauri::AppHandle, zoom: u16, density: String, reduce_motion: bool) -> Result<settings::Settings, String> {
+    settings::validate_appearance(zoom, &density)?;
+    let next = app.state::<Cfg>().0.try_update(|settings| {
+        settings.main_zoom = zoom;
+        settings.list_density = density;
+        settings.reduce_motion = reduce_motion;
+    })?;
+    let _ = app.emit("settings-changed", next.clone());
+    if let Some(window) = app.get_webview_window(MAIN) {
+        apply_main_zoom(&window, zoom).map_err(|error| format!("界面缩放已保存，但应用到主窗口失败：{error}"))?;
+    }
+    Ok(next)
+}
+// 任务 2.2 结束

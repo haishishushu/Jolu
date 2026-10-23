@@ -74,7 +74,7 @@ function CallRow({ row, active, onSelect }: { row: StatsCallRowDto; active: bool
       aria-pressed={active}
       onClick={onSelect}
       className={cn(
-        "flex h-[54px] w-full items-center gap-1.5 border-b border-jolu-table-divider px-4 text-left outline-none focus-visible:bg-jolu-table-active",
+        "flex h-[54px] w-full items-center [.density-compact_&]:h-[44px] gap-1.5 border-b border-jolu-table-divider px-4 text-left outline-none focus-visible:bg-jolu-table-active",
         active ? "bg-jolu-table-active" : "bg-jolu-bg hover:bg-jolu-side",
       )}
     >
