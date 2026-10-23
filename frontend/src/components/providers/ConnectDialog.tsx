@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { ArrowUpRight, BadgeCheck, Check, ChevronDown, CircleAlert, CircleCheck, Eye, EyeOff, LoaderCircle, LogIn, RefreshCw, Search, X } from "lucide-react"
-import { api, isTauri, type LoginDetectionDto } from "@/lib/api"
+import { api, isTauri, openUrl, type LoginDetectionDto } from "@/lib/api"
+import { linkFor, type ProviderLinkKind } from "@/lib/providerLinks"
 import { cn } from "@/lib/utils"
 import {
   API_PROTOCOLS,
@@ -254,6 +255,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
 
             {mode === "subscription" ? (
               <SubscriptionSection
+                platform={platform}
                 providerName={entry.name}
                 detecting={detecting}
                 detection={detection}
@@ -386,7 +388,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
   )
 }
 
-function SubscriptionSection({ providerName, detecting, detection, onDetect, tabs }: {
+function SubscriptionSection({ platform, providerName, detecting, detection, onDetect, tabs }: {
+  platform: PlatformId
   providerName: string
   detecting: boolean
   detection: LoginDetectionDto | null
@@ -399,17 +402,24 @@ function SubscriptionSection({ providerName, detecting, detection, onDetect, tab
       检测本机登录
     </JoluButton>
   )
-  // 登录指引与切换账号的外部链接，Jolu.pen 未给出地址：待确认，先禁用
-  const guide = (label: string) => (
-    <Tip label="外部链接待确认">
-      <span className="inline-flex">
-        <JoluButton variant="soft" disabled>
-          {label}
-          <ArrowUpRight aria-hidden className="!size-3.5" />
-        </JoluButton>
-      </span>
-    </Tip>
-  )
+  // 登录指引与切换账号的外部链接（D-15）：只用 providerLinks 里核实过的官方地址，未收录就禁用
+  const guide = (label: string, kind: ProviderLinkKind) => {
+    const url = linkFor(platform, kind)
+    const content = (
+      <>
+        {label}
+        <ArrowUpRight aria-hidden className="!size-3.5" />
+      </>
+    )
+    if (url) return <JoluButton variant="soft" onClick={() => void openUrl(url)}>{content}</JoluButton>
+    return (
+      <Tip label="暂无官方指引链接">
+        <span className="inline-flex">
+          <JoluButton variant="soft" disabled>{content}</JoluButton>
+        </span>
+      </Tip>
+    )
+  }
 
   if (detection?.found) {
     const account = detection.account ?? (detection.sources.length ? detection.sources.join("、") : "未获取账号")
@@ -440,7 +450,7 @@ function SubscriptionSection({ providerName, detecting, detection, onDetect, tab
             {detecting ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}
             重新检测
           </JoluButton>
-          {guide("切换账号")}
+          {guide("切换账号", "switchAccount")}
         </div>
         {!tabs && <p className="text-xs text-jolu-muted">此状态只提供订阅连接。平台和账号支持 API Key 时才显示第二种方式。</p>}
       </>
@@ -454,7 +464,7 @@ function SubscriptionSection({ providerName, detecting, detection, onDetect, tab
         <span className="text-base font-semibold text-jolu-text">使用 {providerName} 账号连接</span>
         <span className="text-xs text-jolu-muted">在官方客户端完成登录，再回到 Jolu 检测登录状态。</span>
         <div className="flex gap-2.5">
-          {guide("打开登录指引")}
+          {guide("打开登录指引", "loginGuide")}
           {detectButton}
         </div>
       </div>
