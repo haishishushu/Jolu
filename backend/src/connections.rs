@@ -653,29 +653,36 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
 }
 
 pub fn list(conn: &Sql) -> rusqlite::Result<Vec<ConnectionDto>> {
-    backfill_account_emails(conn)?;
+    list_with_account_lookup(conn, crate::login_detect::account_for_secret)
+}
+
+fn list_with_account_lookup(
+    conn: &Sql,
+    mut account_lookup: impl FnMut(&str, &str) -> Option<String>,
+) -> rusqlite::Result<Vec<ConnectionDto>> {
     let now = chrono::Local::now().timestamp_millis();
     let mut stmt = conn.prepare(
-        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, account_email
+        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, account_email, secret
          FROM connections ORDER BY created_ms ASC",
     )?;
     let rows = stmt
-        .query_map([], |r| row_to_dto(r, now))?
+        .query_map([], |r| {
+            let mut dto = row_to_dto(r, now)?;
+            // 列表走只读连接：旧账号的未知邮箱仅补到返回值，不在查询时写库。
+            // 凭证必须与本机登录完全匹配；已保存的身份不能被当前账号覆盖。
+            if dto.account_email.is_none()
+                && dto.kind == "auth"
+                && matches!(dto.platform.as_str(), "claude" | "codex")
+            {
+                let secret: Option<String> = r.get("secret")?;
+                dto.account_email = secret
+                    .as_deref()
+                    .and_then(|s| account_lookup(&dto.platform, s));
+            }
+            Ok(dto)
+        })?
         .collect::<Result<_, _>>()?;
     Ok(rows)
-}
-
-/// 旧连接只补充未知身份；切换本机账号后保留已保存的邮箱，不能串号。
-fn backfill_account_emails(conn: &Sql) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare("SELECT id, platform, secret FROM connections WHERE kind='auth' AND account_email IS NULL AND platform IN ('claude','codex')")?;
-    let pending = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, platform, secret) in pending {
-        if let Some(email) = secret.as_deref().and_then(|s| crate::login_detect::account_for_secret(&platform, s)) {
-            conn.execute("UPDATE connections SET account_email=?2 WHERE id=?1 AND account_email IS NULL", params![id, email])?;
-        }
-    }
-    Ok(())
 }
 
 /// 连接名称校验：新增与改名共用同一口径（去首尾空白，1–80 个字符）。
@@ -1267,6 +1274,52 @@ pub fn sync_from_local(conn: &Sql) -> Result<bool, String> {
 #[cfg(test)]
 mod account_email_tests {
     use super::*;
+    #[test]
+    fn readonly_list_resolves_only_unknown_matching_auth_identities() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("jolu-readonly-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.db");
+        let writer = crate::db::open(&path).unwrap();
+        writer.execute_batch(
+            "INSERT INTO connections(id,platform,kind,name,secret,masked,created_ms,account_email) VALUES
+             ('matched','codex','auth','Matched','synthetic-match','****',1,NULL),
+             ('saved','claude','auth','Saved','synthetic-saved','****',2,'saved@example.test'),
+             ('different','claude','auth','Different','synthetic-different','****',3,NULL),
+             ('api','codex','api','API','synthetic-api','****',4,NULL),
+             ('missing','codex','auth','Missing',NULL,'****',5,NULL);"
+        ).unwrap();
+        let reader = crate::db::open_reader(&path).unwrap();
+        let mut looked_up = Vec::new();
+        let rows = list_with_account_lookup(&reader, |platform, secret| {
+            looked_up.push((platform.to_string(), secret.to_string()));
+            (platform == "codex" && secret == "synthetic-match")
+                .then(|| "matched@example.test".to_string())
+        }).unwrap();
+        assert_eq!(rows[0].account_email.as_deref(), Some("matched@example.test"));
+        assert_eq!(rows[1].account_email.as_deref(), Some("saved@example.test"));
+        assert!(rows[2..].iter().all(|row| row.account_email.is_none()));
+        assert_eq!(looked_up, vec![
+            ("codex".to_string(), "synthetic-match".to_string()),
+            ("claude".to_string(), "synthetic-different".to_string()),
+        ]);
+        let stored: Option<String> = writer.query_row(
+            "SELECT account_email FROM connections WHERE id='matched'", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(stored, None, "列表查询不得回写邮箱");
+        assert!(reader.execute("UPDATE connections SET name='unexpected'", []).is_err());
+        let json = serde_json::to_string(&rows).unwrap();
+        assert!(!json.contains("synthetic-"));
+        assert!(serde_json::to_value(&rows).unwrap().as_array().unwrap()
+            .iter().all(|row| row.get("secret").is_none()));
+        drop(reader);
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
     #[test]
     fn account_email_survives_rename_pause_and_dto_has_no_secret() {
         let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
