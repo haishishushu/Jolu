@@ -2700,7 +2700,11 @@ pub fn run() {
             fetch_remote_models,
             updater::check_app_update_available,
             updater::download_app_update,
-            updater::install_downloaded_update_and_restart
+            updater::install_downloaded_update_and_restart,
+            // 任务 2.7 开始
+            skills::skills_import_git,
+            skills::skills_import_git_cleanup,
+            // 任务 2.7 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
