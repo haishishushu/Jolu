@@ -23,7 +23,7 @@ function run(patch: Partial<RunDto> & Pick<RunDto, "id" | "task_id" | "task_name
 
 function tasks(now: number): TaskItemDto[] {
   const t = base(now)
-  const common = { model: null, session_id: null, skills: [], schedule: null, auto_resume: true, wait_deadline: null, state: "active" as const, next_run_at: null, missed_at: null, last: null, queue_ahead: null }
+  const common = { model: null, session_id: null, skills: [], schedule: null, auto_resume: true, wait_deadline: null, state: "active" as const, next_run_at: null, missed_at: null, last: null, queue_ahead: null, serial_queue: true }
   return [
     {
       ...common, id: 24, name: "完善登录页面", platform: "claude", connection_id: "demo-momo", cwd: "D:/develop/jolu", model: "claude-sonnet-4-5",
