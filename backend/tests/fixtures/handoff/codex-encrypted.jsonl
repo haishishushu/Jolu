@@ -1,0 +1,6 @@
+{"type":"session_meta","timestamp":"2026-10-20T01:00:00Z","payload":{"id":"s-codex","cwd":"D:/placeholder/project","cli_version":"0.162.0"}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：用户要求"}]}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:02Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"占位：助手回复"}]}}
+{"type":"compacted","timestamp":"2026-10-20T02:00:00Z","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：保留的用户消息"}]},{"type":"compaction","id":"cmp1","encrypted_content":"占位密文"}],"window_id":"w1","window_number":1}}
+{"type":"response_item","timestamp":"2026-10-20T02:00:01Z","payload":{"type":"compaction","id":"cmp2","encrypted_content":"占位密文"}}
+{"type":"response_item","timestamp":"2026-10-20T02:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：压缩后的要求"}]}}

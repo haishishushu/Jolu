@@ -5,7 +5,7 @@
 //! - 消息只读解析源文件，不改写、不删除；来源没保留正文时如实返回「仅用量」，不拼造对话；
 //! - 继续会话只对有可靠命令行入口的来源开放（Claude Code `claude --resume`、Codex `codex resume`）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -19,6 +19,9 @@ pub const UNATTRIBUTED: &str = crate::usage_stats::UNATTRIBUTED;
 /// 单条消息正文与工具输出的长度上限，避免超长日志拖垮界面
 const TEXT_LIMIT: usize = 20_000;
 const TOOL_OUTPUT_LIMIT: usize = 1_200;
+/// 交接用的详细解析：工具输出保留首尾共这么多字（「最后一次验证」要取末尾 15 行），命令保留原文
+const DETAIL_OUTPUT_LIMIT: usize = 40_000;
+const DETAIL_SUMMARY_LIMIT: usize = 2_000;
 /// 正文搜索跳过过大的源文件
 const SEARCH_FILE_LIMIT: u64 = 32 * 1024 * 1024;
 
@@ -229,13 +232,21 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
     Ok(SessionList { files: used.len() as i64, sessions })
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct ToolCall {
     pub name: String,
     /// 调用摘要：文件路径、命令等；取不到时为空
     pub summary: String,
     /// 工具输出片段；来源没记录输出时为 None，不补写结果
     pub output: Option<String>,
+    /// 工具结果是否失败：Claude `tool_result.is_error`；Codex 取退出码、`CommandExecution.status`
+    /// 或 `exec` 输出首行 `Script failed|completed`。来源没有记录时为 None，不推断
+    pub failed: Option<bool>,
+    /// 退出码：Claude 失败结果开头的 `Exit code N`、Codex `exit_code` / `Process exited with code N`；取不到为 None
+    pub exit_code: Option<i32>,
+    /// 调用涉及的文件路径（`file_path` / `notebook_path` / `path`、apply_patch 的文件头、Codex FileChange 的键），只供交接事实区使用
+    #[serde(skip)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -271,18 +282,56 @@ fn clip(text: &str, limit: usize) -> String {
     out
 }
 
+/// 保留首尾：交接要看输出末尾（测试结果、报错），中间省略
+fn clip_middle(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    let head = limit / 4;
+    let tail = limit - head;
+    let start: String = text.chars().take(head).collect();
+    let end: String = text.chars().skip(count - tail).collect();
+    format!("{start}\n…［中间省略 {} 字］…\n{end}", count - head - tail)
+}
+
+/// 解析的详细程度：会话页只要片段；交接要更长的输出、完整命令和 Codex 的命令事件
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    text: usize,
+    output: usize,
+    summary: usize,
+    detail: bool,
+}
+
+const VIEW: Limits = Limits { text: TEXT_LIMIT, output: TOOL_OUTPUT_LIMIT, summary: 120, detail: false };
+const DETAIL: Limits = Limits { text: TEXT_LIMIT, output: DETAIL_OUTPUT_LIMIT, summary: DETAIL_SUMMARY_LIMIT, detail: true };
+
+impl Limits {
+    fn summary(&self, text: &str) -> String {
+        if self.detail { clip(text.trim(), self.summary) } else { clip(text.lines().next().unwrap_or(""), self.summary) }
+    }
+    fn output(&self, text: &str) -> String {
+        if self.detail { clip_middle(text, self.output) } else { clip(text, self.output) }
+    }
+}
+
 fn parse_ts(v: &Json) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(v.get("timestamp")?.as_str()?).ok().map(|d| d.timestamp_millis())
 }
 
-/// 工具调用摘要：优先取路径、命令、模式等常见字段
-fn tool_summary(input: &Json) -> String {
-    let input = match input {
+fn parse_input(input: &Json) -> Json {
+    match input {
         Json::String(s) => serde_json::from_str::<Json>(s).unwrap_or(Json::String(s.clone())),
         other => other.clone(),
-    };
+    }
+}
+
+/// 工具调用摘要：优先取路径、命令、模式等常见字段
+fn tool_summary(input: &Json, limits: Limits) -> String {
+    let input = parse_input(input);
     if let Json::String(s) = &input {
-        return clip(s.lines().next().unwrap_or(""), 120);
+        return limits.summary(s);
     }
     for key in ["file_path", "path", "command", "cmd", "pattern", "url", "query", "description"] {
         if let Some(v) = input.get(key) {
@@ -291,20 +340,90 @@ fn tool_summary(input: &Json) -> String {
                 Json::Array(items) => items.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(" "),
                 _ => continue,
             };
-            return clip(text.lines().next().unwrap_or(""), 120);
+            return limits.summary(&text);
         }
     }
     String::new()
 }
 
-fn tool_output(v: &Json) -> Option<String> {
+/// 调用涉及的文件：常见路径字段，以及 apply_patch 补丁里的文件头
+fn tool_paths(input: &Json) -> Vec<String> {
+    let input = parse_input(input);
+    let mut out = Vec::new();
+    let patch = match &input {
+        Json::String(s) => Some(s.as_str()),
+        other => other.get("patch").or_else(|| other.get("input")).and_then(Json::as_str),
+    };
+    if let Some(patch) = patch.filter(|p| p.contains("*** Begin Patch")) {
+        for line in patch.lines() {
+            for head in ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "] {
+                if let Some(path) = line.strip_prefix(head).map(str::trim).filter(|p| !p.is_empty()) {
+                    out.push(path.to_string());
+                }
+            }
+        }
+    }
+    for key in ["file_path", "notebook_path", "path"] {
+        if let Some(path) = input.get(key).and_then(Json::as_str).map(str::trim).filter(|p| !p.is_empty()) {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
+fn output_text(v: &Json) -> Option<String> {
     let text = match v {
         Json::String(s) => s.clone(),
         Json::Array(items) => items.iter().filter_map(|b| b.get("text").and_then(Json::as_str)).collect::<Vec<_>>().join("\n"),
         Json::Object(_) => v.get("output").and_then(Json::as_str).map(String::from).unwrap_or_else(|| v.to_string()),
         _ => return None,
     };
-    (!text.trim().is_empty()).then(|| clip(text.trim(), TOOL_OUTPUT_LIMIT))
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// 工具结果：输出片段、失败标记与退出码
+#[derive(Debug, Default)]
+struct ToolResult {
+    output: Option<String>,
+    failed: Option<bool>,
+    exit_code: Option<i32>,
+}
+
+/// 文本里行首 `<前缀> N` 形式的退出码
+fn exit_line(text: &str, prefixes: &[&str]) -> Option<i32> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        prefixes.iter().find_map(|p| line.strip_prefix(p)).and_then(|rest| {
+            let digits: String = rest.trim_start_matches([':', ' ']).chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+            digits.parse().ok()
+        })
+    })
+}
+
+/// Claude `tool_result`：`is_error` 是失败标记，失败时正文以 `Exit code N` 开头
+fn claude_result(block: &Json, limits: Limits) -> ToolResult {
+    let text = block.get("content").and_then(output_text);
+    let exit_code = text.as_deref().and_then(|t| t.lines().next()).and_then(|first| exit_line(first, &["Exit code"]));
+    ToolResult {
+        output: text.map(|t| limits.output(&t)),
+        failed: block.get("is_error").and_then(Json::as_bool),
+        exit_code,
+    }
+}
+
+/// Codex 输出没有错误字段：旧版 shell 的 JSON `metadata.exit_code`、`exec_command` 的 `Process exited with code N`、
+/// `exec` 脚本首行 `Script failed|completed`；都没有时为 None
+fn codex_result(output: Option<&Json>, limits: Limits) -> ToolResult {
+    let Some(text) = output.and_then(output_text) else { return ToolResult::default() };
+    let json_exit = serde_json::from_str::<Json>(&text).ok().and_then(|j| j.pointer("/metadata/exit_code").and_then(Json::as_i64)).map(|n| n as i32);
+    let exit_code = json_exit.or_else(|| exit_line(&text, &["Process exited with code", "Exit code"]));
+    let script = match text.lines().next().map(str::trim) {
+        Some(l) if l.starts_with("Script failed") => Some(true),
+        Some(l) if l.starts_with("Script completed") => Some(false),
+        _ => None,
+    };
+    ToolResult { failed: exit_code.map(|c| c != 0).or(script), exit_code, output: Some(limits.output(&text)) }
 }
 
 /// 注入给模型的系统性内容（环境、指令、命令回显）不是用户写的话，不显示
@@ -313,7 +432,7 @@ fn is_injected(text: &str) -> bool {
     t.starts_with('<') || t.starts_with("# AGENTS.md") || t.is_empty()
 }
 
-fn push_assistant(out: &mut Vec<Message>, ts: Option<i64>, text: Option<String>, tool: Option<ToolCall>) {
+fn push_assistant(out: &mut Vec<Message>, ts: Option<i64>, text: Option<String>, tool: Option<ToolCall>, limit: usize) {
     let reuse = out.last().is_some_and(|m| m.role == "assistant");
     if !reuse {
         out.push(Message { role: "assistant".into(), ts, text: String::new(), tools: Vec::new() });
@@ -323,7 +442,7 @@ fn push_assistant(out: &mut Vec<Message>, ts: Option<i64>, text: Option<String>,
         if !last.text.is_empty() {
             last.text.push_str("\n\n");
         }
-        last.text.push_str(&clip(t.trim(), TEXT_LIMIT));
+        last.text.push_str(&clip(t.trim(), limit));
     }
     if let Some(tool) = tool {
         last.tools.push(tool);
@@ -333,20 +452,35 @@ fn push_assistant(out: &mut Vec<Message>, ts: Option<i64>, text: Option<String>,
     }
 }
 
-fn attach_output(out: &mut [Message], pending: &mut HashMap<String, (usize, usize)>, id: &str, output: Option<String>) {
+fn attach_output(out: &mut [Message], pending: &mut HashMap<String, (usize, usize)>, id: &str, result: ToolResult) {
     if let Some((m, t)) = pending.remove(id) {
         if let Some(tool) = out.get_mut(m).and_then(|msg| msg.tools.get_mut(t)) {
-            tool.output = output;
+            tool.output = result.output;
+            tool.failed = result.failed;
+            tool.exit_code = result.exit_code;
         }
     }
 }
 
 pub fn parse_claude<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
+    parse_claude_with(lines, VIEW)
+}
+
+fn parse_claude_with<I: IntoIterator<Item = String>>(lines: I, limits: Limits) -> Vec<Message> {
     let mut out = Vec::new();
     let mut pending: HashMap<String, (usize, usize)> = HashMap::new();
+    // 压缩后 Claude Code 会把保留段按原 uuid 再写一遍；按 uuid 去重，避免消息重复、序号错位
+    let mut seen: HashSet<String> = HashSet::new();
     for line in lines {
         let Ok(v) = serde_json::from_str::<Json>(&line) else { continue };
         let kind = v.get("type").and_then(Json::as_str).unwrap_or("");
+        if matches!(kind, "user" | "assistant") {
+            if let Some(uuid) = v.get("uuid").and_then(Json::as_str) {
+                if !seen.insert(uuid.to_string()) {
+                    continue;
+                }
+            }
+        }
         if !matches!(kind, "user" | "assistant") || v.get("isSidechain").and_then(Json::as_bool) == Some(true) || v.get("isMeta").and_then(Json::as_bool) == Some(true) {
             continue;
         }
@@ -357,7 +491,7 @@ pub fn parse_claude<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
         let Some(content) = v.get("message").and_then(|m| m.get("content")) else { continue };
         if kind == "user" {
             match content {
-                Json::String(s) if !is_injected(s) => out.push(Message { role: "user".into(), ts, text: clip(s.trim(), TEXT_LIMIT), tools: Vec::new() }),
+                Json::String(s) if !is_injected(s) => out.push(Message { role: "user".into(), ts, text: clip(s.trim(), limits.text), tools: Vec::new() }),
                 Json::Array(blocks) => {
                     let mut texts = Vec::new();
                     for b in blocks {
@@ -369,14 +503,14 @@ pub fn parse_claude<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
                             }
                             Some("tool_result") => {
                                 if let Some(id) = b.get("tool_use_id").and_then(Json::as_str) {
-                                    attach_output(&mut out, &mut pending, id, b.get("content").and_then(tool_output));
+                                    attach_output(&mut out, &mut pending, id, claude_result(b, limits));
                                 }
                             }
                             _ => {}
                         }
                     }
                     if !texts.is_empty() {
-                        out.push(Message { role: "user".into(), ts, text: clip(&texts.join("\n\n"), TEXT_LIMIT), tools: Vec::new() });
+                        out.push(Message { role: "user".into(), ts, text: clip(&texts.join("\n\n"), limits.text), tools: Vec::new() });
                     }
                 }
                 _ => {}
@@ -384,14 +518,16 @@ pub fn parse_claude<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
         } else if let Json::Array(blocks) = content {
             for b in blocks {
                 match b.get("type").and_then(Json::as_str) {
-                    Some("text") => push_assistant(&mut out, ts, b.get("text").and_then(Json::as_str).map(String::from), None),
+                    Some("text") => push_assistant(&mut out, ts, b.get("text").and_then(Json::as_str).map(String::from), None, limits.text),
                     Some("tool_use") => {
+                        let input = b.get("input").cloned().unwrap_or(Json::Null);
                         let tool = ToolCall {
                             name: b.get("name").and_then(Json::as_str).unwrap_or("工具").to_string(),
-                            summary: b.get("input").map(tool_summary).unwrap_or_default(),
-                            output: None,
+                            summary: tool_summary(&input, limits),
+                            paths: tool_paths(&input),
+                            ..ToolCall::default()
                         };
-                        push_assistant(&mut out, ts, None, Some(tool));
+                        push_assistant(&mut out, ts, None, Some(tool), limits.text);
                         if let Some(id) = b.get("id").and_then(Json::as_str) {
                             let m = out.len() - 1;
                             pending.insert(id.to_string(), (m, out[m].tools.len() - 1));
@@ -407,10 +543,66 @@ pub fn parse_claude<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
 }
 
 pub fn parse_codex<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
-    let mut out = Vec::new();
+    parse_codex_with(lines, VIEW)
+}
+
+/// Codex 新版把真实命令记在 `event_msg` → `item_completed`（`CommandExecution`：`command` 数组、`exit_code`、`status`），
+/// 文件修改记在 `FileChange.changes`（以路径为键）。只有交接的详细解析读取，会话页显示保持不变
+fn codex_event_tool(item: &Json, limits: Limits) -> Option<ToolCall> {
+    match item.get("type").and_then(Json::as_str)? {
+        "CommandExecution" | "command_execution" => {
+            let command = match item.get("command")? {
+                Json::Array(parts) => parts.last().and_then(Json::as_str).unwrap_or("").to_string(),
+                Json::String(s) => s.clone(),
+                _ => String::new(),
+            };
+            let exit_code = item.get("exit_code").and_then(Json::as_i64).map(|n| n as i32);
+            let status_failed = item.get("status").and_then(Json::as_str).map(|s| s == "failed");
+            Some(ToolCall {
+                name: "command_execution".into(),
+                summary: limits.summary(&command),
+                output: item.get("aggregated_output").and_then(output_text).map(|t| limits.output(&t)),
+                failed: match exit_code {
+                    Some(code) => Some(code != 0 || status_failed == Some(true)),
+                    None => status_failed,
+                },
+                exit_code,
+                paths: Vec::new(),
+            })
+        }
+        "FileChange" | "file_change" => {
+            let paths: Vec<String> = match item.get("changes")? {
+                Json::Object(map) => map.keys().cloned().collect(),
+                Json::Array(items) => items.iter().filter_map(|c| c.get("path").and_then(Json::as_str).map(String::from)).collect(),
+                _ => Vec::new(),
+            };
+            (!paths.is_empty()).then(|| ToolCall {
+                name: "apply_patch".into(),
+                summary: limits.summary(&paths.join(", ")),
+                failed: item.get("status").and_then(Json::as_str).map(|s| s == "failed"),
+                paths,
+                ..ToolCall::default()
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_codex_with<I: IntoIterator<Item = String>>(lines: I, limits: Limits) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::new();
     let mut pending: HashMap<String, (usize, usize)> = HashMap::new();
     for line in lines {
         let Ok(v) = serde_json::from_str::<Json>(&line) else { continue };
+        if limits.detail && v.get("type").and_then(Json::as_str) == Some("event_msg") {
+            let payload = v.get("payload");
+            if payload.and_then(|p| p.get("type")).and_then(Json::as_str) == Some("item_completed") {
+                // 只附加到已有的最后一条消息上，不新建消息，保证 `#n` 与会话页一致
+                if let (Some(tool), Some(last)) = (payload.and_then(|p| p.get("item")).and_then(|item| codex_event_tool(item, limits)), out.last_mut()) {
+                    last.tools.push(tool);
+                }
+            }
+            continue;
+        }
         if v.get("type").and_then(Json::as_str) != Some("response_item") {
             continue;
         }
@@ -425,8 +617,8 @@ pub fn parse_codex<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
                     .map(|blocks| blocks.iter().filter_map(|b| b.get("text").and_then(Json::as_str)).collect::<Vec<_>>().join("\n"))
                     .unwrap_or_default();
                 match role {
-                    "user" if !is_injected(&text) => out.push(Message { role: "user".into(), ts, text: clip(text.trim(), TEXT_LIMIT), tools: Vec::new() }),
-                    "assistant" => push_assistant(&mut out, ts, Some(text), None),
+                    "user" if !is_injected(&text) => out.push(Message { role: "user".into(), ts, text: clip(text.trim(), limits.text), tools: Vec::new() }),
+                    "assistant" => push_assistant(&mut out, ts, Some(text), None, limits.text),
                     _ => {}
                 }
             }
@@ -434,10 +626,11 @@ pub fn parse_codex<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
                 let input = p.get("arguments").or_else(|| p.get("input")).or_else(|| p.get("action")).cloned().unwrap_or(Json::Null);
                 let tool = ToolCall {
                     name: p.get("name").and_then(Json::as_str).unwrap_or("shell").to_string(),
-                    summary: tool_summary(&input),
-                    output: None,
+                    summary: tool_summary(&input, limits),
+                    paths: tool_paths(&input),
+                    ..ToolCall::default()
                 };
-                push_assistant(&mut out, ts, None, Some(tool));
+                push_assistant(&mut out, ts, None, Some(tool), limits.text);
                 if let Some(id) = p.get("call_id").and_then(Json::as_str) {
                     let m = out.len() - 1;
                     pending.insert(id.to_string(), (m, out[m].tools.len() - 1));
@@ -445,7 +638,7 @@ pub fn parse_codex<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
             }
             Some("function_call_output") | Some("custom_tool_call_output") => {
                 if let Some(id) = p.get("call_id").and_then(Json::as_str) {
-                    attach_output(&mut out, &mut pending, id, p.get("output").and_then(tool_output));
+                    attach_output(&mut out, &mut pending, id, codex_result(p.get("output"), limits));
                 }
             }
             _ => {}
@@ -455,8 +648,23 @@ pub fn parse_codex<I: IntoIterator<Item = String>>(lines: I) -> Vec<Message> {
     out
 }
 
-fn read_lines(path: &Path) -> Vec<String> {
+pub(crate) fn read_lines(path: &Path) -> Vec<String> {
     std::fs::File::open(path).map(|f| BufReader::new(f).lines().map_while(Result::ok).collect()).unwrap_or_default()
+}
+
+/// 会话主记录文件；源文件不存在时为 None
+pub(crate) fn source_path(conn: &Connection, platform: &str, session_id: &str) -> rusqlite::Result<Option<PathBuf>> {
+    Ok(source_files(conn)?.remove(&(platform.to_string(), session_id.to_string())).filter(|p| p.exists()))
+}
+
+/// 交接用的详细解析：消息切分与去重规则和会话页相同，所以 `#n` 序号一致；
+/// 但保留更长的工具输出与完整命令，并读取 Codex 的命令与文件修改事件（附在当前助手消息里，不新增消息）
+pub(crate) fn parse_detail(platform: &str, lines: &[String]) -> Vec<Message> {
+    match platform {
+        "claude" => parse_claude_with(lines.iter().cloned(), DETAIL),
+        "codex" => parse_codex_with(lines.iter().cloned(), DETAIL),
+        _ => Vec::new(),
+    }
 }
 
 /// 消息分页：`before` 为 None 取最后 `limit` 条，否则取序号 `before` 之前的 `limit` 条
@@ -624,6 +832,57 @@ mod tests {
         assert_eq!(msgs[1].tools[0].summary, "rg Session");
         assert_eq!(msgs[1].tools[0].output.as_deref(), Some("3 matches"));
         assert_eq!(msgs[1].text, "完成");
+    }
+
+    const CLAUDE_FIXTURE: &str = include_str!("../tests/fixtures/handoff/claude-compacted.jsonl");
+    const CODEX_FIXTURE: &str = include_str!("../tests/fixtures/handoff/codex-commands.jsonl");
+
+    fn fixture(text: &str) -> Vec<String> {
+        text.lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn claude_tool_failure_exit_code_and_uuid_dedupe() {
+        let msgs = parse_claude(fixture(CLAUDE_FIXTURE));
+        // 压缩后按原 uuid 重写的 u1 被去重；两条摘要记录不进入消息
+        assert_eq!(msgs.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["user", "assistant", "user", "assistant", "user"]);
+        assert_eq!(msgs.iter().filter(|m| m.text == "占位：用户第一条要求").count(), 1);
+        let bash = &msgs[1].tools[0];
+        assert_eq!((bash.failed, bash.exit_code), (Some(true), Some(1)));
+        let edit = &msgs[1].tools[1];
+        assert_eq!(edit.paths, vec!["D:/placeholder/project/src/a.ts".to_string()]);
+        assert_eq!((edit.failed, edit.exit_code), (None, None), "没有 is_error 时不推断");
+        let ls = &msgs[3].tools[0];
+        assert_eq!((ls.failed, ls.exit_code), (Some(false), None));
+        // 详细解析与会话页序号一致
+        assert_eq!(parse_detail("claude", &fixture(CLAUDE_FIXTURE)).len(), msgs.len());
+    }
+
+    #[test]
+    fn codex_detail_reads_command_events() {
+        let view = parse_codex(fixture(CODEX_FIXTURE));
+        let detail = parse_detail("codex", &fixture(CODEX_FIXTURE));
+        assert_eq!(view.len(), 2);
+        assert_eq!(detail.len(), view.len(), "命令事件不新增消息");
+        // 会话页显示不变：只有 exec 与 exec_command 两个调用
+        assert_eq!(view[1].tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["exec", "exec_command"]);
+        let tools = &detail[1].tools;
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["exec", "command_execution", "apply_patch", "exec_command"]);
+        assert_eq!((tools[0].failed, tools[0].exit_code), (Some(true), None), "Script failed");
+        assert_eq!(tools[0].summary, "占位脚本第一行\n占位脚本第二行");
+        assert_eq!(view[1].tools[0].summary, "占位脚本第一行");
+        assert_eq!((tools[1].summary.as_str(), tools[1].failed, tools[1].exit_code), ("pnpm test", Some(true), Some(1)));
+        assert_eq!(tools[2].paths, vec!["src/a.ts".to_string()]);
+        assert_eq!((tools[3].summary.as_str(), tools[3].failed, tools[3].exit_code), ("cargo check", Some(false), Some(0)));
+    }
+
+    #[test]
+    fn detail_output_keeps_head_and_tail() {
+        let long: String = (0..10_000).map(|i| format!("行{i}\n")).collect();
+        let clipped = DETAIL.output(&long);
+        assert!(clipped.starts_with("行0\n") && clipped.trim_end().ends_with("行9999"));
+        assert!(clipped.contains("中间省略"));
+        assert!(VIEW.output(&long).ends_with('…'));
     }
 
     #[test]

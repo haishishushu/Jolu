@@ -1,0 +1,14 @@
+{"type":"user","uuid":"u1","sessionId":"s-claude","cwd":"D:/placeholder/project","timestamp":"2026-10-20T01:00:00Z","message":{"role":"user","content":"占位：用户第一条要求"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-10-20T01:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"占位：助手回复"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"pnpm test","description":"占位"}}]}}
+{"type":"user","uuid":"r1","timestamp":"2026-10-20T01:00:09Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"Exit code 1\n占位：报错第一行\n占位：报错第二行","is_error":true}]},"toolUseResult":{"stdout":"","stderr":"占位","interrupted":false,"isImage":false}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-10-20T01:00:12Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"D:/placeholder/project/src/a.ts","old_string":"占位","new_string":"占位"}}]}}
+{"type":"user","uuid":"r2","timestamp":"2026-10-20T01:00:13Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"占位：已修改"}]}}
+{"type":"system","subtype":"compact_boundary","uuid":"b1","timestamp":"2026-10-20T02:00:00Z","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preTokens":1000,"postTokens":100,"preservedSegment":{},"preservedMessages":1}}
+{"type":"user","uuid":"c1","isCompactSummary":true,"timestamp":"2026-10-20T02:00:00Z","message":{"role":"user","content":"占位：原工具压缩摘要一"}}
+{"type":"user","uuid":"u1","sessionId":"s-claude","timestamp":"2026-10-20T01:00:00Z","message":{"role":"user","content":"占位：用户第一条要求"}}
+{"type":"user","uuid":"u2","timestamp":"2026-10-20T02:01:00Z","message":{"role":"user","content":"占位：压缩后的新要求"}}
+{"type":"assistant","uuid":"a3","timestamp":"2026-10-20T02:01:05Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","uuid":"r3","timestamp":"2026-10-20T02:01:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"占位：输出","is_error":false}]}}
+{"type":"system","subtype":"compact_boundary","uuid":"b2","timestamp":"2026-10-20T03:00:00Z","content":"Conversation compacted","compactMetadata":{"trigger":"manual","preTokens":900,"postTokens":90}}
+{"type":"user","uuid":"c2","isCompactSummary":true,"timestamp":"2026-10-20T03:00:00Z","message":{"role":"user","content":"占位：原工具压缩摘要二"}}
+{"type":"user","uuid":"u3","timestamp":"2026-10-20T03:01:00Z","message":{"role":"user","content":"占位：第二次压缩后的要求"}}

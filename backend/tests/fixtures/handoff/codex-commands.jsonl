@@ -1,0 +1,9 @@
+{"type":"session_meta","timestamp":"2026-10-20T01:00:00Z","payload":{"id":"s-codex","cwd":"D:/placeholder/project"}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：修复并跑测试"}]}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:02Z","payload":{"type":"custom_tool_call","name":"exec","call_id":"c1","input":"占位脚本第一行\n占位脚本第二行"}}
+{"type":"event_msg","timestamp":"2026-10-20T01:00:03Z","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"x1","command":["pwsh.exe","-Command","pnpm test"],"cwd":"D:/placeholder/project","exit_code":1,"status":"failed","aggregated_output":"占位：失败输出","duration":{},"parsed_cmd":[{"type":"unknown","cmd":"pnpm test"}],"process_id":1,"source":"unified_exec_startup"}}}
+{"type":"event_msg","timestamp":"2026-10-20T01:00:04Z","payload":{"type":"item_completed","item":{"type":"FileChange","id":"x2","status":"completed","changes":{"src/a.ts":{"type":"update","unified_diff":"占位","move_path":null}},"stdout":"","stderr":""}}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:05Z","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"Script failed\nWall time 1.0 seconds\n占位：脚本输出"}]}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:06Z","payload":{"type":"function_call","name":"exec_command","call_id":"c2","arguments":"{\"cmd\":\"cargo check\",\"yield_time_ms\":1000}"}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:07Z","payload":{"type":"function_call_output","call_id":"c2","output":"Chunk ID: 1\nWall time: 1.0 seconds\nProcess exited with code 0\nOutput:\n占位：检查通过"}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:08Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"占位：完成"}]}}
