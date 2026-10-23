@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Bell, CircleAlert, CircleCheck, CircleDot, Database, Info, LoaderCircle, Network, Palette, SlidersHorizontal, type LucideIcon } from "lucide-react"
+import { Bell, CircleAlert, CircleDot, Database, Info, LoaderCircle, Network, Palette, SlidersHorizontal, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { SAVE_STATE_LABEL, SETTINGS_TABS, saveState, tabForSection, type SettingsTab } from "@/lib/settingsPage"
 import { useSettings } from "@/hooks/useSettings"
@@ -114,11 +114,12 @@ export function SettingsPage({ section, navigationRequest, onOpenSkills }: {
 
 /** 页头保存状态（画板 86 / 100 / 102） */
 function SaveStatus({ state }: { state: ReturnType<typeof saveState> }) {
-  const Icon = state === "saving" ? LoaderCircle : state === "dirty" ? CircleDot : state === "failed" ? CircleAlert : CircleCheck
+  if (state === "saved") return null
+  const Icon = state === "saving" ? LoaderCircle : state === "dirty" ? CircleDot : CircleAlert
   return (
     <span role="status" className={cn(
       "flex items-center gap-1.5 text-[11px]",
-      state === "saved" ? "text-jolu-on" : state === "failed" ? "text-jolu-danger" : "text-jolu-muted",
+      state === "failed" ? "text-jolu-danger" : "text-jolu-muted",
     )}>
       <Icon aria-hidden className={cn("size-3.5", state === "saving" && "animate-spin")} />
       {SAVE_STATE_LABEL[state]}
