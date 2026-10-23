@@ -33,14 +33,15 @@ export function SelectField({ value, options, onValueChange, label, disabled,
     <Menu.Root modal={false} onOpenChange={onOpenChange}>
       <Menu.Trigger disabled={disabled}
         aria-label={label}
-        className={cn("inline-flex h-8 min-w-0 shrink-0 items-center justify-between gap-2 rounded-[8px] border bg-surface px-2.5 text-left text-xs text-text-primary outline-none transition-colors hover:bg-hover focus-visible:border-accent-blue focus-visible:ring-2 focus-visible:ring-accent-blue-soft data-[state=open]:border-border-strong disabled:cursor-not-allowed disabled:opacity-45", className)}
+        type="button"
+        className={cn("jolu-select-trigger inline-flex h-8 min-w-0 shrink-0 items-center justify-between gap-2 rounded-[8px] border bg-surface px-2.5 text-left text-xs text-text-primary outline-none transition-colors hover:bg-hover focus-visible:border-accent-blue focus-visible:ring-2 focus-visible:ring-accent-blue-soft data-[state=open]:border-border-strong disabled:cursor-not-allowed disabled:opacity-45", className)}
       >
         <span className="min-w-0 truncate">{triggerLabel ?? selected?.label ?? "请选择"}</span>
         <ChevronDown aria-hidden className="motion-select-chevron size-3 shrink-0 text-text-secondary" />
       </Menu.Trigger>
       <Menu.Portal>
         <Menu.Content loop align="end" sideOffset={6} collisionPadding={12}
-          className="motion-popover z-[100] min-w-[var(--radix-dropdown-menu-trigger-width)] max-w-[min(360px,calc(100vw-24px))] overflow-y-auto overscroll-contain rounded-[8px] border bg-surface text-text-primary shadow-popover"
+          className="jolu-select-menu motion-popover z-[140] min-w-[var(--radix-dropdown-menu-trigger-width)] max-w-[min(360px,calc(100vw-24px))] overflow-y-auto overscroll-contain rounded-[8px] border bg-surface text-text-primary shadow-popover"
           style={{ maxHeight: "min(248px, var(--radix-dropdown-menu-content-available-height))" }}
         >
           <Menu.RadioGroup value={value} onValueChange={onValueChange} className="p-1">
@@ -52,8 +53,8 @@ export function SelectField({ value, options, onValueChange, label, disabled,
                 <Menu.ItemIndicator className="absolute left-2"><Check aria-hidden className="size-3" /></Menu.ItemIndicator>
                 {option.icon && <span aria-hidden className="grid size-4 shrink-0 place-items-center">{option.icon}</span>}
                 <span className="min-w-0">
-                  <span>{option.label}</span>
-                  {option.description && <span className="mt-0.5 block max-w-[290px] truncate text-[10px] text-text-secondary" title={option.description}>{option.description}</span>}
+                  <span className="block break-words">{option.label}</span>
+                  {option.description && <span className="mt-0.5 block max-w-[290px] whitespace-normal text-[11px] text-text-secondary" title={option.description}>{option.description}</span>}
                 </span>
               </Menu.RadioItem>
             ))}
