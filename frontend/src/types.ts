@@ -1,5 +1,5 @@
 /** 平台、连接、来源、模型的区分见需求文档 §7.2 —— 四者是不同层级，不可混用 */
-export type PlatformId = "claude" | "codex" | "gemini" | "grok" | "opencode" | "zcode" | "trae" | "qoder" | "workbuddy"
+export type PlatformId = "claude" | "codex" | "gemini" | "grok" | "opencode" | "zcode" | "trae" | "qoder" | "workbuddy" | "custom"
 
 /** 已实现并可连接 / 已实现但尚未连接 / 尚未接入（禁用） */
 export type PlatformAvailability = "available" | "not-connected" | "not-integrated"
@@ -48,6 +48,8 @@ export interface Connection {
   model: string | null
   effort: string | null
   context1m: boolean | null
+  /** 自定义供应商的接口协议；其他平台为 null */
+  protocol: "openai" | "anthropic" | null
 }
 
 /** 额度窗口是一组可变窗口，不是固定的两个字段（§7.4） */

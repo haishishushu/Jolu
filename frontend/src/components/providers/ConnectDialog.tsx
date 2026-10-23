@@ -1,17 +1,24 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { ArrowUpRight, BadgeCheck, Check, ChevronDown, CircleCheck, Eye, EyeOff, LoaderCircle, LogIn, RefreshCw, Search, X } from "lucide-react"
+import { ArrowUpRight, BadgeCheck, Check, ChevronDown, CircleAlert, CircleCheck, Eye, EyeOff, LoaderCircle, LogIn, RefreshCw, Search, X } from "lucide-react"
 import { api, isTauri, type LoginDetectionDto } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import {
+  API_PROTOCOLS,
+  canEnterManualModel,
   PROVIDERS,
   defaultMode,
+  fallsBackToManualModel,
   filterModels,
+  modelFetchErrorText,
   providerEntry,
   showsModeTabs,
   singleModeReason,
+  protocolBaseUrlHint,
+  protocolLabel,
   validateConnectionName,
+  type ApiProtocol,
   type ConnectMode,
 } from "@/lib/providerCatalog"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
@@ -23,12 +30,14 @@ import type { Connection, PlatformId } from "@/types"
 export interface ConnectActions {
   connections: readonly Connection[]
   readLocal: (platform: string, kind: "auth" | "api", name?: string) => Promise<{ added: number; existing: number; warnings?: string[] }>
-  add: (input: { platform: string; kind: "auth" | "api"; name: string; secret?: string | null; base_url?: string | null; model?: string | null }) => Promise<void>
+  add: (input: { platform: string; kind: "auth" | "api"; name: string; secret?: string | null; base_url?: string | null; model?: string | null; protocol?: ApiProtocol | null }) => Promise<void>
 }
 
 /**
  * 新建连接弹窗（Jolu.pen 画板 11 订阅 / 13 仅订阅 / 15–17 API Key）。
  * 订阅：检测本机登录 → 显示账号 → 保存；API Key：填写地址与密钥 → 获取模型 → 选择 → 保存（后端验证后入库）。
+ * 自定义供应商（D-11）复用 API Key 结构，多一个「协议」选择；模型接口不可用时改为手填模型 ID，
+ * 后端以「获取模型成功」或「手填模型」作为接口可达的依据，不查余额。
  */
 export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
   platform: PlatformId
@@ -51,6 +60,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
   const [secretVisible, setSecretVisible] = useState(false)
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState("")
+  const [protocol, setProtocol] = useState<ApiProtocol>("openai")
   const [fetching, setFetching] = useState(false)
   /** 每次地址 / 密钥变化或重新获取都递增；旧请求回来时直接丢弃，防止串到新地址 */
   const modelRequest = useRef(0)
@@ -60,6 +70,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
   const [modelError, setModelError] = useState<string | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
 
+  const custom = platform === "custom"
   const tabs = showsModeTabs(entry)
   const reason = singleModeReason(entry)
   const kind = mode === "subscription" ? "auth" : "api"
@@ -78,6 +89,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
     setSecretVisible(false)
     setModels([])
     setModel("")
+    setProtocol("openai")
     setManualModel(false)
     setModelError(null)
     setError(null)
@@ -116,7 +128,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
     setFetching(true)
     setModelError(null)
     try {
-      const list = await api.fetchRemoteModels(platform, baseUrl.trim(), secret.trim())
+      const list = await api.fetchRemoteModels(platform, baseUrl.trim(), secret.trim(), custom ? protocol : null)
       if (request !== modelRequest.current) return
       setModels(list)
       setManualModel(false)
@@ -127,6 +139,11 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
       if (request !== modelRequest.current) return
       // 失败就地说明，已填写内容保留（画板 27）
       setModelError(String(reason))
+      // 自定义供应商：模型接口不可用时直接改为手填模型 ID（画板 29A 状态 A）；密钥被拒时不改
+      if (custom && !manualModel && fallsBackToManualModel(String(reason))) {
+        setManualModel(true)
+        setModel("")
+      }
     } finally {
       if (request === modelRequest.current) setFetching(false)
     }
@@ -148,8 +165,10 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
         if (!summary.added && !summary.existing) throw new Error("未读取到可保存的登录，请重新检测")
         toast.success(summary.added ? `已连接 ${entry.name}` : "该账号已连接，无需重复添加", summary.warnings?.join("；"))
       } else {
-        await actions.add({ platform, kind: "api", name: name.trim(), secret: secret.trim(), base_url: baseUrl.trim(), model: model.trim() })
-        toast.success(`已连接 ${entry.name}`, "接口可达已验证；模型调用权限与额度分别展示")
+        await actions.add({ platform, kind: "api", name: name.trim(), secret: secret.trim(), base_url: baseUrl.trim(), model: model.trim(), protocol: custom ? protocol : null })
+        toast.success(`已连接 ${entry.name}`, custom
+          ? (manualModel ? "模型 ID 为手动填写，未经模型接口验证；自定义供应商不查询余额" : "已通过模型接口验证；自定义供应商不查询余额")
+          : "接口可达已验证；模型调用权限与额度分别展示")
       }
       onClose()
     } catch (reason) {
@@ -175,7 +194,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
         >
           <div className="flex items-center justify-between">
             <Dialog.Title className="text-xl font-semibold text-jolu-text">
-              {mode === "subscription" ? "新建订阅连接" : "新建 API Key 连接"}
+              {custom ? "新建自定义供应商连接" : mode === "subscription" ? "新建订阅连接" : "新建 API Key 连接"}
             </Dialog.Title>
             <Dialog.Close asChild>
               <button type="button" aria-label="关闭" disabled={saving} className="grid size-7 place-items-center rounded-md text-jolu-muted outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
@@ -189,7 +208,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
               <span className="grid size-7 place-items-center"><PlatformLogo platform={platform} size={22} /></span>
               <span className="text-sm font-semibold text-jolu-text">{entry.name}</span>
               <span className="flex-1" />
-              {!tabs && <span className="rounded-[5px] bg-jolu-stage px-2 py-1 text-[11px] text-jolu-muted">{mode === "subscription" ? "当前仅订阅" : "当前仅 API Key"}</span>}
+              {!tabs && !custom && <span className="rounded-[5px] bg-jolu-stage px-2 py-1 text-[11px] text-jolu-muted">{mode === "subscription" ? "当前仅订阅" : "当前仅 API Key"}</span>}
               <PlatformSwitcher
                 current={platform}
                 onPick={(next) => {
@@ -227,9 +246,9 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
               </div>
             ) : reason && <p className="text-xs text-jolu-muted">{reason}</p>}
 
-            <Field label="连接名称 *" hint={mode === "apiKey" ? "用于区分多个账号或服务，不影响供应商配置。" : undefined} error={name && nameError ? nameError : null}>
+            <Field label={custom ? "名称 *" : "连接名称 *"} hint={mode === "apiKey" ? "用于区分多个账号或服务，不影响供应商配置。" : undefined} error={name && nameError ? nameError : null}>
               {(id) => (
-                <TextInput id={id} value={name} onChange={setName} placeholder={mode === "subscription" ? "例如：个人订阅" : "例如：工作 API"} />
+                <TextInput id={id} value={name} onChange={setName} placeholder={mode === "subscription" ? "例如：个人订阅" : custom ? "例如：公司内部网关" : "例如：工作 API"} />
               )}
             </Field>
 
@@ -243,6 +262,17 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
               />
             ) : (
               <>
+                {custom && (
+                  <ProtocolPicker
+                    value={protocol}
+                    onChange={(next) => {
+                      if (next === protocol) return
+                      // 协议决定鉴权头，切换后已获取的模型作废
+                      setProtocol(next)
+                      invalidateModels()
+                    }}
+                  />
+                )}
                 <Field label="Base URL *" hint={entry.baseUrl?.locked ? "该服务限定官方地址，不开放编辑。" : undefined} error={urlError}>
                   {(id) => (
                     <TextInput
@@ -250,7 +280,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
                       value={baseUrl}
                       readOnly={entry.baseUrl?.locked}
                       onChange={(value) => { setBaseUrl(value); invalidateModels() }}
-                      placeholder="请输入完整地址，例如 https://api.example.com/v1"
+                      placeholder={`请输入完整地址，例如 ${custom ? protocolBaseUrlHint(protocol) : "https://api.example.com/v1"}`}
                       mono
                     />
                   )}
@@ -281,6 +311,12 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
                   )}
                 </Field>
                 <div className="flex flex-col gap-2">
+                  {custom && manualModel && modelError && !fetching && (
+                    <div role="alert" className="flex items-center gap-2.5 rounded-lg bg-jolu-danger-soft px-2.5 py-2 text-[11px] text-jolu-danger">
+                      <CircleAlert aria-hidden className="size-3.5 shrink-0" />
+                      <span className="min-w-0 flex-1 break-all">{modelFetchErrorText(modelError)}</span>
+                    </div>
+                  )}
                   <span className="text-xs font-medium text-jolu-text">{manualModel ? "模型 ID *" : "默认模型 *"}</span>
                   <div className="flex gap-2">
                     {manualModel ? (
@@ -300,7 +336,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
                         onClick={() => void fetchModels()}
                       >
                         <RefreshCw aria-hidden />
-                        {models.length || modelError ? "重新获取" : "获取模型"}
+                        {custom ? (models.length ? "重新获取" : "获取模型") : models.length || modelError ? "重新获取" : "获取模型"}
                       </JoluButton>
                     )}
                   </div>
@@ -308,10 +344,10 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
                     <span role="status" className="flex items-center gap-1.5 text-[11px] text-jolu-muted">
                       <LoaderCircle aria-hidden className="size-3 animate-spin" />正在获取可用模型…等待接口返回，请勿重复提交。
                     </span>
-                  ) : modelError ? (
+                  ) : modelError && !(custom && manualModel) ? (
                     <div role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
                       <span className="text-jolu-danger">获取失败：{modelError}</span>
-                      {!manualModel && (
+                      {!manualModel && canEnterManualModel(platform, modelError) && (
                         <button type="button" onClick={() => { setManualModel(true); setModel("") }} className="font-medium text-jolu-on hover:underline">
                           手动填写模型
                         </button>
@@ -319,7 +355,9 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
                     </div>
                   ) : (
                     <span className="text-[11px] text-jolu-muted">
-                      {manualModel ? "模型接口不支持枚举时手动填写；保存时会验证地址与密钥。" : "填写地址与密钥后点击「获取模型」，再从下拉框选择；修改后需重新获取。"}
+                      {custom
+                        ? (manualModel ? "手填模型后即可保存，作为接口可达的依据；可再次点击「获取模型」改回从列表选择。" : "填写地址与密钥后点击「获取模型」，再从下拉框选择；模型接口不可用时改为手填模型 ID。")
+                        : manualModel ? "模型接口不支持枚举时手动填写；保存时会验证地址与密钥。" : "填写地址与密钥后点击「获取模型」，再从下拉框选择；修改后需重新获取。"}
                     </span>
                   )}
                 </div>
@@ -432,6 +470,34 @@ function SubscriptionSection({ providerName, detecting, detection, onDetect, tab
   )
 }
 
+/** 自定义供应商的接口协议（D-11）：OpenAI 兼容用 Bearer，Anthropic 兼容用 x-api-key */
+function ProtocolPicker({ value, onChange }: { value: ApiProtocol; onChange: (protocol: ApiProtocol) => void }) {
+  const labelId = useId()
+  return (
+    <div className="flex flex-col gap-[7px]">
+      <span id={labelId} className="text-xs font-medium text-jolu-text">协议 *</span>
+      <div role="radiogroup" aria-labelledby={labelId} className="flex h-[38px] gap-1 rounded-lg bg-jolu-side p-[3px]">
+        {API_PROTOCOLS.map((item) => (
+          <button
+            key={item}
+            type="button"
+            role="radio"
+            aria-checked={value === item}
+            onClick={() => onChange(item)}
+            className={cn(
+              "flex-1 rounded-md text-[13px] outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
+              value === item ? "bg-jolu-bg font-semibold text-jolu-on" : "text-jolu-muted hover:text-jolu-text",
+            )}
+          >
+            {protocolLabel(item)}
+          </button>
+        ))}
+      </div>
+      <span className="text-[11px] text-jolu-muted">决定请求格式与鉴权方式：OpenAI 兼容使用 Bearer，Anthropic 兼容使用 x-api-key。</span>
+    </div>
+  )
+}
+
 function Info({ label, value }: { label: string; value: string }) {
   return (
     <span className="flex min-w-0 flex-1 gap-2">
@@ -472,7 +538,7 @@ function PlatformSwitcher({ current, onPick }: { current: PlatformId; onPick: (p
 }
 
 /** 模型下拉（画板 17）：可搜索，支持方向键与回车选择；空列表不自动选中 */
-function ModelPicker({ models, value, onChange }: { models: string[]; value: string; onChange: (model: string) => void }) {
+export function ModelPicker({ models, value, onChange }: { models: string[]; value: string; onChange: (model: string) => void }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [active, setActive] = useState(0)
