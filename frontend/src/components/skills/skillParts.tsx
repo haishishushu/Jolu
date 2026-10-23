@@ -1,3 +1,4 @@
+import { JoluSwitch, type JoluSwitchProps } from "@/components/ui/JoluSwitch"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { useState, type ReactNode } from "react"
@@ -31,24 +32,9 @@ export function Tag({ tone = "muted", children, title }: { tone?: "muted" | "on"
   )
 }
 
-/** 启停开关：30×18，开为品牌绿、关为轨道色（画板 74） */
-export function SkillSwitch({ on, disabled, label, onChange }: { on: boolean; disabled?: boolean; label: string; onChange: (next: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!on)}
-      className={cn(
-        "motion-toggle flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-0.5 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
-        on ? "bg-jolu-accent" : "bg-jolu-track",
-      )}
-    >
-      <span className="motion-toggle-thumb size-[14px] rounded-full bg-white" style={{ transform: `translateX(${on ? 12 : 0}px)` }} />
-    </button>
-  )
+/** Skills 列表保留紧凑轨道，交互与主窗口共用。 */
+export function SkillSwitch(props: Omit<JoluSwitchProps, "compact">) {
+  return <JoluSwitch {...props} compact />
 }
 
 const ICONS = [Palette, ScanText, FolderCode, FlaskConical, GitCommitHorizontal, FilePenLine, NotebookPen, LayoutDashboard]

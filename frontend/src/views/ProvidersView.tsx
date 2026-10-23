@@ -43,7 +43,7 @@ export function ProvidersView({ initialTab = "connect" }: { initialTab?: Provide
       </div>
 
       <ContentTransition identity={`${tab}-${conn.loading && !conn.connections.length}`} className="flex flex-col gap-4">
-      {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface layout={tab === "connect" ? "providers" : "cards"} label="正在读取供应商连接" /> : tab === "connect" ? (
+      {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface layout={tab === "connect" ? "providers" : "accounts"} label="正在读取供应商连接" /> : tab === "connect" ? (
         <ConnectGrid counts={countByPlatform(conn.connections)} loading={conn.loading} error={conn.error} onConnect={setConnecting} onRetry={() => void conn.reload()} />
       ) : (
         <AccountsPanel conn={conn} onConnect={setConnecting} onBrowseProviders={() => setTab("connect")} />

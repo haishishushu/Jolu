@@ -1,3 +1,4 @@
+import { JoluSwitch as Switch } from "@/components/ui/JoluSwitch"
 import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useMemo, useState, type ReactNode } from "react"
 import * as Menu from "@radix-ui/react-dropdown-menu"
@@ -291,25 +292,5 @@ function Row({ title, desc, control, card = false, className }: { title: string;
       </div>
       <div className="shrink-0">{control}</div>
     </div>
-  )
-}
-
-/** 开关 34×20，开启 jolu-accent、关闭 jolu-track，滑块 14 */
-function Switch({ on, onChange, disabled, label }: { on: boolean; onChange: (next: boolean) => void; disabled?: boolean; label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!on)}
-      className={cn(
-        "motion-toggle flex h-5 w-[34px] shrink-0 items-center rounded-full p-[3px] outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:opacity-45",
-        on ? "bg-jolu-accent" : "bg-jolu-track",
-      )}
-    >
-      <span className="motion-toggle-thumb size-3.5 rounded-full bg-white" style={{ transform: `translateX(${on ? 14 : 0}px)` }} />
-    </button>
   )
 }

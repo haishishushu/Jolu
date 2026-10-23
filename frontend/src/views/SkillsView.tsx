@@ -184,7 +184,7 @@ export function SkillsView({ active }: { active: boolean }) {
 
   if (mode.kind === "detail") {
     return (
-      <>
+      <div ref={contentMotion} className="min-w-0">
         <SkillDetail
           item={mode.item}
           onBack={() => setMode({ kind: "list" })}
@@ -193,12 +193,13 @@ export function SkillsView({ active }: { active: boolean }) {
           onOpenDir={(item) => void openDir(item)}
         />
         {dialogs}
-      </>
+      </div>
     )
   }
 
   if (mode.kind === "editor") {
     return (
+      <div ref={contentMotion} className="min-w-0">
       <SkillEditor
         key={mode.target.mode === "edit" ? mode.target.item.path : "new"}
         target={mode.target}
@@ -216,6 +217,7 @@ export function SkillsView({ active }: { active: boolean }) {
           }
         }}
       />
+      </div>
     )
   }
 

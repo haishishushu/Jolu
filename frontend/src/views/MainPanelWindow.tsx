@@ -62,7 +62,7 @@ export function MainPanelWindow({
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollPositions = useRef(new Map<MainPage, number>())
   // 页面包含 fixed 弹窗，避免祖先 transform 改变弹窗的定位参照。
-  const pageMotion = useContentMotion(page, 180, 4)
+  const pageMotion = useContentMotion(page, 220, 0, true)
   const aboutPresence = useExitPresence(about)
   /** 设置 · 外观（画板 88）：列表密度与减少动效挂在 <html> 上；缩放由后端对 main 窗口 set_zoom */
   const { list_density: listDensity, reduce_motion: reduceMotion } = useSettings().settings
