@@ -77,6 +77,12 @@ pub struct Settings {
     /// 接管时保存的 Codex 真实上游（config.toml 原 provider base_url）。
     #[serde(default)]
     pub proxy_codex_upstream: Option<String>,
+    /// 默认打开页面（画板 86）：`last` 表示上次访问的页面，其余为七个主窗口页面之一。
+    #[serde(default = "default_default_page")]
+    pub default_page: String,
+    /// 上次访问的主窗口页面；只由 `remember_page` 写入，从未记录时为 None。
+    #[serde(default)]
+    pub last_page: Option<String>,
 }
 
 fn default_kind() -> String { "api".into() }
@@ -91,6 +97,18 @@ fn default_currency() -> String { "USD".into() }
 fn default_dock_enabled() -> bool { true }
 fn default_proxy_port() -> u16 { 12731 }
 fn default_proxy_fallback() -> bool { true }
+fn default_default_page() -> String { "last".into() }
+
+/// 主窗口的七个页面，与前端 `MainPage` 一致。
+const MAIN_PAGES: [&str; 7] = ["island", "providers", "usage", "sessions", "automation", "skills", "settings"];
+
+pub fn validate_default_page(page: &str) -> Result<(), String> {
+    if page == "last" || MAIN_PAGES.contains(&page) { Ok(()) } else { Err(format!("未知的默认打开页面：{page}")) }
+}
+
+pub fn validate_last_page(page: &str) -> Result<(), String> {
+    if MAIN_PAGES.contains(&page) { Ok(()) } else { Err(format!("未知的主窗口页面：{page}")) }
+}
 
 pub fn validate_display_preferences(opacity: u8, scale: u16, shrink_scale: u16, refresh_minutes: u32) -> Result<(), String> {
     if !(60..=100).contains(&opacity) || !matches!(scale, 85 | 100 | 115)
@@ -130,6 +148,8 @@ impl Default for Settings {
             proxy_fallback_direct: default_proxy_fallback(),
             proxy_claude_upstream: None,
             proxy_codex_upstream: None,
+            default_page: default_default_page(),
+            last_page: None,
         }
     }
 }
@@ -300,5 +320,24 @@ mod tests {
         }
         std::fs::remove_file(dir.join("settings.json")).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn default_page_rejects_unknown() {
+        assert!(super::validate_default_page("bogus").is_err());
+        assert!(super::validate_default_page("").is_err());
+        for page in ["last", "island", "providers", "usage", "sessions", "automation", "skills", "settings"] {
+            assert!(super::validate_default_page(page).is_ok(), "{page} 应当可选");
+        }
+        assert!(super::validate_last_page("last").is_err(), "上次访问的页面只能记具体页面");
+        assert!(super::validate_last_page("skills").is_ok());
+    }
+
+    #[test]
+    fn old_settings_default_to_last_visited_page() {
+        let settings: Settings = serde_json::from_str(r#"{"island_platform":"claude","dnd":false,"island_visible":true}"#).unwrap();
+        assert_eq!(settings.default_page, "last");
+        assert_eq!(settings.last_page, None);
+        assert_eq!(Settings::default().default_page, "last");
     }
 }

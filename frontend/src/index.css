@@ -358,6 +358,10 @@
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;
   }
+  /* 主面板深色时，原生滚动条与表单控件也切到深色；灵动岛、右键菜单、托盘摘要（island-window）保持现状 */
+  html.dark:not(.island-window) {
+    color-scheme: dark;
+  }
   /* 灵动岛是无边框透明窗口：背景必须透明，圆角与阴影由岛自身绘制 */
   html.island-window,
   html.island-window body,

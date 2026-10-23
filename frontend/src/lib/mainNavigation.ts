@@ -28,13 +28,37 @@ export function pageLabel(page: MainPage): string {
   return page === "settings" ? SETTINGS_PAGE.label : PRIMARY_PAGES.find((item) => item.id === page)?.label ?? ""
 }
 
+/** 设置「默认打开页面」（画板 86）：上次访问的页面，或七个页面之一 */
+export type DefaultPage = "last" | MainPage
+
+const MAIN_PAGES: readonly MainPage[] = [...PRIMARY_PAGES.map((item) => item.id), SETTINGS_PAGE.id]
+
+/** 没有可用的上次页面、或设置值无法识别时的回退页面 */
+const FALLBACK_PAGE: MainPage = "usage"
+
+function isMainPage(value: string | null | undefined): value is MainPage {
+  return typeof value === "string" && (MAIN_PAGES as readonly string[]).includes(value)
+}
+
+/** 下拉框选项：「上次访问的页面」加七个页面（侧栏顺序，设置在最后） */
+export const DEFAULT_PAGE_OPTIONS: readonly { value: DefaultPage; label: string }[] = [
+  { value: "last", label: "上次访问的页面" },
+  ...MAIN_PAGES.map((id) => ({ value: id, label: pageLabel(id) })),
+]
+
+/** 设置值来自后端 JSON，可能是旧版本或被手改过的值，统一按字符串校验 */
+export function resolveOpenPage(defaultPage: string, lastPage: string | null): MainPage {
+  if (defaultPage === "last") return isMainPage(lastPage) ? lastPage : FALLBACK_PAGE
+  return isMainPage(defaultPage) ? defaultPage : FALLBACK_PAGE
+}
+
 /** 托盘 / 菜单的跳转意图；结构与后端 MainIntent 一致（关于弹窗不切页面，不在这里处理） */
 export type NavigationIntent =
-  | { kind: "overview" }
+  | { kind: "overview"; settings?: { default_page?: string; last_page?: string | null } }
   | { kind: "settings"; section: string }
 
 export function pageForIntent(intent: NavigationIntent): MainPage {
-  if (intent.kind === "overview") return "usage"
+  if (intent.kind === "overview") return resolveOpenPage(intent.settings?.default_page ?? "last", intent.settings?.last_page ?? null)
   if (intent.section === "island") return "island"
   if (intent.section === "connections") return "providers"
   return "settings"

@@ -80,7 +80,8 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             next_run_at   INTEGER,
             missed_at     INTEGER,
             created_at    INTEGER NOT NULL,
-            updated_at    INTEGER NOT NULL
+            updated_at    INTEGER NOT NULL,
+            serial_queue  INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS automation_runs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,7 +125,13 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_automation_events_run ON automation_events(run_id, id);
         "#,
-    )
+    )?;
+    // 任务 2.6：旧库补「同账号排队」列，默认开启
+    let has_serial = conn.prepare("SELECT 1 FROM pragma_table_info('automation_tasks') WHERE name = 'serial_queue'")?.exists([])?;
+    if !has_serial {
+        conn.execute("ALTER TABLE automation_tasks ADD COLUMN serial_queue INTEGER NOT NULL DEFAULT 1", [])?;
+    }
+    Ok(())
 }
 
 /* ─────────────────────────── 结构 ─────────────────────────── */
@@ -159,7 +166,12 @@ pub struct TaskInput {
     pub schedule: Option<Schedule>,
     pub auto_resume: bool,
     pub wait_deadline: Option<i64>,
+    /// 同账号排队（D-09），缺省为开启
+    #[serde(default = "yes")]
+    pub serial_queue: bool,
 }
+
+fn yes() -> bool { true }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Task {
@@ -182,6 +194,8 @@ pub struct Task {
     pub missed_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 同账号排队（D-09）：关闭后可与同账号任务并行
+    pub serial_queue: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -230,7 +244,7 @@ pub struct Event {
     pub detail: Option<String>,
 }
 
-const TASK_COLS: &str = "id, name, platform, connection_id, model, cwd, session_id, prompt, skills, launch, schedule, auto_resume, wait_deadline, state, next_run_at, missed_at, created_at, updated_at";
+const TASK_COLS: &str = "id, name, platform, connection_id, model, cwd, session_id, prompt, skills, launch, schedule, auto_resume, wait_deadline, state, next_run_at, missed_at, created_at, updated_at, serial_queue";
 
 fn task_from(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     let skills: String = r.get(8)?;
@@ -254,6 +268,7 @@ fn task_from(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         missed_at: r.get(15)?,
         created_at: r.get(16)?,
         updated_at: r.get(17)?,
+        serial_queue: r.get::<_, i64>(18)? != 0,
     })
 }
 
@@ -448,8 +463,8 @@ pub fn create_task(conn: &Connection, input: &TaskInput, now: i64) -> Result<i64
     };
     let e = |e: rusqlite::Error| e.to_string();
     conn.execute(
-        "INSERT INTO automation_tasks (name, platform, connection_id, model, cwd, session_id, prompt, skills, launch, schedule, auto_resume, wait_deadline, state, next_run_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'active', ?13, ?14, ?14)",
+        "INSERT INTO automation_tasks (name, platform, connection_id, model, cwd, session_id, prompt, skills, launch, schedule, auto_resume, wait_deadline, state, next_run_at, created_at, updated_at, serial_queue)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'active', ?13, ?14, ?14, ?15)",
         params![
             input.name.trim(), input.platform, input.connection_id,
             input.model.as_deref().filter(|m| !m.is_empty()),
@@ -458,7 +473,7 @@ pub fn create_task(conn: &Connection, input: &TaskInput, now: i64) -> Result<i64
             serde_json::to_string(&input.skills).unwrap_or_else(|_| "[]".into()),
             input.launch,
             input.schedule.as_ref().and_then(|s| serde_json::to_string(s).ok()),
-            input.auto_resume as i64, input.wait_deadline, next, now
+            input.auto_resume as i64, input.wait_deadline, next, now, input.serial_queue as i64
         ],
     ).map_err(e)?;
     let id = conn.last_insert_rowid();
@@ -481,7 +496,7 @@ pub fn update_task(conn: &Connection, id: i64, input: &TaskInput, now: i64) -> R
         _ => None,
     };
     conn.execute(
-        "UPDATE automation_tasks SET name=?2, platform=?3, connection_id=?4, model=?5, cwd=?6, session_id=?7, prompt=?8, skills=?9, launch=?10, schedule=?11, auto_resume=?12, wait_deadline=?13, next_run_at=?14, updated_at=?15 WHERE id=?1",
+        "UPDATE automation_tasks SET name=?2, platform=?3, connection_id=?4, model=?5, cwd=?6, session_id=?7, prompt=?8, skills=?9, launch=?10, schedule=?11, auto_resume=?12, wait_deadline=?13, next_run_at=?14, updated_at=?15, serial_queue=?16 WHERE id=?1",
         params![
             id, input.name.trim(), input.platform, input.connection_id,
             input.model.as_deref().filter(|m| !m.is_empty()),
@@ -489,7 +504,7 @@ pub fn update_task(conn: &Connection, id: i64, input: &TaskInput, now: i64) -> R
             serde_json::to_string(&input.skills).unwrap_or_else(|_| "[]".into()),
             input.launch,
             input.schedule.as_ref().and_then(|s| serde_json::to_string(s).ok()),
-            input.auto_resume as i64, input.wait_deadline, next, now
+            input.auto_resume as i64, input.wait_deadline, next, now, input.serial_queue as i64
         ],
     ).map_err(|e| e.to_string())?;
     Ok(())
@@ -528,10 +543,11 @@ fn day_start(now: i64) -> i64 {
         .unwrap_or(now)
 }
 
+/// 同账号排在前面的排队任务数；关闭排队的任务不挡排队任务，不计入（D-09）
 fn queue_ahead(conn: &Connection, run: &Run) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE t.connection_id = ?1 AND t.state != 'paused' AND r.id != ?2
+         WHERE t.connection_id = ?1 AND t.state != 'paused' AND t.serial_queue = 1 AND r.id != ?2
            AND r.status IN ('queued','waiting','running')
            AND (r.status = 'running' OR r.created_at < ?3 OR (r.created_at = ?3 AND r.id < ?2))",
         params![run.connection_id, run.id, run.created_at],
@@ -542,8 +558,9 @@ fn queue_ahead(conn: &Connection, run: &Run) -> rusqlite::Result<i64> {
 fn task_item(conn: &Connection, task: Task) -> rusqlite::Result<TaskItem> {
     let active = active_run(conn, task.id)?;
     let last = last_run(conn, task.id)?;
+    // 关闭排队的任务没有队列位置（只受工作目录、并行上限与额度等待限制），不给出前方任务数；显示方式待确认
     let queue_ahead = match &active {
-        Some(run) if run.status == "queued" => Some(queue_ahead(conn, run)?),
+        Some(run) if run.status == "queued" && task.serial_queue => Some(queue_ahead(conn, run)?),
         _ => None,
     };
     Ok(TaskItem { task, active, last, queue_ahead })
@@ -591,7 +608,7 @@ pub struct QueueItem {
 #[derive(Debug, Serialize)]
 pub struct TaskDetail {
     pub item: TaskItem,
-    /// 同账号的队列（执行中 / 等待额度 / 排队中），按先后顺序
+    /// 同账号的队列（执行中 / 等待额度 / 排队中），按先后顺序；只列开启排队的任务（D-09）
     pub queue: Vec<QueueItem>,
     /// 当前（或最近一次）运行的时间线
     pub events: Vec<Event>,
@@ -603,7 +620,7 @@ pub fn task_detail(conn: &Connection, id: i64) -> Result<TaskDetail, String> {
     let item = task_item(conn, task).map_err(e)?;
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, r.status FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE t.connection_id = ?1 AND t.state != 'paused' AND r.status IN ('queued','waiting','running')
+         WHERE t.connection_id = ?1 AND t.state != 'paused' AND t.serial_queue = 1 AND r.status IN ('queued','waiting','running')
          ORDER BY CASE r.status WHEN 'running' THEN 0 ELSE 1 END, r.created_at, r.id",
     ).map_err(e)?;
     let queue = stmt.query_map([&item.task.connection_id], |r| Ok(QueueItem { task_id: r.get(0)?, name: r.get(1)?, status: r.get(2)? }))
@@ -1191,19 +1208,52 @@ fn set_attention(conn: &Connection, run_id: i64, kind: &str, reason: &str, now: 
     add_event(conn, run_id, now, "attention", "需要处理", Some(reason))
 }
 
-/// 每个账号只启动队首：执行中或等待额度的运行会挡住同账号后续任务；暂停的任务不占队列
+/// D-09：每个账号同时运行的任务上限（含排队任务与并行任务）
+const MAX_PARALLEL_PER_ACCOUNT: usize = 3;
+
+/// 工作目录比较键：与会话模块一致，小写、`\` 换成 `/`、去掉末尾 `/`
+fn cwd_key(path: &str) -> String {
+    path.trim().replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// 按账号决定本轮可以启动的运行（D-09），暂停的任务不占队列：
+/// ③ 账号下任一运行在等待额度时，整个账号不再启动新任务（正在运行的跑完当前这一轮）；
+/// 排队任务（serial）一次一个，先放行排队队首，再按顺序放行关闭排队的任务；
+/// ① 与任何账号正在运行（或本轮已放行）的任务工作目录相同则不放行；② 同账号运行数不超过上限
 pub fn startable(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
+    struct Row { id: i64, status: String, cwd: String, serial: bool }
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.status, t.connection_id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
+        "SELECT r.id, r.status, t.connection_id, t.cwd, t.serial_queue FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
          WHERE r.status IN ('queued','waiting','running') AND t.state != 'paused'
-         ORDER BY CASE r.status WHEN 'running' THEN 0 ELSE 1 END, r.created_at, r.id",
+         ORDER BY r.created_at, r.id",
     )?;
-    let rows: Vec<(i64, String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
-    let mut seen = HashSet::new();
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(2)?, Row { id: r.get(0)?, status: r.get(1)?, cwd: cwd_key(&r.get::<_, String>(3)?), serial: r.get::<_, i64>(4)? != 0 }))
+    })?;
+    let mut accounts: Vec<(String, Vec<Row>)> = Vec::new();
+    for row in rows {
+        let (connection, row) = row?;
+        match accounts.iter_mut().find(|(c, _)| *c == connection) {
+            Some((_, list)) => list.push(row),
+            None => accounts.push((connection, vec![row])),
+        }
+    }
     let mut out = Vec::new();
-    for (id, status, connection) in rows {
-        if !seen.insert(connection) { continue; }
-        if status == "queued" { out.push(id); }
+    // ① 同一工作目录跨账号也串行：先放入所有正在运行的目录，本轮放行的也加入
+    let mut busy: HashSet<&str> = accounts.iter().flat_map(|(_, rows)| rows.iter()).filter(|r| r.status == "running").map(|r| r.cwd.as_str()).collect();
+    for (_, rows) in &accounts {
+        if rows.iter().any(|r| r.status == "waiting") { continue; }
+        let running: Vec<&Row> = rows.iter().filter(|r| r.status == "running").collect();
+        let mut count = running.len();
+        let serial_busy = running.iter().any(|r| r.serial);
+        let head = rows.iter().find(|r| r.status == "queued" && r.serial).filter(|_| !serial_busy);
+        let parallel = rows.iter().filter(|r| r.status == "queued" && !r.serial);
+        for r in head.into_iter().chain(parallel) {
+            if count >= MAX_PARALLEL_PER_ACCOUNT { break; }
+            if !busy.insert(r.cwd.as_str()) { continue; }
+            out.push(r.id);
+            count += 1;
+        }
     }
     Ok(out)
 }
@@ -1229,8 +1279,8 @@ pub fn fire_schedules<Tz: TimeZone>(conn: &Connection, tz: &Tz, now: i64) -> rus
     Ok(changed)
 }
 
-/// 等待截止已过的运行转为「需要处理」，返回到期需要检查额度的运行
-pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<i64>, bool)> {
+/// 等待截止已过的运行转为「需要处理」，返回有运行到期需要检查额度的账号（D-09：同账号合并成一次检查）
+pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>, bool)> {
     let mut stmt = conn.prepare(
         "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
          WHERE r.status = 'waiting' AND t.wait_deadline IS NOT NULL AND t.wait_deadline < ?1",
@@ -1244,11 +1294,29 @@ pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<i64>, bo
         add_event(conn, *id, now, "attention", "等待超时", None)?;
     }
     let mut stmt = conn.prepare(
-        "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status = 'waiting' AND t.state != 'paused' AND (r.next_check_at IS NULL OR r.next_check_at <= ?1)",
+        "SELECT t.connection_id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
+         WHERE r.status = 'waiting' AND t.state != 'paused' AND (r.next_check_at IS NULL OR r.next_check_at <= ?1)
+         GROUP BY t.connection_id ORDER BY MIN(r.created_at), MIN(r.id)",
     )?;
     let due = stmt.query_map([now], |r| r.get(0))?.collect::<Result<_, _>>()?;
     Ok((due, !expired.is_empty()))
+}
+
+/// D-09 ③：额度检查按账号合并，一次检查的结果写入该账号全部等待中的运行（暂停的任务除外）；
+/// `extra` 是手动检查的那条运行，即使所属任务已暂停也照常写入。
+/// `checked_from` 是这次额度查询开始的时间：查询期间才进入等待的运行不使用这次（可能已过时的）结果。
+/// 返回是否有运行转入队列
+pub fn apply_account_check(conn: &Connection, connection_id: &str, extra: Option<i64>, checked_from: i64, v: &QuotaVerdict, now: i64) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
+         WHERE r.status = 'waiting' AND t.connection_id = ?1 AND (t.state != 'paused' OR r.id = ?2)
+           AND COALESCE(r.wait_started_at, 0) <= ?3
+         ORDER BY r.created_at, r.id",
+    )?;
+    let ids: Vec<i64> = stmt.query_map(params![connection_id, extra.unwrap_or(-1), checked_from], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    let mut queued = false;
+    for id in ids { queued |= apply_check(conn, id, v, now)?; }
+    Ok(queued)
 }
 
 /// 启动时：上次退出时还在执行的运行标为需要处理（不自动重跑）；等待中的立即重新检查额度
@@ -1427,8 +1495,8 @@ fn tick(app: &AppHandle) {
             return;
         }
     };
-    for run_id in due {
-        check_run_blocking(app, run_id);
+    for connection_id in due {
+        check_account_blocking(app, &connection_id);
     }
     match with_conn(&db, |conn| startable(conn).map_err(|e| e.to_string())) {
         Ok(runs) => {
@@ -1438,15 +1506,15 @@ fn tick(app: &AppHandle) {
     }
 }
 
-fn check_run_blocking(app: &AppHandle, run_id: i64) {
+fn check_account_blocking(app: &AppHandle, connection_id: &str) {
     let db = shared(app);
-    let Ok(Some(run)) = with_conn(&db, |conn| load_run(conn, run_id).map_err(|e| e.to_string())) else { return };
-    let state = tauri::async_runtime::block_on(crate::query_connection_quota(app.clone(), run.connection_id.clone(), true));
+    let checked_from = now_ms();
+    let state = tauri::async_runtime::block_on(crate::query_connection_quota(app.clone(), connection_id.to_string(), true));
     let v = match state {
         Ok(state) => verdict(&state),
         Err(error) => QuotaVerdict::simple("unknown", error),
     };
-    if with_conn(&db, |conn| apply_check(conn, run_id, &v, now_ms()).map_err(|e| e.to_string())).is_ok() { emit(app); }
+    if with_conn(&db, |conn| apply_account_check(conn, connection_id, None, checked_from, &v, now_ms()).map_err(|e| e.to_string())).is_ok() { emit(app); }
 }
 
 fn start_run(app: &AppHandle, run_id: i64) {
@@ -1603,11 +1671,12 @@ pub async fn automation_action(app: AppHandle, id: i64, action: String) -> Resul
         let run = blocking(&app, move |conn| active_run(conn, id).map_err(|e| e.to_string())).await?
             .filter(|r| r.status == "waiting")
             .ok_or("当前没有等待额度的运行")?;
+        let checked_from = now_ms();
         let v = match crate::query_connection_quota(app.clone(), run.connection_id.clone(), true).await {
             Ok(state) => verdict(&state),
             Err(error) => QuotaVerdict::simple("unknown", error),
         };
-        blocking(&app, move |conn| apply_check(conn, run.id, &v, now_ms()).map_err(|e| e.to_string())).await?;
+        blocking(&app, move |conn| apply_account_check(conn, &run.connection_id, Some(run.id), checked_from, &v, now_ms()).map_err(|e| e.to_string())).await?;
     } else {
         let kill = blocking(&app, move |conn| act(conn, id, &action, now_ms())).await?;
         if let Some(run_id) = kill { kill_run(run_id); }
@@ -1804,6 +1873,7 @@ mod tests {
             schedule: None,
             auto_resume: true,
             wait_deadline: None,
+            serial_queue: true,
         }
     }
 
@@ -1838,6 +1908,213 @@ mod tests {
         act(&conn, first, "cancel", now + 200_000).unwrap();
         assert_eq!(load_run(&conn, run_id).unwrap().unwrap().status, "cancelled");
         assert_eq!(startable(&conn).unwrap().len(), 1, "取消后轮到下一个任务");
+    }
+
+    /* ── 任务 2.6：关闭同账号排队（D-09） ── */
+
+    /// 新建一个立即执行的任务，返回它的运行；工作目录直接写库（`startable` 不访问磁盘）
+    fn queued(conn: &Connection, connection: &str, cwd: &str, serial: bool, now: i64) -> i64 {
+        let mut i = input("now");
+        i.connection_id = connection.into();
+        i.serial_queue = serial;
+        let task = create_task(conn, &i, now).unwrap();
+        conn.execute("UPDATE automation_tasks SET cwd=?2 WHERE id=?1", params![task, cwd]).unwrap();
+        active_run(conn, task).unwrap().unwrap().id
+    }
+
+    fn set_status(conn: &Connection, run: i64, status: &str) {
+        conn.execute("UPDATE automation_runs SET status=?2 WHERE id=?1", params![run, status]).unwrap();
+    }
+
+    #[test]
+    fn startable_skips_serial_for_opt_out() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let a = queued(&conn, "c1", r"D:\work\a", true, now);
+        let b = queued(&conn, "c1", r"D:\work\b", true, now + 1);
+        let c = queued(&conn, "c1", r"D:\work\c", false, now + 2);
+        set_status(&conn, a, "running");
+        assert_eq!(startable(&conn).unwrap(), vec![c], "排队任务等 A，关闭排队的 C 直接放行");
+        set_status(&conn, c, "running");
+        set_status(&conn, a, "completed");
+        assert_eq!(startable(&conn).unwrap(), vec![b], "A 完成后轮到排队的 B，不受并行的 C 影响");
+        assert_eq!(queue_ahead(&conn, &load_run(&conn, b).unwrap().unwrap()).unwrap(), 0, "队列位置只统计排队任务");
+    }
+
+    #[test]
+    fn same_cwd_always_serial() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let a = queued(&conn, "c1", r"D:\Work\Proj", true, now);
+        let c = queued(&conn, "c1", "d:/work/proj/", false, now + 1);
+        let _d = queued(&conn, "c1", "d:/work/proj", false, now + 2);
+        set_status(&conn, a, "running");
+        assert!(startable(&conn).unwrap().is_empty(), "同一工作目录（大小写、斜杠不同）不并行");
+        set_status(&conn, a, "completed");
+        assert_eq!(startable(&conn).unwrap(), vec![c], "同一目录一次只放行一个");
+    }
+
+    #[test]
+    fn parallel_cap_per_account() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        for i in 0..3 {
+            let run = queued(&conn, "c1", &format!(r"D:\work\p{i}"), false, now + i);
+            set_status(&conn, run, "running");
+        }
+        let _fourth = queued(&conn, "c1", r"D:\work\p3", false, now + 3);
+        let other = queued(&conn, "c2", r"D:\work\p4", false, now + 4);
+        assert_eq!(startable(&conn).unwrap(), vec![other], "同账号最多 3 个并行，其他账号不受影响");
+    }
+
+    #[test]
+    fn quota_wait_blocks_whole_account() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let r1 = queued(&conn, "c1", r"D:\work\r1", false, now);
+        let r2 = queued(&conn, "c1", r"D:\work\r2", false, now + 1);
+        set_status(&conn, r1, "running");
+        conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![r2, now]).unwrap();
+        let p = Progress { session_id: Some("s-2".into()), ..Default::default() };
+        finish(&conn, r2, &Outcome::Limit { resets_at: Some(now + 60_000), message: "usage limit".into() }, &p, now + 5_000).unwrap();
+        assert_eq!(load_run(&conn, r2).unwrap().unwrap().status, "waiting");
+        let _serial = queued(&conn, "c1", r"D:\work\s", true, now + 2);
+        let _parallel = queued(&conn, "c1", r"D:\work\n", false, now + 3);
+        let other = queued(&conn, "c2", r"D:\work\x", false, now + 4);
+        assert_eq!(startable(&conn).unwrap(), vec![other], "额度等待挡住同账号全部新任务，其他账号照常");
+        assert_eq!(load_run(&conn, r1).unwrap().unwrap().status, "running", "正在运行的任务跑完当前这一轮");
+    }
+
+    #[test]
+    fn recovery_releases_serial_head_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let n1 = queued(&conn, "c1", r"D:\work\n1", false, now);
+        let mut waiting = input("quota");
+        waiting.connection_id = "c1".into();
+        let head_task = create_task(&conn, &waiting, now + 1).unwrap();
+        let head = active_run(&conn, head_task).unwrap().unwrap().id;
+        let _b = queued(&conn, "c1", r"D:\work\b", true, now + 2);
+        let n2 = queued(&conn, "c1", r"D:\work\n2", false, now + 3);
+        let _n3 = queued(&conn, "c1", r"D:\work\n3", false, now + 4);
+        assert!(startable(&conn).unwrap().is_empty(), "等待额度期间整个账号不放行");
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        assert!(apply_check(&conn, head, &ok, now + 10_000).unwrap());
+        assert_eq!(startable(&conn).unwrap(), vec![head, n1, n2], "先放行排队队首，再放行并行任务，总数不超过 3");
+    }
+
+    #[test]
+    fn quota_checks_merge_per_account() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let mut w = input("quota");
+        w.serial_queue = false;
+        let w1 = active_run(&conn, create_task(&conn, &w, now).unwrap()).unwrap().unwrap().id;
+        let w2 = active_run(&conn, create_task(&conn, &w, now + 1).unwrap()).unwrap().unwrap().id;
+        w.connection_id = "c2".into();
+        let w3 = active_run(&conn, create_task(&conn, &w, now + 2).unwrap()).unwrap().unwrap().id;
+        let (due, _) = due_checks(&conn, now + 10).unwrap();
+        assert_eq!(due, vec!["c1".to_string(), "c2".to_string()], "同账号只检查一次");
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        assert!(apply_account_check(&conn, "c1", None, now + 10, &ok, now + 20).unwrap());
+        let status = |id| load_run(&conn, id).unwrap().unwrap().status;
+        assert_eq!((status(w1).as_str(), status(w2).as_str(), status(w3).as_str()), ("queued", "queued", "waiting"), "一次检查结果写入该账号全部等待中的运行");
+    }
+
+    #[test]
+    fn task_detail_queue_lists_serial_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let a = queued(&conn, "c1", r"D:\work\a", true, now);
+        let _c = queued(&conn, "c1", r"D:\work\c", false, now + 1);
+        let _b = queued(&conn, "c1", r"D:\work\b", true, now + 2);
+        set_status(&conn, a, "running");
+        let task_a = load_run(&conn, a).unwrap().unwrap().task_id;
+        let names: Vec<(i64, String)> = task_detail(&conn, task_a).unwrap().queue.into_iter().map(|q| (q.task_id, q.status)).collect();
+        assert_eq!(names, vec![(1, "running".to_string()), (3, "queued".to_string())], "同账号队列不列关闭排队的任务");
+    }
+
+    #[test]
+    fn same_cwd_serial_across_accounts() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let a = queued(&conn, "c1", r"D:\Work\Shared", true, now);
+        let _b = queued(&conn, "c2", "d:/work/shared/", false, now + 1);
+        set_status(&conn, a, "running");
+        assert!(startable(&conn).unwrap().is_empty(), "不同账号在同一工作目录（大小写、斜杠不同）也不同时运行");
+    }
+
+    #[test]
+    fn parallel_cap_counts_running_serial() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let s = queued(&conn, "c1", r"D:\work\s", true, now);
+        let n1 = queued(&conn, "c1", r"D:\work\n1", false, now + 1);
+        let n2 = queued(&conn, "c1", r"D:\work\n2", false, now + 2);
+        for run in [s, n1, n2] { set_status(&conn, run, "running"); }
+        let _fourth = queued(&conn, "c1", r"D:\work\n3", false, now + 3);
+        assert!(startable(&conn).unwrap().is_empty(), "1 个排队任务 + 2 个并行任务在运行时，第 4 个并行任务不放行");
+    }
+
+    #[test]
+    fn stale_check_skips_runs_waiting_after_query_start() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let mut w = input("quota");
+        w.serial_queue = false;
+        let before = active_run(&conn, create_task(&conn, &w, now).unwrap()).unwrap().unwrap().id;
+        let checked_from = now + 10;
+        let after = active_run(&conn, create_task(&conn, &w, now + 20).unwrap()).unwrap().unwrap().id;
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        assert!(apply_account_check(&conn, "c1", None, checked_from, &ok, now + 30).unwrap());
+        let status = |id| load_run(&conn, id).unwrap().unwrap().status;
+        assert_eq!((status(before).as_str(), status(after).as_str()), ("queued", "waiting"), "查询开始后才进入等待的运行不使用这次的旧结果");
+        assert!(!apply_account_check(&conn, "c1", Some(after), checked_from, &ok, now + 40).unwrap(), "手动检查的运行同样只认查询开始前的等待");
+        assert_eq!(status(after), "waiting");
+    }
+
+    #[test]
+    fn paused_waiting_run_neither_blocks_nor_wakes() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let paused_task = create_task(&conn, &input("quota"), now).unwrap();
+        let paused = active_run(&conn, paused_task).unwrap().unwrap().id;
+        act(&conn, paused_task, "pause", now + 1).unwrap();
+        let q = queued(&conn, "c1", r"D:\work\q", true, now + 2);
+        assert_eq!(startable(&conn).unwrap(), vec![q], "暂停任务的等待运行不挡账号");
+        let (due, _) = due_checks(&conn, now + 10).unwrap();
+        assert!(due.is_empty(), "暂停任务的等待运行不触发额度检查");
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        assert!(!apply_account_check(&conn, "c1", None, now + 10, &ok, now + 20).unwrap());
+        assert_eq!(load_run(&conn, paused).unwrap().unwrap().status, "waiting", "合并检查不唤醒暂停任务的等待运行");
+    }
+
+    #[test]
+    fn serial_queue_column_migrates_with_default_on() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE automation_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, platform TEXT NOT NULL, connection_id TEXT NOT NULL, model TEXT, cwd TEXT NOT NULL, session_id TEXT, prompt TEXT NOT NULL, skills TEXT NOT NULL DEFAULT '[]', launch TEXT NOT NULL, schedule TEXT, auto_resume INTEGER NOT NULL DEFAULT 1, wait_deadline INTEGER, state TEXT NOT NULL DEFAULT 'active', next_run_at INTEGER, missed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+             INSERT INTO automation_tasks (name, platform, connection_id, cwd, prompt, launch, created_at, updated_at) VALUES ('旧任务', 'claude', 'c1', 'D:/work', '执行', 'now', 1, 1);",
+        ).unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+        assert!(load_task(&conn, 1).unwrap().unwrap().serial_queue, "旧任务默认保持同账号排队");
+        let parsed: TaskInput = serde_json::from_value(serde_json::json!({
+            "name": "a", "platform": "claude", "connection_id": "c1", "model": null, "cwd": "D:/work", "session_id": null,
+            "prompt": "p", "launch": "now", "schedule": null, "auto_resume": true, "wait_deadline": null
+        })).unwrap();
+        assert!(parsed.serial_queue, "未传字段时默认开启");
     }
 
     /// 额度耗尽：Claude Code 与 Codex 各一段输出喂给 `classify`，任务进入等待并记下重置时间。
