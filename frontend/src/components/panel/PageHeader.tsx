@@ -60,10 +60,11 @@ function HeaderActions() {
 
   return (
     <div className="flex shrink-0 items-center gap-3">
-      <HeaderButton label="GitHub" onClick={() => void openUrl(REPO_URL)}>
+      <HeaderButton motion="github" label="GitHub" onClick={() => void openUrl(REPO_URL)}>
         <Github aria-hidden className="size-5" />
       </HeaderButton>
       <HeaderButton
+        motion="island"
         label={(visible ? "隐藏灵动岛" : "显示灵动岛") + (desktopOnly ?? "")}
         pressed={visible}
         disabled={!isTauri || !cfg.ready}
@@ -72,6 +73,7 @@ function HeaderActions() {
         <PictureInPicture2 aria-hidden className="size-5" />
       </HeaderButton>
       <HeaderButton
+        motion={dark ? "moon" : "sun"}
         label={(dark ? "切换到浅色" : "切换到深色") + (desktopOnly ?? "")}
         disabled={!isTauri || !cfg.ready}
         onClick={() => void cfg.setTheme(dark ? "light" : "dark")}
@@ -79,6 +81,7 @@ function HeaderActions() {
         {dark ? <Moon aria-hidden className="size-5" /> : <Sun aria-hidden className="size-5" />}
       </HeaderButton>
       <HeaderButton
+        motion="update"
         label={UPDATES_ENABLED ? "检查更新" : "检查更新暂时停用"}
         disabled={!UPDATES_ENABLED || update.phase === "checking"}
         onClick={onUpdate}
@@ -89,7 +92,8 @@ function HeaderActions() {
   )
 }
 
-function HeaderButton({ label, pressed, disabled, onClick, children }: {
+function HeaderButton({ motion, label, pressed, disabled, onClick, children }: {
+  motion: "github" | "island" | "sun" | "moon" | "update"
   label: string
   pressed?: boolean
   disabled?: boolean
@@ -103,6 +107,7 @@ function HeaderButton({ label, pressed, disabled, onClick, children }: {
         <button
           type="button"
           aria-label={label}
+          data-icon-motion={motion}
           aria-pressed={pressed}
           disabled={disabled}
           onClick={onClick}

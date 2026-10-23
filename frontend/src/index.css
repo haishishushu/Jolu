@@ -586,3 +586,27 @@ html.reduce-motion .motion-button:not(:disabled):active { transform: none; }
 fieldset[data-saving="true"] :disabled:not([disabled]) {
   opacity: 1;
 }
+
+/* 导航图标只作一次轻量回应，不移动文字或暗示正在执行操作。 */
+[data-icon-motion] > svg {
+  transform-origin: center;
+  transition: transform 180ms ease-out, color 180ms ease-out;
+}
+[data-icon-motion]:not(:disabled):is(:hover, :focus-visible) > svg {
+  color: var(--color-jolu-on);
+  transform: translateY(-1px) scale(1.08);
+}
+[data-icon-motion="providers"]:is(:hover, :focus-visible) > svg { transform: rotate(-12deg); }
+[data-icon-motion="sessions"]:is(:hover, :focus-visible) > svg { transform: translateX(2px) scale(1.05); }
+[data-icon-motion="automation"]:is(:hover, :focus-visible) > svg { transform: rotate(-8deg); transform-origin: center bottom; }
+[data-icon-motion="skills"]:is(:hover, :focus-visible) > svg { transform: scaleX(1.12); }
+[data-icon-motion="settings"]:is(:hover, :focus-visible) > svg { transform: translateX(1px) scale(1.08); }
+[data-icon-motion="github"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(-8deg) scale(1.08); }
+[data-icon-motion="sun"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(30deg); }
+[data-icon-motion="moon"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(-15deg); }
+[data-icon-motion="update"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: translateY(-2px); }
+/* 系统与应用内的减少动效设置都保留颜色反馈，取消位移、缩放和旋转。 */
+@media (prefers-reduced-motion: reduce) {
+  [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
+}
+html.reduce-motion [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
