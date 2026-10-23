@@ -138,6 +138,13 @@ export interface SkillImportResultDto {
   failed: SkillScanErrorDto[]
 }
 
+export interface SkillGitImportScanDto {
+  /** 应用临时目录下的克隆目录，导入完成或取消后调用 `importGitCleanup` */
+  checkout_dir: string
+  /** `scan.source` 是实际导入来源：克隆根目录，或仓库里的 `skills/` 子目录 */
+  scan: SkillImportScanDto
+}
+
 /** 编辑保存时文件已被其他程序改动（画板 84「检测到外部修改」） */
 export const SKILL_EXTERNAL_CHANGE = "external_change"
 
@@ -160,4 +167,8 @@ export const skillsApi = {
   ignoreProject: (path: string, ignored: boolean) => invoke<void>("skills_ignore_project", { path, ignored }),
   pickFolder: (title: string) => invoke<string | null>("skills_pick_folder", { title }),
   openDir: (path: string) => invoke<void>("skill_open_dir", { path }),
+  /** 从 Git 仓库导入（D-16）：本机 git 浅克隆到临时目录并扫描，只接受 https:// */
+  importGit: (url: string, branch: string | null, platform: string, scope: SkillScope, project: string | null) =>
+    invoke<SkillGitImportScanDto>("skills_import_git", { url, branch, platform, scope, project }),
+  importGitCleanup: (checkoutDir: string) => invoke<void>("skills_import_git_cleanup", { checkoutDir }),
 }
