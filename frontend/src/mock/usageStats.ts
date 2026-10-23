@@ -46,11 +46,11 @@ export function demoOverview(start: number): StatsOverviewDto {
     ],
     attributed: 778,
     sessions: [
-      { platform: "claude", session_id: "demo-1", title: "排查缓存 Token 统计", tokens: 2_860_000 },
-      { platform: "codex", session_id: "demo-2", title: "优化 Jolu 的会话界面", tokens: 1_920_000 },
-      { platform: "gemini", session_id: "demo-3", title: "梳理登录引导文案", tokens: 680_000 },
-      { platform: "codex", session_id: "demo-4", title: "接入模型列表接口", tokens: 520_000 },
-      { platform: "claude", session_id: "demo-5", title: null, tokens: 410_000 },
+      { platform: "claude", session_id: "demo-1", title: "排查缓存 Token 统计", tokens: 2_860_000, cwd: "D:/develop/jolu" },
+      { platform: "codex", session_id: "demo-2", title: "优化 Jolu 的会话界面", tokens: 1_920_000, cwd: "D:/develop/jolu" },
+      { platform: "gemini", session_id: "demo-3", title: "梳理登录引导文案", tokens: 680_000, cwd: null },
+      { platform: "codex", session_id: "demo-4", title: "接入模型列表接口", tokens: 520_000, cwd: "D:/work/api-gateway" },
+      { platform: "claude", session_id: "demo-5", title: null, tokens: 410_000, cwd: null },
     ],
   }
 }

@@ -307,6 +307,8 @@ pub struct SessionRow {
     pub title: Option<String>,
     /// 范围内已知 Token 之和
     pub tokens: i64,
+    /// 项目目录：从会话来源文件读取（D-30，不改用量表）；来源文件缺失或没写 cwd 时为 None
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -453,6 +455,8 @@ fn top_sessions(conn: &Connection, reqs: &[Req], limit: usize) -> rusqlite::Resu
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked.truncate(limit);
     let mut title = conn.prepare("SELECT title FROM sessions WHERE platform = ?1 AND session_id = ?2")?;
+    // 只对排名后的几行读 cwd；read_cwd 按文件修改时间缓存，不会每次重读源文件
+    let files = if ranked.is_empty() { HashMap::new() } else { crate::session_threads::source_files(conn)? };
     ranked
         .into_iter()
         .map(|((platform, session_id), tokens)| {
@@ -465,6 +469,7 @@ fn top_sessions(conn: &Connection, reqs: &[Req], limit: usize) -> rusqlite::Resu
                 session_id: session_id.to_string(),
                 title: found.flatten().filter(|t| !t.trim().is_empty()),
                 tokens,
+                cwd: files.get(&(platform.to_string(), session_id.to_string())).and_then(|p| crate::session_threads::read_cwd(p)),
             })
         })
         .collect()
@@ -799,5 +804,35 @@ mod tests {
         assert_eq!(csv_cell("a,b"), "\"a,b\"");
         assert_eq!(csv_cell("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(csv_cell("plain"), "plain");
+    }
+
+    #[test]
+    fn top_sessions_fills_cwd_from_source() {
+        let base = local_ms(NaiveDate::from_ymd_opt(2026, 10, 21).unwrap());
+        let (conn, path) = seeded(&[
+            rec("claude", "a1", base + 1_000, "claude-sonnet-4-5", [Some(100), Some(50), Some(0), Some(0), Some(150)], Some("with-cwd")),
+            rec("claude", "a2", base + 2_000, "claude-sonnet-4-5", [Some(10), Some(5), Some(0), Some(0), Some(15)], Some("gone")),
+            rec("claude", "a3", base + 3_000, "claude-sonnet-4-5", [Some(10), Some(5), Some(0), Some(0), Some(15)], Some("with-cwd")),
+            rec("codex", "c1", base + 4_000, "gpt-5", [Some(10), Some(5), Some(0), Some(0), Some(15)], Some("unregistered")),
+        ]);
+        let dir = std::env::temp_dir().join(format!("jolu-top-sessions-cwd-{}", std::process::id()));
+        let projects = dir.join(".claude").join("projects").join("demo");
+        std::fs::create_dir_all(&projects).unwrap();
+        let file = projects.join("with-cwd.jsonl");
+        std::fs::write(&file, "{\"type\":\"user\",\"cwd\":\"D:\\\\work\\\\demo-app\",\"sessionId\":\"with-cwd\"}\n").unwrap();
+        let missing = projects.join("gone.jsonl");
+        for p in [&file, &missing] {
+            conn.execute("INSERT INTO scan_state(path, offset, mtime) VALUES(?1, 0, 0)", [p.to_string_lossy()]).unwrap();
+        }
+        let o = overview(&conn, &filter(base, base + 86_400_000)).unwrap();
+        let with = o.sessions.iter().find(|s| s.session_id == "with-cwd").unwrap();
+        assert_eq!(with.cwd.as_deref(), Some("D:\\work\\demo-app"));
+        let gone = o.sessions.iter().find(|s| s.session_id == "gone").unwrap();
+        assert_eq!(gone.cwd, None, "来源文件不存在时不猜项目");
+        let unregistered = o.sessions.iter().find(|s| s.session_id == "unregistered").unwrap();
+        assert_eq!(unregistered.cwd, None, "没有登记来源文件时不猜项目");
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

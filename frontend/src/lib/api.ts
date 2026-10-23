@@ -620,6 +620,8 @@ export interface StatsSessionRowDto {
   session_id: string
   title: string | null
   tokens: number
+  /** 项目目录；来源文件缺失或没写 cwd 时为 null，界面只显示供应商 */
+  cwd: string | null
 }
 
 export interface StatsOverviewDto {
