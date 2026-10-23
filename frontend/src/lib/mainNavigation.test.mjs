@@ -6,6 +6,7 @@ import {
   pageForIntent,
   pageLabel,
   readSidebarCollapsed,
+  resolveOpenPage,
   writeSidebarCollapsed,
 } from "./mainNavigation.ts"
 
@@ -31,4 +32,18 @@ test("侧栏收起状态读写，存储不可用时按展开处理", () => {
   const broken = { getItem: () => { throw new Error("blocked") }, setItem: () => { throw new Error("blocked") } }
   assert.equal(readSidebarCollapsed(broken), false)
   assert.doesNotThrow(() => writeSidebarCollapsed(true, broken))
+})
+
+test("resolveOpenPage", () => {
+  assert.equal(resolveOpenPage("last", "skills"), "skills")
+  assert.equal(resolveOpenPage("last", null), "usage")
+  assert.equal(resolveOpenPage("last", "bogus"), "usage")
+  assert.equal(resolveOpenPage("sessions", "skills"), "sessions")
+  assert.equal(resolveOpenPage("bogus", null), "usage")
+})
+
+test("托盘打开主窗口按默认打开页面设置换算", () => {
+  assert.equal(pageForIntent({ kind: "overview", settings: { default_page: "last", last_page: "automation" } }), "automation")
+  assert.equal(pageForIntent({ kind: "overview", settings: { default_page: "providers", last_page: "automation" } }), "providers")
+  assert.equal(pageForIntent({ kind: "overview", settings: { default_page: "last", last_page: null } }), "usage")
 })
