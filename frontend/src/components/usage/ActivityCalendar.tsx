@@ -1,6 +1,7 @@
 import { useMemo } from "react"
 import { activityLevel, calendarWeeks, formatMinutes, formatTokens, monthLabels } from "@/lib/usageStats"
 import type { StatsActivityDto } from "@/lib/api"
+import { Tip } from "@/components/ui/Tip"
 import { Card } from "./usageControls"
 
 /** 画板 32 的五档活跃色；0 档用侧栏底色，浅深色相同 */
@@ -37,12 +38,20 @@ export function ActivityCalendar({ activity }: { activity: StatsActivityDto | nu
                   const day = view.byDate.get(key)
                   const level = activityLevel(day?.tokens ?? 0, view.sorted)
                   return (
-                    <span
-                      key={key}
-                      title={day ? `${key} · ${formatTokens(day.tokens)} Token · ${day.requests} 次调用` : `${key} · 无记录`}
-                      className="h-[19px] rounded-[3px]"
-                      style={{ background: LEVEL_COLORS[level] }}
-                    />
+                    <Tip key={key} side="top" className="min-w-[190px] rounded-xl px-3.5 py-3" label={
+                      <span className="flex flex-col gap-2">
+                        <span className="tnum border-b border-jolu-border pb-2 text-xs font-semibold">{key}</span>
+                        <span className="flex items-center justify-between gap-6"><span className="text-jolu-muted">Token 用量</span><span className="tnum font-medium">{day ? formatTokens(day.tokens) : "无记录"}</span></span>
+                        <span className="flex items-center justify-between gap-6"><span className="text-jolu-muted">调用次数</span><span className="tnum font-medium">{day ? `${day.requests} 次` : "无记录"}</span></span>
+                      </span>
+                    }>
+                      <span
+                        tabIndex={0}
+                        aria-label={day ? `${key}，${formatTokens(day.tokens)} Token，${day.requests} 次调用` : `${key}，无记录`}
+                        className="h-[19px] rounded-[3px] outline-none transition-[box-shadow] hover:ring-2 hover:ring-jolu-on focus-visible:ring-2 focus-visible:ring-jolu-on"
+                        style={{ background: LEVEL_COLORS[level] }}
+                      />
+                    </Tip>
                   )
                 })}
               </div>
