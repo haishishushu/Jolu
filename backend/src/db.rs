@@ -224,6 +224,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN context_1m INTEGER", []);
     // 任务 3.4：自定义供应商的接口协议（openai / anthropic），其他连接为 NULL
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN protocol TEXT", []);
+    // 可空展示元数据：保留旧连接，仅在凭证准确匹配时补齐。
+    let _ = conn.execute("ALTER TABLE connections ADD COLUMN account_email TEXT", []);
     // 会话生命周期：旧库升级后默认均为停止，避免把近期 Token 误报成正在运行。
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN is_running INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN activity_state TEXT NOT NULL DEFAULT 'done'", []);

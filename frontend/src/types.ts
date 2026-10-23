@@ -29,6 +29,8 @@ export type ConnectionKind = "auth" | "api"
 export type ConnectionStatus = "connected" | "expired" | "invalid" | "offline" | "paused"
 
 export interface Connection {
+  accountEmail?: string | null
+
   id: string
   platformId: PlatformId
   kind: ConnectionKind

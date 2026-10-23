@@ -552,6 +552,8 @@ mod custom_provider_tests {
 /// 返回给前端的连接。**不含** secret 字段——这是刻意的，不要加。
 #[derive(Debug, Serialize)]
 pub struct ConnectionDto {
+    /// 已核对凭证的账号邮箱；未知为 None，不从名称或 Key 推断。
+    pub account_email: Option<String>,
     pub id: String,
     pub platform: String,
     pub kind: String,
@@ -633,6 +635,7 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
     let kind: String = r.get("kind")?;
     let base_url = normalized_base(&platform, &kind, r.get("base_url")?);
     Ok(ConnectionDto {
+        account_email: r.get("account_email")?,
         id: r.get("id")?,
         platform: r.get("platform")?,
         kind: r.get("kind")?,
@@ -650,15 +653,29 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
 }
 
 pub fn list(conn: &Sql) -> rusqlite::Result<Vec<ConnectionDto>> {
+    backfill_account_emails(conn)?;
     let now = chrono::Local::now().timestamp_millis();
     let mut stmt = conn.prepare(
-        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol
+        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, account_email
          FROM connections ORDER BY created_ms ASC",
     )?;
     let rows = stmt
         .query_map([], |r| row_to_dto(r, now))?
         .collect::<Result<_, _>>()?;
     Ok(rows)
+}
+
+/// 旧连接只补充未知身份；切换本机账号后保留已保存的邮箱，不能串号。
+fn backfill_account_emails(conn: &Sql) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("SELECT id, platform, secret FROM connections WHERE kind='auth' AND account_email IS NULL AND platform IN ('claude','codex')")?;
+    let pending = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, platform, secret) in pending {
+        if let Some(email) = secret.as_deref().and_then(|s| crate::login_detect::account_for_secret(&platform, s)) {
+            conn.execute("UPDATE connections SET account_email=?2 WHERE id=?1 AND account_email IS NULL", params![id, email])?;
+        }
+    }
+    Ok(())
 }
 
 /// 连接名称校验：新增与改名共用同一口径（去首尾空白，1–80 个字符）。
@@ -758,12 +775,13 @@ pub fn add(conn: &Sql, c: NewConnection) -> Result<String, String> {
     let masked = c.secret.as_deref().map(mask).unwrap_or_default();
     let label = if c.kind == "api" { "API Key" } else { "官方订阅" };
     let base = c.base_url;
+    let account_email = if c.kind == "auth" { c.secret.as_deref().and_then(|s| crate::login_detect::account_for_secret(&c.platform, s)) } else { None };
 
     conn.execute(
         "INSERT INTO connections
-           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13)",
-        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol],
+           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol, account_email)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13, ?14)",
+        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol, account_email],
     ).map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -1119,7 +1137,7 @@ pub(crate) struct LocalPair {
 ///
 /// local 为 None 表示本机没有读到凭证：只读不写，原状态与凭证保持不变。
 /// 更新范围是 secret、masked 与 base_url——cc-switch 切换中转时两者一起变，
-/// 只刷 Key 会把新 Key 发往旧网关。同平台同类型有多条连接且脱敏标识对不上
+/// 只刷 Key 会把新 Key 发往旧网关。同平台同类型有多条连接且凭证原值对不上
 /// 时拒绝覆盖，让用户显式选择，绝不静默改错行。
 pub(crate) fn apply_local(
     conn: &Sql,
@@ -1127,14 +1145,14 @@ pub(crate) fn apply_local(
     local: Option<LocalPair>,
     scanned: Vec<String>,
 ) -> rusqlite::Result<FetchResult> {
-    let row: Option<(String, String, String, Option<String>)> = conn
+    let row: Option<(String, String, Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT platform, kind, masked, base_url FROM connections WHERE id = ?1",
+            "SELECT platform, kind, secret, base_url FROM connections WHERE id = ?1",
             params![id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((platform, kind, current_masked, current_base)) = row else {
+    let Some((platform, kind, current_secret, current_base)) = row else {
         return Ok(FetchResult { ok: false, masked: None, message: "连接不存在".into(), scanned, changed: false });
     };
     // 失败不得清空或破坏现有连接：这里只读不写
@@ -1153,7 +1171,7 @@ pub(crate) fn apply_local(
         params![platform, kind],
         |row| row.get(0),
     )?;
-    if same_kind_count > 1 && !current_masked.is_empty() && current_masked != masked {
+    if same_kind_count > 1 && current_secret.is_some() && current_secret.as_deref() != Some(local.secret.as_str()) {
         return Ok(FetchResult {
             ok: false,
             masked: Some(masked),
@@ -1162,15 +1180,17 @@ pub(crate) fn apply_local(
             changed: false,
         });
     }
-    let changed = current_masked != masked
+    let changed = current_secret.as_deref() != Some(local.secret.as_str())
         || normalized_base(&platform, &kind, current_base) != base_url;
     if changed {
         let now = chrono::Local::now().timestamp_millis();
+        let email = if kind == "auth" { crate::login_detect::account_for_secret(&platform, &local.secret) } else { None };
         conn.execute(
             "UPDATE connections
-                SET secret = ?2, masked = ?3, base_url = ?4, status = 'connected', last_sync_ms = ?5
+                SET secret = ?2, masked = ?3, base_url = ?4, status = 'connected', last_sync_ms = ?5,
+                    account_email = CASE WHEN secret = ?2 THEN account_email ELSE ?6 END
               WHERE id = ?1",
-            params![id, local.secret, masked, base_url, now],
+            params![id, local.secret, masked, base_url, now, email],
         )?;
     }
     Ok(FetchResult {
@@ -1242,4 +1262,25 @@ pub fn sync_from_local(conn: &Sql) -> Result<bool, String> {
         crate::creds::read_local_pair(platform, kind)
             .map(|(secret, base_url)| LocalPair { secret, base_url })
     })
+}
+
+#[cfg(test)]
+mod account_email_tests {
+    use super::*;
+    #[test]
+    fn account_email_survives_rename_pause_and_dto_has_no_secret() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let id = add(&db, NewConnection { platform:"codex".into(), kind:"auth".into(), name:"Work".into(), secret:Some("synthetic-identity-only".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
+        db.execute("UPDATE connections SET account_email='person@example.test', name='Renamed' WHERE id=?1", [&id]).unwrap();
+        set_paused(&db, &id, true).unwrap();
+        let rows = list(&db).unwrap();
+        assert_eq!(rows[0].account_email.as_deref(), Some("person@example.test"));
+        assert_eq!(rows[0].name, "Renamed");
+        let dto = serde_json::to_value(&rows[0]).unwrap();
+        assert!(dto.get("secret").is_none());
+        assert_eq!(dto["account_email"], "person@example.test");
+        apply_local(&db, &id, Some(LocalPair { secret: "synthetic-replacement-identity".into(), base_url: None }), vec![]).unwrap();
+        assert_eq!(list(&db).unwrap()[0].account_email, None);
+
+    }
 }

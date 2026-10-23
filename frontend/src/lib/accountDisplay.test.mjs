@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle } from "./accountDisplay.ts"
+import { filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "./accountDisplay.ts"
 
 test("额度窗口标题", () => {
   assert.equal(quotaTitle("5h", "5 小时窗口"), "5 小时额度")
@@ -38,4 +38,11 @@ test("搜索与供应商筛选共同生效", () => {
   assert.deepEqual(filterAccounts(accounts, "codex", "").map((a) => a.baseName), ["团队 API"])
   assert.deepEqual(filterAccounts(accounts, null, "7K2A").map((a) => a.baseName), ["团队 API"])
   assert.equal(filterAccounts(accounts, "claude", "团队").length, 0)
+})
+
+test("邮箱搜索独立于自定义连接名，错误脱敏保留诊断与金额", () => {
+  const accounts = [{ platformId: "codex", baseName: "工作账号", name: "工作账号", label: "Pro", accountEmail: "person@example.test" }]
+  assert.equal(filterAccounts(accounts, null, "PERSON@EXAMPLE").length, 1)
+  assert.equal(filterAccounts(accounts, "claude", "person").length, 0)
+  assert.equal(redactAccountMessage("person@example.test 请求 https://private.example.test/v1 失败，余额 $128.50"), "[账号已隐藏] 请求 [地址已隐藏] 失败，余额 $128.50")
 })
