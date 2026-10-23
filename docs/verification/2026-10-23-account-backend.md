@@ -24,7 +24,7 @@
 
 - 单个订阅账号也不能被不同本机登录静默覆盖。
 - Codex 只有完整快照与新授权的工作区 ID、用户 ID 都匹配才允许 token 轮换；同工作区的不同用户拒绝。未知身份保持原连接和邮箱。
-- Claude OAuth token 无已核实的跨文件身份绑定，本阶段保留切换当前完整授权、清除 API 覆盖的能力；不把另一个账号的凭证与 `.claude.json` 资料拼接成多账号切换。
+- Claude 官方 CLI 已核实可通过 `/api/oauth/profile` 把 token 绑定到账号与组织身份；本机缺完整订阅 OAuth 登录，尚未实现或验证跨账号完整快照。本阶段保留切换当前完整授权、清除 API 覆盖的能力；不把另一个账号的凭证与 `.claude.json` 资料拼接成多账号切换。
 - 读取、检测与写入统一遵守 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`。设置后 Claude 的 `.claude.json` 在配置目录内，默认仍在用户主目录。
 
 ## 来源核实
@@ -81,7 +81,7 @@ powershell.exe -NoProfile -File .\scripts\restore-cli-backup.ps1 -BackupPath 'C:
 
 - 实时订阅接口对当前 OAuth 凭证返回 403；只能展示明确的未获取状态和带来源的历史到期记录。
 - 未确认的其他供应商重置卡/到期能力保持未提供。
-- Claude 跨账号完整切换缺少可验证身份来源，保持拒绝，不能冒充已实现。
+- Claude 跨账号完整快照尚未实现或验证，保持拒绝。官方 CLI 身份来源已核实，当前缺口是本机没有完整订阅 OAuth 登录可用于接口预检及跨账号验证，不能表述为官方没有身份查询来源。
 - Windows 用户保护的快照不能在另一 Windows 用户下直接解密；用户变更后需要重新同步。
 
 ## 最终供应商配置优先级复审
@@ -101,3 +101,10 @@ profile 回归先红（实际仍为 old，期望 jolu），修复后 `cargo test
 当前账号识别补充同源约束：有效 `cli_auth_credentials_store` 非 `file` 时，不认定 `auth.json` 的遗留凭证为当前账号；遵守 profile 覆盖全局的顺序。新回归先红后绿，1 项通过，覆盖 keyring/auto/ephemeral、profile 覆盖及显式 file 恢复识别。
 
 最后整合：`cargo test --manifest-path backend/Cargo.toml --features handoff-eval --quiet` 471 通过、0 失败、12 忽略，退出码 0。此结果覆盖上述最终复审修复及评测工具，替代前面的中间版本测试统计。
+
+## Claude 身份来源与只读预检补充
+
+- 先通过 Context7 查询官方文档库 `/websites/code_claude`。[CLI 参考](https://code.claude.com/docs/en/cli-reference) 公开支持 `claude auth status` 输出当前认证状态 JSON，但没有文档化的任意保存 token 身份查询参数。
+- 只读核对本机官方 npm 包 `@anthropic-ai/claude-code` 2.1.309 的 `package.json` 与 `bin/claude.exe` 内嵌实现：使用 `GET https://api.anthropic.com/api/oauth/profile`，Bearer 为被查询的 access token；响应校验要求 `account.uuid`、`account.email`、`organization.uuid`，随后映射为 `oauthAccount.accountUuid`、`emailAddress`、`organizationUuid`。这是官方 CLI 实现证据，尚未查到该接口公开稳定 API 契约。
+- 官方请求头为 `User-Agent: claude-code/2.1.309`、Bearer 认证、`Content-Type: application/json`、`Cache-Control: no-cache`，超时 10 秒。本次预检准备禁用重定向，但在读取本机凭据时即停止：未设置 `CLAUDE_CONFIG_DIR`，默认 `~/.claude/.credentials.json` 不存在，未设置 `CLAUDE_CODE_OAUTH_TOKEN`；仅检测到代理认证变量 `ANTHROPIC_AUTH_TOKEN` 已设置，没有展示或转发其值，也没有把它当作订阅 OAuth 凭据。
+- 结果为 **0 次 HTTP 请求、无 HTTP 状态**，不能据此判断接口拒绝访问或无权限。未修改真实登录、产品代码或调用付费推理；跨账号完整快照仍未实现、未验证。后续需要完整订阅 OAuth 登录样本，再核对 token 返回的账号 UUID 与组织 UUID，不能仅凭邮箱关联身份。
