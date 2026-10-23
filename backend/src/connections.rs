@@ -882,7 +882,8 @@ pub fn verify_model(protocol: &str, base_url: &str, secret: &str, model: &str) -
 /// 带 Key 请求用的客户端：**不跟随重定向**。reqwest 跨主机跳转只删 Authorization 等头、不删 x-api-key，
 /// https 跳到同主机 http 时还会明文发出 Key（先例：provider_key.rs、quota.rs）。
 fn keyed_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    // 代理按应用联网方式（任务 2.3）
+    crate::net::blocking_builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()

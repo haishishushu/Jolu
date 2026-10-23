@@ -46,6 +46,9 @@ mod automation;
 mod skills;
 // 模块 G · 设置
 mod storage_stats;
+// 任务 2.3 开始
+mod net;
+// 任务 2.3 结束
 #[cfg(test)]
 mod perf_bench;
 
@@ -2178,7 +2181,7 @@ fn show_main(app: &tauri::AppHandle) {
     match window {
         Ok(window) => {
             let _ = window.set_icon(tray_icon::taskbar(window.scale_factor().unwrap_or(1.0)));
-            if let Some(cfg) = app.try_state::<Cfg>() { let _ = apply_main_zoom(&window, cfg.0.get().main_zoom); } // 任务 2.2
+            if let Some(cfg) = app.try_state::<Cfg>() { let _ = apply_main_zoom(&window, settings::normalize_zoom(cfg.0.get().main_zoom)); } // 任务 2.2
             if let Some(saved) = app.try_state::<Cfg>().and_then(|cfg| cfg.0.get().main_window) {
                 if let Err(error) = main_window::restore(&window, &saved) {
                     eprintln!("[窗口] 恢复主面板位置失败: {error}");
@@ -2763,6 +2766,10 @@ pub fn run() {
             // 任务 3.4 开始
             verify_custom_model,
             // 任务 3.4 结束
+            // 任务 2.3 开始
+            net::set_network,
+            net::diagnose_network,
+            // 任务 2.3 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -2784,6 +2791,7 @@ pub fn run() {
                 && !data_dir.join("usage.db").exists();
             FIRST_INSTALL.store(first_install, Ordering::Release);
             app.manage(Cfg(settings::Store::load(&data_dir)));
+            net::init(&app.state::<Cfg>().0.get()); // 任务 2.3：出站请求按已保存的联网方式发出
             let startup_plan = startup::plan(automatic, app.state::<Cfg>().0.get().silent_startup, first_install);
             STARTUP_REQUESTED.store(startup_plan.show_main, Ordering::Release);
             if startup_plan.show_main { let _ = show_startup(&handle); }

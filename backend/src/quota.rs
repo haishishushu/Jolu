@@ -359,27 +359,35 @@ fn parse_openai_admin_cost(body: &str) -> Result<f64, String> {
 
 /// 额度、余额与套餐查询共用的客户端。blocking 客户端每次新建都要起一条后台运行时线程、
 /// 加载 TLS 根证书，且无法复用连接；同一轮刷新里的多次查询共用一个。
-/// 系统代理只在构建时读取，因此定期重建，用户切换代理后很快生效。
+/// 系统代理只在构建时读取，因此定期重建，用户切换系统代理后很快生效；
+/// 在设置里修改应用联网方式（`net::generation()` 变化）时立即重建。
 /// 调用方都在阻塞线程池里（spawn_blocking），替换时丢弃旧客户端不会触发运行时析构限制。
 pub(crate) fn client() -> Result<reqwest::blocking::Client, String> {
-    static SHARED: std::sync::Mutex<Option<(reqwest::blocking::Client, std::time::Instant)>> = std::sync::Mutex::new(None);
-    const REBUILD_AFTER: Duration = Duration::from_secs(120);
+    static SHARED: std::sync::Mutex<Option<(reqwest::blocking::Client, std::time::Instant, u64)>> = std::sync::Mutex::new(None);
+    // 先取代数再构建：构建期间联网方式又变了，存下的旧代数会让下一次调用重建。
+    let generation = crate::net::generation();
     if let Ok(shared) = SHARED.lock() {
-        if let Some((client, built)) = shared.as_ref() {
-            if built.elapsed() < REBUILD_AFTER {
+        if let Some((client, built, built_generation)) = shared.as_ref() {
+            if cache_valid(*built, *built_generation, std::time::Instant::now(), generation) {
                 return Ok(client.clone());
             }
         }
     }
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::net::blocking_builder()
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("无法创建 HTTP 客户端: {e}"))?;
     // 旧客户端在锁释放后才析构，它的后台线程收尾不占着锁。
-    let previous = SHARED.lock().ok().and_then(|mut shared| shared.replace((client.clone(), std::time::Instant::now())));
+    let previous = SHARED.lock().ok().and_then(|mut shared| shared.replace((client.clone(), std::time::Instant::now(), generation)));
     drop(previous);
     Ok(client)
+}
+
+/// 共享客户端是否还能复用：联网方式没变，且距上次构建不到 120 秒。
+pub(crate) fn cache_valid(built_at: std::time::Instant, built_generation: u64, now: std::time::Instant, generation: u64) -> bool {
+    const REBUILD_AFTER: Duration = Duration::from_secs(120);
+    built_generation == generation && now.saturating_duration_since(built_at) < REBUILD_AFTER
 }
 
 /// HTTP 状态码 → 面向用户的原因文案。
