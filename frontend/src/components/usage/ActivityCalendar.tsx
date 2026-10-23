@@ -8,7 +8,7 @@ import { Card } from "./usageControls"
 const LEVEL_COLORS = ["var(--jolu-side)", "#D8F2E5", "#99DAB9", "#40C88A", "#099A56"] as const
 
 /** 本机活跃趋势 · 全年日历（画板 32）：按周分列，周一在上 */
-export function ActivityCalendar({ activity }: { activity: StatsActivityDto | null }) {
+export function ActivityCalendar({ activity, error }: { error?: string | null; activity: StatsActivityDto | null }) {
   const view = useMemo(() => {
     if (!activity) return null
     const weeks = calendarWeeks(activity.first_date, activity.last_date)
@@ -59,7 +59,7 @@ export function ActivityCalendar({ activity }: { activity: StatsActivityDto | nu
           </div>
         </div>
       ) : (
-        <span className="h-[170px] animate-pulse rounded-md bg-jolu-side" />
+        error ? <span className="text-xs text-jolu-muted">活跃趋势暂不可用，请重试。</span> : <div role="status" aria-label="正在读取活跃趋势" className="skeleton-content"><span aria-hidden className="skeleton-bar block h-[170px] rounded-md" /></div>
       )}
       <div className="flex h-[18px] items-center justify-end gap-[5px] text-[10px] text-jolu-muted">
         少

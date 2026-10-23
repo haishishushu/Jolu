@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Dialog from "@radix-ui/react-dialog"
 import { useEffect, useState, type ReactNode } from "react"
 import { CalendarDays, CircleAlert, Download, Square, SquareCheck, X } from "lucide-react"
@@ -9,9 +10,9 @@ import { useToast } from "@/components/ui/Toast"
 import { DateRangeDialog } from "@/components/usage/DateRangeDialog"
 import { ActionButton, SelectButton } from "./settingsUi"
 
-function Shell({ width, title, onClose, busy, children }: { width: number; title: string; onClose: () => void; busy?: boolean; children: ReactNode }) {
+function Shell({ open = true, width, title, onClose, busy, children }: { open?: boolean; width: number; title: string; onClose: () => void; busy?: boolean; children: ReactNode }) {
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog.Root open={open} onOpenChange={(open) => !open && !busy && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/35" />
         <Dialog.Content
@@ -33,7 +34,8 @@ function Shell({ width, title, onClose, busy, children }: { width: number; title
 }
 
 /** 导出本地数据：按供应商与日期范围导出 JSON（D-27）；不选日期时导出全部 */
-export function ExportDialog({ onClose }: { onClose: () => void }) {
+export function ExportDialog({ onClose: onDismiss }: { onClose: () => void }) {
+  const { open: dialogOpen, close: onClose } = useDialogClose(onDismiss)
   const toast = useToast()
   const [platform, setPlatform] = useState("all")
   // null = 全部日期；选定后按 [开始日 0 点, 结束日次日 0 点) 导出，结束日是今天时到当前时刻
@@ -54,7 +56,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
       .finally(() => setBusy(false))
   }
   return (
-    <Shell width={460} title="导出本地数据" onClose={onClose} busy={busy}>
+    <Shell open={dialogOpen} width={460} title="导出本地数据" onClose={onClose} busy={busy}>
       <p className="text-xs text-jolu-muted">导出统计记录与会话标题为 JSON，可在另一台设备导入。</p>
       <div className="flex items-center gap-4">
         <span className="flex-1 text-[13px] font-medium text-jolu-text">供应商</span>
@@ -89,12 +91,13 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
 }
 
 /** 清理历史数据确认（画板 98）：先预览范围，勾选确认后才允许删除 */
-export function CleanupDialog({ initialDays, onClose, onExport, onDone }: {
+export function CleanupDialog({ initialDays, onClose: onDismiss, onExport, onDone }: {
   initialDays: number
   onClose: () => void
   onExport: () => void
   onDone: () => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const toast = useToast()
   const [days, setDays] = useState(initialDays)
   const [preview, setPreview] = useState<CleanupPreviewDto | null>(null)
@@ -120,14 +123,14 @@ export function CleanupDialog({ initialDays, onClose, onExport, onDone }: {
     api.cleanupHistory(days)
       .then((result) => {
         toast.success(`已清理 ${result.requests.toLocaleString("zh-CN")} 条请求记录`, `保留最近 ${days} 天；采集位置保留，旧日志不会重新导入`)
-        onDone()
+        finish(onDone)
       })
       .catch((reason) => toast.danger("历史清理失败", String(reason)))
       .finally(() => setBusy(false))
   }
 
   return (
-    <Shell width={580} title="清理历史数据" onClose={onClose} busy={busy}>
+    <Shell open={dialogOpen} width={580} title="清理历史数据" onClose={onClose} busy={busy}>
       <p className="-mt-2 text-xs text-jolu-muted">先确认范围，再删除本地统计记录。</p>
       <section className="flex flex-col rounded-xl border border-jolu-border px-5">
         <h3 className="pb-3.5 pt-[18px] text-sm font-semibold text-jolu-text">清理范围</h3>
@@ -171,7 +174,7 @@ export function CleanupDialog({ initialDays, onClose, onExport, onDone }: {
         我已了解本次清理范围
       </button>
       <div className="flex items-center justify-between gap-2">
-        <ActionButton icon={<Download aria-hidden className="size-3.5" />} disabled={busy} onClick={onExport}>先导出数据</ActionButton>
+        <ActionButton icon={<Download aria-hidden className="size-3.5" />} disabled={busy} onClick={() => finish(onExport)}>先导出数据</ActionButton>
         <div className="flex gap-2">
           <ActionButton disabled={busy} onClick={onClose}>取消</ActionButton>
           <ActionButton tone="danger" busy={busy} disabled={!confirmed || !count} onClick={run}>

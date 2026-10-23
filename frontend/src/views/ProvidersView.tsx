@@ -1,3 +1,4 @@
+import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useState } from "react"
 import { Blocks, Code, Hexagon, Info, Plus, UsersRound } from "lucide-react"
 import { api } from "@/lib/api"
@@ -41,11 +42,13 @@ export function ProvidersView({ initialTab = "connect" }: { initialTab?: Provide
         <TabButton active={tab === "accounts"} icon={<UsersRound aria-hidden className="size-[17px]" />} onClick={() => setTab("accounts")}>账号管理</TabButton>
       </div>
 
-      {tab === "connect" ? (
+      <ContentTransition identity={`${tab}-${conn.loading && !conn.connections.length}`} >
+      {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface layout={tab === "connect" ? "providers" : "cards"} label="正在读取供应商连接" /> : tab === "connect" ? (
         <ConnectGrid counts={countByPlatform(conn.connections)} loading={conn.loading} error={conn.error} onConnect={setConnecting} onRetry={() => void conn.reload()} />
       ) : (
         <AccountsPanel conn={conn} onConnect={setConnecting} onBrowseProviders={() => setTab("connect")} />
       )}
+      </ContentTransition>
 
       {connecting && (
         <ConnectDialog

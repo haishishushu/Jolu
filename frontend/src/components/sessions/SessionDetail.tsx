@@ -1,3 +1,5 @@
+import { useContentMotion } from "@/lib/motion"
+import { LoadingSurface } from "@/components/ui/LoadingSurface"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { useEffect, useRef, useState } from "react"
 import { ArrowUpRight, Bot, ChartColumn, ChevronDown, ChevronRight, ChevronsUp, Copy, Ellipsis, Eye, FileCode, FileDown, Folder } from "lucide-react"
@@ -29,6 +31,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
   const [messages, setMessages] = useState<MessageDto[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
+  const bodyMotion = useContentMotion(`${session.session_id}-${tab}-${!!page}`)
   const revision = useRef(0)
   const platform = session.platform as PlatformId
   const name = providerName(session.platform)
@@ -129,14 +132,12 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
         ))}
       </div>
 
-      <div className="-mr-2 min-h-0 flex-1 overflow-y-auto pr-2">
+      <div ref={bodyMotion} className="-mr-2 min-h-0 flex-1 overflow-y-auto pr-2">
         {tab === "messages" ? (
           error ? (
             <StateBox title="会话源暂时不可读" note="读取失败不代表会话结束；旧记录保留。" action={<SmallButton onClick={load}>重新读取</SmallButton>} detail={error} />
           ) : !page ? (
-            <div className="flex flex-col gap-3 pt-1">
-              {[230, 285, 190].map((w) => <span key={w} className="h-6 animate-pulse rounded-md bg-jolu-track" style={{ width: w }} />)}
-            </div>
+            <LoadingSurface layout="messages" label="正在读取消息" />
           ) : !page.available ? (
             <StateBox
               title="这个来源未保留消息正文"

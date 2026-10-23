@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
@@ -40,11 +41,12 @@ export interface ConnectActions {
  * 自定义供应商（D-11）复用 API Key 结构，多一个「协议」选择；模型接口不可用时改为手填模型 ID，
  * 后端以「获取模型成功」或「手填模型」作为接口可达的依据，不查余额。
  */
-export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
+export function ConnectDialog({ platform: initialPlatform, actions, onClose: onDismiss }: {
   platform: PlatformId
   actions: ConnectActions
   onClose: () => void
 }) {
+  const { open: dialogOpen, close: onClose } = useDialogClose(onDismiss)
   const toast = useToast()
   const [platform, setPlatform] = useState(initialPlatform)
   const entry = providerEntry(platform)
@@ -181,7 +183,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose }: {
   }
 
   return (
-    <Dialog.Root open onOpenChange={(open) => {
+    <Dialog.Root open={dialogOpen} onOpenChange={(open) => {
       if (open || saving) return
       // 关闭、Esc 时有草稿先确认（画板 27「未保存更改」）
       if (hasDraft) setConfirmDiscard(true)

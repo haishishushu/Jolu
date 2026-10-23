@@ -1,3 +1,4 @@
+import { ContentTransition } from "@/components/ui/LoadingSurface"
 import { useEffect, useMemo, useState } from "react"
 import { Plus } from "lucide-react"
 import { isTauri, type SessionItemDto } from "@/lib/api"
@@ -146,7 +147,7 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
   let body: React.ReactNode
   if (route.kind === "task") {
     body = task.error && !task.data ? <ErrorNotice error={task.error} stale={false} onRetry={task.refresh} />
-      : !task.data ? <LoadingCard title="正在读取任务" />
+      : !task.data ? <LoadingCard title="正在读取任务" layout="cards" />
       : (
         <TaskDetail
           detail={task.data}
@@ -203,7 +204,7 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
                 onCancel={setCancelling}
                 onDelete={setDeleting}
               />
-            ) : !overview.error && <LoadingCard title="正在读取任务" />}
+            ) : !overview.error && <LoadingCard title="正在读取任务" layout="tasks" />}
             <p className="text-[10px] text-jolu-muted">{isTauri ? "" : "示例数据 · "}本地任务需要 Jolu 后台运行；休眠与关机期间停止调度，重新打开后检查待执行任务。</p>
           </>
         ) : (
@@ -231,7 +232,7 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
 
   return (
     <div className="flex flex-col gap-3.5">
-      {body}
+      <ContentTransition identity={`${tab}-${route.kind}-${route.kind === "task" ? taskId : route.kind === "run" ? runId : "list"}-${!!overview.data}-${!!task.data}-${!!run.data}-${!!runs.data}`} className="flex flex-col gap-3.5">{body}</ContentTransition>
       {dialog && (
         <TaskDialog
           key={dialog.nonce}
@@ -251,7 +252,6 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
           onClose={() => setCancelling(null)}
           onConfirm={async () => {
             if (isTauri) await automationApi.action(cancelling.id, "cancel")
-            setCancelling(null)
             toast.success("已取消任务", "保留运行记录和已经完成的文件修改")
             refreshAll()
           }}
@@ -263,13 +263,11 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
           onClose={() => setDeleting(null)}
           onConfirm={async () => {
             if (!isTauri) {
-              setDeleting(null)
               toast.info("已删除任务", "浏览器预览不执行实际操作")
               return
             }
             // 失败时抛出，由弹窗显示原因；成功后关闭弹窗和任务详情并刷新列表（画板 68 第 10 格），不另弹提示
             await automationApi.deleteTask(deleting.id)
-            setDeleting(null)
             if (taskId === deleting.id) setRoute({ kind: "list" })
             overview.refresh()
             if (tab === "runs") runs.refresh()

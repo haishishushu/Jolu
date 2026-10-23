@@ -1,3 +1,4 @@
+import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useMemo, useState, type ReactNode } from "react"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { CopyPlus, Ellipsis, Info, LoaderCircle, PictureInPicture2, RefreshCw, Scan } from "lucide-react"
@@ -42,7 +43,8 @@ export function IslandView() {
           </button>
         </div>
       )}
-      <div className="flex w-full flex-col gap-4">
+      <ContentTransition identity={String(cfg.ready)}>
+      {cfg.loading && !cfg.ready ? <LoadingSurface layout="island" label="正在读取灵动岛配置" /> : <div className="flex w-full flex-col gap-4">
         <Row
           card
           title="显示灵动岛"
@@ -98,7 +100,8 @@ export function IslandView() {
           className="h-14 rounded-[9px]"
           control={<ActionButton action="reset_layout" icon={<Scan aria-hidden className="size-4" />} label="重置位置" done="已重置窗口位置" />}
         />
-      </div>
+      </div>}
+      </ContentTransition>
 
       <p className="flex items-center gap-[7px] text-[11px] text-jolu-muted">
         <Info aria-hidden className="size-3.5 shrink-0" />

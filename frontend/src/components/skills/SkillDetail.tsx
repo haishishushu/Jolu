@@ -1,3 +1,5 @@
+import { LoadingSurface } from "@/components/ui/LoadingSurface"
+import { useContentMotion } from "@/lib/motion"
 import { useEffect, useState } from "react"
 import { ArrowLeft, Copy, File, FileText, Folder, FolderOpen, Image, Info, LoaderCircle, Pencil } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -59,6 +61,8 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
   const isSkillFile = file === "SKILL.md"
   const text = isSkillFile ? detail?.content ?? "" : fileContent?.text ?? null
   const markdown = isSkillFile || /\.md$/i.test(file)
+
+  const bodyMotion = useContentMotion(`${file}-${tab}-${!!detail}-${!!fileContent}`)
 
   const copyPath = async () => {
     try {
@@ -159,9 +163,9 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
               <span className="flex-1" />
               {!isSkillFile && <span className="self-center truncate text-[10px] text-jolu-muted">{file}</span>}
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div ref={bodyMotion} className="min-h-0 flex-1 overflow-y-auto">
               {!detail || (!isSkillFile && !fileContent) ? (
-                <LoaderCircle aria-hidden className="size-4 animate-spin text-jolu-muted" />
+                <LoadingSurface layout="messages" label="正在读取文件" />
               ) : text === null ? (
                 <p className="text-xs text-jolu-muted">二进制文件不预览{fileContent?.size ? `（${formatBytes(fileContent.size)}）` : ""}</p>
               ) : tab === "preview" && markdown ? (

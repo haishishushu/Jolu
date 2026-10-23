@@ -610,3 +610,35 @@ fieldset[data-saving="true"] :disabled:not([disabled]) {
   [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
 }
 html.reduce-motion [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
+
+/* 主窗口的异步占位：保留尺寸，快请求不闪骨架。 */
+@keyframes skeleton-reveal { from { opacity: 0; } to { opacity: 1; } }
+@keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.skeleton-content { animation: skeleton-reveal 160ms ease-out 150ms both; }
+.skeleton-bar {
+  background-color: var(--jolu-side);
+  background-image: linear-gradient(100deg, transparent 20%, var(--jolu-track) 50%, transparent 80%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1500ms ease-in-out infinite;
+}
+html:not(.island-window) :where(button, [role="tab"], [role="menuitem"], [role="option"], a) {
+  transition-property: background-color, border-color, color, opacity, box-shadow, filter;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+html:not(.island-window) .motion-button { transition-property: transform, background-color, border-color, color, opacity, box-shadow, filter; }
+html:not(.island-window) .motion-button:not(:disabled):active { transform: scale(0.98); }
+/* Radix 对话框由 animation 生命周期保留退出帧，现有自管弹层继续使用 transition。 */
+.motion-dialog[data-state="closed"] { opacity: 0; transform: scale(0.98); animation: motion-presence 140ms linear; }
+.motion-overlay[data-state="closed"] { animation: motion-presence 140ms linear; }
+.motion-dialog { transition: opacity 180ms ease, transform 180ms var(--motion-ease); }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-content { animation: none; }
+  .skeleton-bar { animation: none; background-image: none; }
+  html:not(.island-window) .motion-button:not(:disabled):active { transform: none; }
+}
+html.reduce-motion .skeleton-content { animation: none; }
+html.reduce-motion .skeleton-bar { animation: none; background-image: none; }
+html.reduce-motion .motion-button:not(:disabled):active { transform: none; }
+
+.motion-dialog[data-state="closed"] { transition-duration: 140ms; }

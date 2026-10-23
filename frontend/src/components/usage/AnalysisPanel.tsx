@@ -7,8 +7,9 @@ import { ActivityCalendar } from "./ActivityCalendar"
 import { Card, CardTitle, MetricCard, providerName } from "./usageControls"
 
 /** 用量分析（画板 32）：Token 四分项、全年活跃日历、模型消耗与费用、供应商费用 */
-export function AnalysisPanel({ data, activity, onDrillModel, onDrillProvider }: {
+export function AnalysisPanel({ data, activity, activityError, onDrillModel, onDrillProvider }: {
   data: StatsOverviewDto
+  activityError?: string | null
   activity: StatsActivityDto | null
   onDrillModel: (model: StatsModelRowDto) => void
   onDrillProvider: (platform: string) => void
@@ -29,7 +30,7 @@ export function AnalysisPanel({ data, activity, onDrillModel, onDrillProvider }:
         <MetricCard icon={<HardDriveUpload />} label="缓存写入" value={formatTokens(t.cache_write)} note={part(t.cache_write, "新建缓存")} />
       </div>
 
-      <ActivityCalendar activity={activity} />
+      <ActivityCalendar activity={activity} error={activityError} />
 
       <div className="grid min-h-[344px] grid-cols-[minmax(0,644fr)_minmax(0,348fr)] gap-4">
         <Card className="flex flex-col gap-2 p-4">

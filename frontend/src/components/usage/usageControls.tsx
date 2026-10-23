@@ -1,3 +1,4 @@
+import { LoadingSurface, type SkeletonLayout } from "@/components/ui/LoadingSurface"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { forwardRef, type ReactNode } from "react"
 import { Check, ChartNoAxesCombined, ChevronDown, LoaderCircle, RefreshCw, RotateCcw, Square, SquareCheck } from "lucide-react"
@@ -55,7 +56,7 @@ export function ToolButton({ icon, children, bordered, busy, className, ...props
       type="button"
       aria-busy={busy || undefined}
       className={cn(
-        "inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-jolu-text outline-none transition-colors focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
+        "motion-button inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-jolu-text outline-none transition-colors focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
         bordered ? "border border-jolu-border bg-jolu-bg hover:bg-jolu-stage" : "bg-jolu-side hover:bg-jolu-stage",
         className,
       )}
@@ -165,15 +166,8 @@ export function providerName(platform: string): string {
 }
 
 /** 首次加载骨架（画板 38「正在读取本地用量」） */
-export function LoadingCard({ title = "正在读取本地用量" }: { title?: string }) {
-  return (
-    <Card className="flex flex-col gap-3 p-4">
-      <CardTitle title={title} note="加载中" />
-      <span className="h-[18px] w-[130px] animate-pulse rounded-[5px] bg-jolu-track" />
-      <span className="h-[18px] w-[240px] animate-pulse rounded-[5px] bg-jolu-track" />
-      <span className="h-[18px] w-[190px] animate-pulse rounded-[5px] bg-jolu-track" />
-    </Card>
-  )
+export function LoadingCard({ title = "正在读取本地用量", layout = "table" }: { title?: string; layout?: SkeletonLayout }) {
+  return <LoadingSurface label={title} layout={layout} />
 }
 
 /** 筛选无结果（画板 38）；没有可清除的筛选时不显示按钮 */

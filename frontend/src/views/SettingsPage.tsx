@@ -1,3 +1,4 @@
+import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Bell, CircleAlert, CircleDot, Database, Info, LoaderCircle, Network, Palette, SlidersHorizontal, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -97,13 +98,16 @@ export function SettingsPage({ section, navigationRequest, onOpenSkills }: {
             <h2 className="text-[22px] font-semibold text-jolu-text">{current.label}</h2>
             <p className="text-xs text-jolu-muted">{current.desc}</p>
           </div>
-          {cfg.loading && !cfg.ready && <p role="status" className="text-xs text-jolu-muted">正在读取设置…</p>}
+          <ContentTransition identity={`${tab}-${cfg.ready}`} className="flex flex-col gap-4">
+          {cfg.loading && !cfg.ready ? <LoadingSurface layout="settings" label="正在读取设置" /> : <>
           {tab === "general" && <GeneralSection cfg={cfg} />}
           {tab === "appearance" && <AppearanceSection cfg={cfg} />}
           {tab === "network" && <NetworkSection cfg={cfg} setDirty={setDirty} />}
           {tab === "data" && <DataSection cfg={cfg} onOpenSkills={onOpenSkills} />}
           {tab === "notifications" && <NotificationSection cfg={cfg} setDirty={setDirty} />}
           {tab === "about" && <AboutSection />}
+          </>}
+          </ContentTransition>
         </section>
       </div>
     </div>

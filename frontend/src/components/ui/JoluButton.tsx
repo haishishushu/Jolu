@@ -26,7 +26,7 @@ export const JoluButton = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTM
       ref={ref}
       type={type}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-xs font-medium outline-none",
+        "motion-button inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-xs font-medium outline-none",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-4 [&_svg]:shrink-0",
         size === "md" ? "h-9 px-3.5" : "h-8 px-2.5",
         VARIANTS[variant],

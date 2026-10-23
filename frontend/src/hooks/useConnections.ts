@@ -1,3 +1,4 @@
+import { queryCache } from "@/lib/queryCache"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { api, isTauri, listenEvent, type Candidate, type ConnectionDto } from "@/lib/api"
 import type { Connection, ConnectionKind, PlatformId } from "@/types"
@@ -41,7 +42,7 @@ function toConnection(d: ConnectionDto): Connection {
 }
 
 export function useConnections() {
-  const [connections, setConnections] = useState<Connection[]>([])
+  const [connections, setConnections] = useState<Connection[]>(() => queryCache.get<Connection[]>("connections") ?? [])
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [loading, setLoading] = useState(isTauri)
   const [candidateLoading, setCandidateLoading] = useState(false)
@@ -60,7 +61,9 @@ export function useConnections() {
     try {
       const list = await api.listConnections()
       if (revision !== loadRevision.current) return
-      setConnections(list.map(toConnection))
+      const mapped = list.map(toConnection)
+      queryCache.set("connections", mapped)
+      setConnections(mapped)
       setLive(true)
       setError(null)
     } catch (reason) {

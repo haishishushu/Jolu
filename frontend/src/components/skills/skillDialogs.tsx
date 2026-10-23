@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, Copy, Download, Folder, FolderOpen, GitBranch, Info, LoaderCircle, Plus, RefreshCw, Square, SquareCheck, Trash2, X } from "lucide-react"
@@ -28,7 +29,7 @@ function parseScope(key: string): { scope: SkillScope; project: string | null } 
 
 /* ───────────── 导入（画板 82） ───────────── */
 
-export function ImportDialog({ platform, platforms, projects, onClose, onDone }: {
+export function ImportDialog({ platform, platforms, projects, onClose: onDismiss, onDone }: {
   platform: string
   /** 各工具的全局目标目录（目录设置里可能已更换） */
   platforms: SkillPlatformDto[]
@@ -36,6 +37,7 @@ export function ImportDialog({ platform, platforms, projects, onClose, onDone }:
   onClose: () => void
   onDone: () => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const toast = useToast()
   const [target, setTarget] = useState(platform === "all" ? "claude" : platform)
   const [scopeKey, setScopeKey] = useState("global")
@@ -142,14 +144,14 @@ export function ImportDialog({ platform, platforms, projects, onClose, onDone }:
     if (!source || !choices.length) return
     if (!isTauri) {
       toast.success(`已导入 ${choices.length} 项（示例）`, "浏览器预览不会复制文件")
-      return onDone()
+      return finish(onDone)
     }
     setImporting(true)
     try {
       const result = await skillsApi.importSkills(source, target, scope, project, choices, enable)
       if (result.failed.length) toast.warn(`已导入 ${result.imported.length} 项，${result.failed.length} 项失败`, result.failed.map((f) => `${f.path}：${f.reason}`).join("；"))
       else toast.success(`已导入 ${result.imported.length} 项`, enable ? undefined : "导入项默认停用，可在列表中启用")
-      onDone()
+      finish(onDone)
     } catch (reason) {
       setError(errorText(reason))
     } finally {
@@ -158,7 +160,7 @@ export function ImportDialog({ platform, platforms, projects, onClose, onDone }:
   }
 
   return (
-    <DialogShell width={680} title="导入 Skills" onClose={onClose} busy={importing}>
+    <DialogShell open={dialogOpen} width={680} title="导入 Skills" onClose={onClose} busy={importing}>
       <div className="flex h-7 items-center gap-3 text-xs">
         {["选择来源", "检查内容", "确认导入"].map((label, i) => (
           <span key={label} className="flex items-center gap-3">
@@ -292,12 +294,13 @@ export function ImportDialog({ platform, platforms, projects, onClose, onDone }:
 
 /* ───────────── 复制到其他供应商（画板 84 · 03） ───────────── */
 
-export function CopyDialog({ items, projects, onClose, onDone }: {
+export function CopyDialog({ items, projects, onClose: onDismiss, onDone }: {
   items: SkillItemDto[]
   projects: string[]
   onClose: () => void
   onDone: () => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const toast = useToast()
   const first = items[0]
   const [target, setTarget] = useState(first.platform === "claude" ? "codex" : "claude")
@@ -326,7 +329,7 @@ export function CopyDialog({ items, projects, onClose, onDone }: {
   const submit = async () => {
     if (!isTauri) {
       toast.success(`已复制 ${ready.length} 项（示例）`)
-      return onDone()
+      return finish(onDone)
     }
     setCopying(true)
     const failed: string[] = []
@@ -340,12 +343,12 @@ export function CopyDialog({ items, projects, onClose, onDone }: {
     setCopying(false)
     if (failed.length) toast.warn(`已复制 ${ready.length - failed.length} 项，${failed.length} 项失败`, failed.join("；"))
     else toast.success(`已复制 ${ready.length} 项到 ${providerName(target)}`, "源文件保留，创建了独立副本")
-    onDone()
+    finish(onDone)
   }
 
   const single = items.length === 1
   return (
-    <DialogShell width={520} title="复制到其他供应商" onClose={onClose} busy={copying}>
+    <DialogShell open={dialogOpen} width={520} title="复制到其他供应商" onClose={onClose} busy={copying}>
       <p className="truncate text-xs text-jolu-text">
         {single ? first.name : `已选择 ${items.length} 个 Skill`}  ·  {providerName(first.platform)} → {providerName(target)}
       </p>
@@ -385,20 +388,21 @@ export function CopyDialog({ items, projects, onClose, onDone }: {
 
 /* ───────────── 移除确认（画板 84 · 04） ───────────── */
 
-export function RemoveDialog({ item, onClose, onDone }: { item: SkillItemDto; onClose: () => void; onDone: () => void }) {
+export function RemoveDialog({ item, onClose: onDismiss, onDone }: { item: SkillItemDto; onClose: () => void; onDone: () => void }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const toast = useToast()
   const [removing, setRemoving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const submit = async () => {
     if (!isTauri) {
       toast.success("已移除（示例）")
-      return onDone()
+      return finish(onDone)
     }
     setRemoving(true)
     try {
       const backup = await skillsApi.remove(item.path)
       toast.success(`已移除 ${item.name}`, `备份保存在 ${backup}`)
-      onDone()
+      finish(onDone)
     } catch (reason) {
       setError(errorText(reason))
     } finally {
@@ -406,7 +410,7 @@ export function RemoveDialog({ item, onClose, onDone }: { item: SkillItemDto; on
     }
   }
   return (
-    <DialogShell width={480} title="移除此安装项？" onClose={onClose} busy={removing}>
+    <DialogShell open={dialogOpen} width={480} title="移除此安装项？" onClose={onClose} busy={removing}>
       <p className="text-xs text-jolu-text">{item.name}  ·  {providerName(item.platform)}{item.scope === "project" ? ` / ${scopeLabel(item)}` : ""}</p>
       <p className="break-all font-mono text-[11px] text-jolu-muted">{item.path}</p>
       <p className="text-[11px] text-jolu-muted">只影响此目录中的安装项，其他供应商副本保留。运行中的任务不立即中断；后续加载将不再使用。</p>
@@ -432,13 +436,14 @@ const GLOBAL_DIR_NOTE = "工具是否读取该目录取决于其配置（如 CLA
  * 项目目录 = 会话记录自动带出 + 手动添加。自动带出的可以忽略 / 恢复（只记在 skills.json，不删会话数据），手动添加的可以移除。
  * 画板 84 · 01 整块只有一个「保存并扫描」：以上改动都先记在草稿里，保存时一次提交（任一项无效都不写入）；关闭弹窗即放弃草稿。
  */
-export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }: {
+export function DirectoryDialog({ platform, roots, projects, onClose: onDismiss, onSaved }: {
   platform: string
   roots: SkillRootDto[]
   projects: SkillProjectDto[]
   onClose: () => void
   onSaved: () => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const [manual, setManual] = useState(() => projects.filter((p) => p.source === "manual").map((p) => p.path))
   const [ignored, setIgnored] = useState(() => new Set(projects.filter((p) => p.ignored).map((p) => p.path)))
   const [drafts, setDrafts] = useState<Record<string, GlobalDraft>>({})
@@ -468,7 +473,7 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
     }
   }
   const save = async () => {
-    if (!isTauri) return onSaved()
+    if (!isTauri) return finish(onSaved)
     setSaving(true)
     setError(null)
     try {
@@ -477,7 +482,7 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
         ignore: sessions.filter((p) => p.ignored !== ignored.has(p.path)).map((p) => ({ path: p.path, ignored: ignored.has(p.path) })),
         globals: globalChanges(roots, drafts),
       })
-      onSaved()
+      finish(onSaved)
     } catch (reason) {
       setError(errorText(reason))
     } finally {
@@ -536,7 +541,7 @@ export function DirectoryDialog({ platform, roots, projects, onClose, onSaved }:
   }
 
   return (
-    <DialogShell width={600} title="扫描目录设置" onClose={onClose} busy={saving}>
+    <DialogShell open={dialogOpen} width={600} title="扫描目录设置" onClose={onClose} busy={saving}>
       <p className="text-[11px] text-jolu-muted">供应商：{platform === "all" ? "全部" : providerName(platform)} · 全局目录可更换，只影响 Jolu 扫描和写入的位置，{GLOBAL_DIR_NOTE}；项目目录来自会话记录和手动添加</p>
       <div className="flex max-h-[400px] flex-col gap-2 overflow-y-auto">
         {globals.map(globalRow)}

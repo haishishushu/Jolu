@@ -127,7 +127,7 @@ export function SkillPicker({ platform, cwd, value, onChange, open, onOpenChange
           role="dialog"
           aria-label="选择 Skills"
           style={{ top: place.top, left: place.left, width: place.width, maxHeight: place.maxHeight }}
-          className="absolute z-10 flex flex-col gap-1.5 overflow-hidden rounded-xl border border-jolu-border bg-jolu-bg p-2 shadow-popover"
+          className="motion-popover absolute z-10 flex flex-col gap-1.5 overflow-hidden rounded-xl border border-jolu-border bg-jolu-bg p-2 shadow-popover"
         >
           <label className="flex h-[38px] shrink-0 items-center gap-2 rounded-lg border border-jolu-accent px-2.5">
             <Search aria-hidden className="size-4 text-jolu-muted" />
