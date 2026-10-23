@@ -2,6 +2,7 @@ import { useState } from "react"
 import { ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { bucketLabel, changeText, formatPercent, formatTokens, formatUsd, modelDisplayName, share } from "@/lib/usageStats"
+import { projectName } from "@/lib/sessionThreads"
 import type { StatsModelRowDto, StatsOverviewDto, StatsTrendBucketDto } from "@/lib/api"
 import { Card, CardTitle, MetricCard, providerName } from "./usageControls"
 import { TrendChart, TrendLegend, type TrendMode } from "./TrendChart"
@@ -134,8 +135,8 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
                 <span className={cn("tnum w-4 text-[11px] font-semibold", index === 0 ? "text-jolu-on" : "text-jolu-muted")}>{String(index + 1).padStart(2, "0")}</span>
                 <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
                   <span className="truncate text-xs font-medium text-jolu-text">{s.title ?? `会话 ${s.session_id.slice(0, 8)}`}</span>
-                  {/* 设计稿写「项目 · 供应商」；本机记录暂不保存项目名（待确认），先只显示供应商 */}
-                  <span className="truncate text-[10px] text-jolu-muted">{providerName(s.platform)}</span>
+                  {/* 画板 30：「项目 · 供应商」；读不到项目目录时只显示供应商，不猜项目 */}
+                  <span className="truncate text-[10px] text-jolu-muted">{s.cwd ? `${projectName(s.cwd)} · ${providerName(s.platform)}` : providerName(s.platform)}</span>
                 </span>
                 <span className="tnum text-xs font-semibold text-jolu-text">{formatTokens(s.tokens)}</span>
                 <ChevronRight aria-hidden className="size-3.5 text-jolu-muted" />
