@@ -1,5 +1,7 @@
 import { useCallback, useRef, useState, useSyncExternalStore } from "react"
 import { api, isTauri, listenEvent, type AppSettings } from "@/lib/api"
+import type { DefaultPage } from "@/lib/mainNavigation"
+import { settingsApi } from "@/lib/settingsApi"
 
 /**
  * 持久化设置（§2.6 / §7.3）
@@ -33,6 +35,8 @@ const DEFAULTS: AppSettings = {
   proxy_fallback_direct: true,
   proxy_claude_upstream: null,
   proxy_codex_upstream: null,
+  default_page: "last",
+  last_page: null,
 }
 
 interface SharedSettings {
@@ -129,9 +133,10 @@ export function useSettings() {
     const next = { ...await api.getSettings(), ...patch }
     return api.setDisplayPreferences(next.island_opacity, next.island_scale, next.island_shrink_scale, next.refresh_minutes)
   }), [save])
+  const setDefaultPage = useCallback((page: DefaultPage) => save(() => settingsApi.setDefaultPage(page)), [save])
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences }
+  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage }
 }
 
