@@ -44,6 +44,8 @@ const DEFAULTS: AppSettings = {
   reduce_motion: false,
   network_mode: "system",
   network_proxy_url: null,
+  notify_task_resumed: true,
+  notify_task_finished: true,
 }
 
 interface SharedSettings {
@@ -152,8 +154,11 @@ export function useSettings() {
     return ok ? saved : null
   }, [save])
 
+  /** 设置 · 通知（画板 94）：任务提醒开关，只改传入的那一个 */
+  const setTaskNotify = useCallback((patch: { resumed?: boolean; finished?: boolean }) => save(() => settingsApi.setTaskNotify(patch.resumed ?? null, patch.finished ?? null)), [save])
+
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork }
+  return { settings, ready, loading, saving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
 }
 

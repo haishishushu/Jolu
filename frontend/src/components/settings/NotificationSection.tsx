@@ -5,12 +5,12 @@ import { api } from "@/lib/api"
 import { parseThreshold } from "@/lib/settingsPage"
 import { useSettings } from "@/hooks/useSettings"
 import { useToast } from "@/components/ui/Toast"
-import { ActionButton, PendingBadge, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
+import { ActionButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 
 type Cfg = ReturnType<typeof useSettings>
 type SetDirty = (key: string, dirty: boolean) => void
 
-/** 通知（画板 94）：免打扰与余额提醒已接入；自动化任务提醒待接入 */
+/** 通知（画板 94）：免打扰、余额提醒与自动化任务提醒；系统通知由后端发出；当前插件版本不支持 Windows 点击回调，正文写明任务名 */
 export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: SetDirty }) {
   const toast = useToast()
   const s = cfg.settings
@@ -96,15 +96,15 @@ export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: Set
       <SettingsGroup title="任务提醒" desc="自动化相关通知偏好。">
         <SettingsRow
           className="min-h-[72px]"
-          title={<span className="inline-flex items-center gap-2">额度恢复与任务继续<PendingBadge /></span>}
+          title="额度恢复与任务继续"
           desc="额度重新确认可用并恢复执行后提醒。"
-          control={<Switch label="额度恢复与任务继续" on={false} disabled />}
+          control={<Switch label="额度恢复与任务继续" on={s.notify_task_resumed} disabled={disabled} onChange={(on) => void cfg.setTaskNotify({ resumed: on })} />}
         />
         <SettingsRow
           className="min-h-[72px]"
-          title={<span className="inline-flex items-center gap-2">任务完成与失败<PendingBadge /></span>}
+          title="任务完成与失败"
           desc="提供查看任务入口，失败显示简短原因。"
-          control={<Switch label="任务完成与失败" on={false} disabled />}
+          control={<Switch label="任务完成与失败" on={s.notify_task_finished} disabled={disabled} onChange={(on) => void cfg.setTaskNotify({ finished: on })} />}
         />
       </SettingsGroup>
 

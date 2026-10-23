@@ -99,6 +99,12 @@ pub struct Settings {
     /// 手动代理地址（仅 http:// / https://，带端口）；切到其他方式时保留，便于切回。
     #[serde(default)]
     pub network_proxy_url: Option<String>,
+    /// 任务提醒（画板 94 / D-10）：额度恢复后在原会话继续时通知。
+    #[serde(default = "yes")]
+    pub notify_task_resumed: bool,
+    /// 任务提醒：任务完成与失败（含「需要处理」「等待超时」）时通知。
+    #[serde(default = "yes")]
+    pub notify_task_finished: bool,
 }
 
 fn default_kind() -> String { "api".into() }
@@ -173,6 +179,8 @@ impl Default for Settings {
             reduce_motion: false,
             network_mode: default_network_mode(),
             network_proxy_url: None,
+            notify_task_resumed: true,
+            notify_task_finished: true,
         }
     }
 }
@@ -424,3 +432,19 @@ mod appearance_tests {
 // 任务 2.3 开始
 fn default_network_mode() -> String { "system".into() }
 // 任务 2.3 结束
+// 任务 2.5 开始
+fn yes() -> bool { true }
+
+#[cfg(test)]
+mod notify_settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn old_settings_default_task_notices_on() {
+        let settings: Settings = serde_json::from_str(r#"{"island_platform":"claude","dnd":false,"island_visible":true}"#).unwrap();
+        assert!(settings.notify_task_resumed && settings.notify_task_finished);
+        let defaults = Settings::default();
+        assert!(defaults.notify_task_resumed && defaults.notify_task_finished);
+    }
+}
+// 任务 2.5 结束

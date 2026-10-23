@@ -49,6 +49,9 @@ mod storage_stats;
 // 任务 2.3 开始
 mod net;
 // 任务 2.3 结束
+// 任务 2.5 开始
+mod notify;
+// 任务 2.5 结束
 #[cfg(test)]
 mod perf_bench;
 
@@ -371,6 +374,10 @@ enum MainIntent {
     Overview { settings: settings::Settings },
     Settings { section: String },
     About { version: String },
+    /// 任务 2.5：点击任务通知后打开自动化页并选中该任务。当前插件版本（tauri-plugin-notification 2.4.x）
+    /// 不支持 Windows 点击回调，暂未构造；前端 automation 意图已就绪，升级 Tauri 后由点击回调接上
+    #[allow(dead_code)]
+    Automation { task_id: i64 },
 }
 
 static MAIN_INTENT: LazyLock<Mutex<Option<MainIntent>>> = LazyLock::new(|| Mutex::new(None));
@@ -1389,6 +1396,8 @@ async fn connection_balance(app: tauri::AppHandle, db: State<'_, Db>, id: String
         .await.map_err(|e| e.to_string())?;
     let check_id = id.clone();
     with_database(pool.clone(), move |conn| connections::query_creds(conn, &check_id).map(|_| ())).await?;
+    // 任务 2.5：余额跌破提醒阈值时通知一次
+    if let quota::BalanceState::Ok { balance, currency, .. } = &state { notify::check_balance(&app, &id, &c.name, *balance, currency); }
     let success = matches!(state, quota::BalanceState::Ok { .. });
     let unauthorized = matches!(state, quota::BalanceState::Unauthorized { .. });
     if success || unauthorized {
@@ -2649,6 +2658,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init()) // 任务 2.5：只在 Rust 端发通知
         .invoke_handler(tauri::generate_handler![
             tray_summary::tray_summary_get, tray_summary::tray_summary_fit,
             scan_local_sessions,
@@ -2777,6 +2787,9 @@ pub fn run() {
             skills::skills_set_global_dir,
             skills::skills_save_dir_settings,
             // 任务 4.1 结束
+            // 任务 2.5 开始
+            set_task_notify,
+            // 任务 2.5 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -2909,3 +2922,15 @@ fn set_appearance_preferences(app: tauri::AppHandle, zoom: u16, density: String,
     Ok(next)
 }
 // 任务 2.2 结束
+// 任务 2.5 开始
+/// 任务提醒（画板 94）：两个开关分别保存，传 None 的保持不变
+#[tauri::command]
+fn set_task_notify(app: tauri::AppHandle, resumed: Option<bool>, finished: Option<bool>) -> Result<settings::Settings, String> {
+    let next = app.state::<Cfg>().0.try_update(|settings| {
+        if let Some(on) = resumed { settings.notify_task_resumed = on; }
+        if let Some(on) = finished { settings.notify_task_finished = on; }
+    })?;
+    let _ = app.emit("settings-changed", next.clone());
+    Ok(next)
+}
+// 任务 2.5 结束

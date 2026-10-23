@@ -22,6 +22,8 @@ tauri-plugin-updater = "2"
 
 # 桌面端重复启动时把请求转给已运行实例
 tauri-plugin-single-instance = "2"
+# 系统通知（任务 2.5）：只在 Rust 端发，前端不加通知权限
+tauri-plugin-notification = "~2.4"
 # 给 updater 注入系统代理地址（UpdaterBuilder::proxy 收 url::Url）
 url = "2"
 toml = "0.8"

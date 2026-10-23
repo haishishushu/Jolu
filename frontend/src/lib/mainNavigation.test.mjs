@@ -47,3 +47,7 @@ test("托盘打开主窗口按默认打开页面设置换算", () => {
   assert.equal(pageForIntent({ kind: "overview", settings: { default_page: "providers", last_page: "automation" } }), "providers")
   assert.equal(pageForIntent({ kind: "overview", settings: { default_page: "last", last_page: null } }), "usage")
 })
+
+test("点击任务通知打开自动化页", () => {
+  assert.equal(pageForIntent({ kind: "automation", task_id: 24 }), "automation")
+})
