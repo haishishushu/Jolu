@@ -1,3 +1,4 @@
+import { ArrowDownLeft, ArrowUpRight, HardDriveDownload, HardDriveUpload } from "lucide-react"
 import { formatPercent, formatSeconds, formatTokens, formatUsd, modelDisplayName, share } from "@/lib/usageStats"
 import type { StatsActivityDto, StatsModelRowDto, StatsOverviewDto } from "@/lib/api"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
@@ -22,10 +23,10 @@ export function AnalysisPanel({ data, activity, onDrillModel, onDrillProvider }:
   return (
     <>
       <div className="grid grid-cols-4 gap-3">
-        <MetricCard label="未缓存输入" value={formatTokens(t.fresh_input)} note={part(t.fresh_input, "普通输入")} />
-        <MetricCard label="输出 Token" value={formatTokens(t.output)} note={part(t.output, "模型生成")} />
-        <MetricCard label="缓存读取" value={formatTokens(t.cache_read)} note={part(t.cache_read, "已复用输入")} />
-        <MetricCard label="缓存写入" value={formatTokens(t.cache_write)} note={part(t.cache_write, "新建缓存")} />
+        <MetricCard icon={<ArrowDownLeft />} label="未缓存输入" value={formatTokens(t.fresh_input)} note={part(t.fresh_input, "普通输入")} />
+        <MetricCard icon={<ArrowUpRight />} label="输出 Token" value={formatTokens(t.output)} note={part(t.output, "模型生成")} />
+        <MetricCard icon={<HardDriveDownload />} label="缓存读取" value={formatTokens(t.cache_read)} note={part(t.cache_read, "已复用输入")} />
+        <MetricCard icon={<HardDriveUpload />} label="缓存写入" value={formatTokens(t.cache_write)} note={part(t.cache_write, "新建缓存")} />
       </div>
 
       <ActivityCalendar activity={activity} />
