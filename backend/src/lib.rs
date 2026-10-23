@@ -1047,6 +1047,24 @@ fn set_retention_days(app: tauri::AppHandle, days: Option<u32>) -> Result<settin
     Ok(next)
 }
 
+// 任务 2.1 开始
+#[tauri::command]
+fn set_default_page(app: tauri::AppHandle, page: String) -> Result<settings::Settings, String> {
+    settings::validate_default_page(&page)?;
+    let next = app.state::<Cfg>().0.try_update(|settings| settings.default_page = page)?;
+    let _ = app.emit("settings-changed", next.clone());
+    Ok(next)
+}
+
+/// 只记录上次访问的页面；切页很频繁，不广播 settings-changed，托盘打开时读快照即可。
+#[tauri::command]
+fn remember_page(app: tauri::AppHandle, page: String) -> Result<(), String> {
+    settings::validate_last_page(&page)?;
+    app.state::<Cfg>().0.try_update(|settings| settings.last_page = Some(page))?;
+    Ok(())
+}
+// 任务 2.1 结束
+
 #[tauri::command]
 async fn cleanup_preview(db: State<'_, DbRead>, days: u32) -> Result<db::CleanupPreview, String> {
     let cutoff = retention_cutoff(days)?;
@@ -2700,7 +2718,11 @@ pub fn run() {
             fetch_remote_models,
             updater::check_app_update_available,
             updater::download_app_update,
-            updater::install_downloaded_update_and_restart
+            updater::install_downloaded_update_and_restart,
+            // 任务 2.1 开始
+            set_default_page,
+            remember_page,
+            // 任务 2.1 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
