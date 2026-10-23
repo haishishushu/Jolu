@@ -587,7 +587,43 @@ D-19 中各工具的能力，均于 2026-10-22 核实：
 - [ ] **步骤 3：实现**并更新前端。
 - [ ] **步骤 4：运行测试和类型检查**。
 
-**阶段 2 结束：** 跑全量测试和类型检查，用 `main-window-smoke.e2e.mjs` 冒烟，对照画板 86、88、90、92、94、100、102、82、84、30 截图；请鼠鼠决定是否提交。
+### 任务 2.9：自动化删除任务（鼠鼠 2026-10-23 要求）
+
+任务 1.2 验收时发现：后端没有删除任务的命令，界面也删不掉任务；画板 68「08 任务更多操作」里只有编辑任务、暂停等待（恢复 / 停止运行），没有删除。鼠鼠确认要补上。
+
+**文件：**
+- 修改：`docs/ui/Jolu.pen`：画板 68 / 69 的「08 任务更多操作」菜单末尾加一项「删除任务」（危险色，前面加分隔线）；同区补一个删除确认弹窗状态。浅色和深色都要改。
+- 修改：`backend/src/automation.rs`（新命令；调度器和运行中进程的处理）、`backend/src/lib.rs`（注册命令）
+- 修改：`frontend/src/lib/automationApi.ts`、自动化页的任务更多操作菜单所在组件（`frontend/src/components/automation/` 下，以实际文件为准）、`frontend/src/views/AutomationView.tsx`
+- 测试：`automation.rs` 的 `mod tests`；`frontend/src/lib/automation.test.mjs`
+
+**接口：**
+- 产出（Rust）：
+  - `pub fn delete_task(conn: &mut Connection, task_id: i64) -> Result<(), String>`：在一个事务里删除任务及其运行记录和事件。用量统计（`requests` 等表）不动。
+  - 任务有运行中的实例时报「任务正在运行，请先停止」；处于排队或等待额度时，先取消等待再删除。
+  - 命令 `automation_delete(app, task_id: i64) -> Result<(), String>`：成功后发出 `automation-changed` 事件。
+- 产出（TS）：
+  - `automationApi.deleteTask(taskId: number)`
+  - `export function canDeleteTask(status: string): boolean`：运行中返回 false，其余返回 true。
+- 界面：
+  - 菜单项「删除任务」放在最后，用危险色；运行中时禁用，提示「运行中的任务需先停止」。
+  - 点击后弹出确认框：
+    - 标题「删除任务「{任务名}」？」
+    - 正文「任务和它的运行记录会一起删除，已产生的用量统计保留。此操作无法撤销。」
+    - 按钮「取消」「删除」，其中「删除」用危险色。
+  - 删除成功后关闭详情并刷新列表；失败时在弹窗内显示原因。
+
+- [ ] **步骤 1：补画画板**（Pencil），截图对照。
+- [ ] **步骤 2：写失败测试**：
+  - `delete_task_removes_runs_keeps_usage`：建一个任务、两条运行、若干事件，再往 `requests` 表插一条记录；删除后任务、运行、事件都查不到，`requests` 的记录还在。
+  - `delete_running_task_rejected`：有运行中实例时报「任务正在运行，请先停止」，数据不变。
+  - `delete_waiting_task_cancels_wait`：等待额度的任务可以删除，`startable` 和等待检查列表里都不再出现它。
+  - TS：`canDeleteTask("running")` 为 false，`canDeleteTask("paused")` 为 true。
+- [ ] **步骤 3：运行**，预期失败。
+- [ ] **步骤 4：实现**前后端。
+- [ ] **步骤 5：运行测试和类型检查**；在隔离环境里新建一个任务，删除它，确认列表刷新、界面不报错。
+
+**阶段 2 结束：** 跑全量测试和类型检查，用 `main-window-smoke.e2e.mjs` 冒烟，对照画板 86、88、90、92、94、100、102、82、84、30、68 截图；请鼠鼠决定是否提交。
 
 ---
 
