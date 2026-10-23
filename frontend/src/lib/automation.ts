@@ -206,6 +206,13 @@ export function taskStatus(item: TaskItemDto, now: number, zone = ""): TaskStatu
   return { label: "已启用", next: "尚未开始", tone: "text", filter: null, action: "查看任务" }
 }
 
+/** 删除任务（画板 68 第 12 格）：执行中的任务需先停止；传入进行中运行的状态，没有运行时传任务状态 */
+export function canDeleteTask(status: string): boolean {
+  return status !== "running"
+}
+
+export const DELETE_BLOCKED_TIP = "运行中的任务需先停止"
+
 export function runStatusLabel(status: RunStatus): { label: string; tone: Tone } {
   switch (status) {
     case "queued": return { label: "排队中", tone: "text" }
