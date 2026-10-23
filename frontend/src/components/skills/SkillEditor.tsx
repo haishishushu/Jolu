@@ -4,7 +4,7 @@ import { Check, ChevronDown, CircleAlert, CircleCheck, FileText, GitCompare, Loa
 import { cn } from "@/lib/utils"
 import { lineDiff } from "@/lib/textDiff"
 import { isTauri } from "@/lib/api"
-import { SKILL_EXTERNAL_CHANGE, skillsApi, type SkillDetailDto, type SkillItemDto, type SkillScope } from "@/lib/skillsApi"
+import { SKILL_EXTERNAL_CHANGE, skillsApi, type SkillDetailDto, type SkillItemDto, type SkillPlatformDto, type SkillScope } from "@/lib/skillsApi"
 import {
   SKILL_PLATFORMS, frontField, hasNameConflict, projectLabel, setFrontField, skillTemplate, targetDirHint, validSkillName,
 } from "@/lib/skillsManager"
@@ -61,9 +61,11 @@ export type EditorTarget =
   | { mode: "edit"; item: SkillItemDto; detail: SkillDetailDto }
 
 /** 新建与编辑 Skill（画板 80）：基本信息、SKILL.md 编辑器与实时预览、保存前校验 */
-export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
+export function SkillEditor({ target, items, platforms, projects, onCancel, onSaved }: {
   target: EditorTarget
   items: SkillItemDto[]
+  /** 各工具的全局目标目录（目录设置里可能已更换） */
+  platforms: SkillPlatformDto[]
   projects: string[]
   onCancel: () => void
   onSaved: (path: string, platform: string) => void
@@ -114,7 +116,7 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
     try {
       if (!isTauri) {
         toast.success(editing ? "已保存（示例）" : "已创建（示例）", "浏览器预览不会写入文件")
-        return onSaved(editing ? target.item.path : `${targetDirHint(platform, scope, project)}${name}`, platform)
+        return onSaved(editing ? target.item.path : `${targetDirHint(platform, scope, project, platforms)}${name}`, platform)
       }
       const result = await skillsApi.save({
         platform,
@@ -214,7 +216,7 @@ export function SkillEditor({ target, items, projects, onCancel, onSaved }: {
           </Field>
         </div>
         <p className="truncate text-[11px] text-jolu-muted">
-          {editing ? `文件位置：${target.item.path}` : `保存到 ${targetDirHint(platform, scope, project)}${name || "<名称>"}/`}
+          {editing ? `文件位置：${target.item.path}` : `保存到 ${targetDirHint(platform, scope, project, platforms)}${name || "<名称>"}/`}
           {!editing && projects.length === 0 && " · 需要项目范围时，先在「目录设置」添加项目目录"}
         </p>
       </section>

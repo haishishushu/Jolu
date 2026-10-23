@@ -2773,6 +2773,10 @@ pub fn run() {
             // 任务 3.3 开始
             automation::automation_skills,
             // 任务 3.3 结束
+            // 任务 4.1 开始
+            skills::skills_set_global_dir,
+            skills::skills_save_dir_settings,
+            // 任务 4.1 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();

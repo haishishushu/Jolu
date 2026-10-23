@@ -53,19 +53,20 @@ export function demoSkillsOverview(platform: string): SkillsOverviewDto {
   const items = platform === "claude" ? claude : platform === "codex" ? codex : [...claude, ...codex]
   return {
     platforms: [
-      { id: "claude", detected: true, count: claude.length },
-      { id: "codex", detected: true, count: codex.length },
+      { id: "claude", detected: true, count: claude.length, verified: true, global_dir: HOME },
+      { id: "codex", detected: true, count: codex.length, verified: true, global_dir: "C:/Users/demo/.agents/skills" },
     ],
     items,
     roots: [
-      { platform: "claude", scope: "global", project: null, path: HOME, exists: true, readonly: false },
-      { platform: "claude", scope: "project", project: PROJECT, path: `${PROJECT}/.claude/skills`, exists: true, readonly: false },
-      { platform: "codex", scope: "global", project: null, path: "C:/Users/demo/.agents/skills", exists: true, readonly: false },
+      { platform: "claude", scope: "global", project: null, path: HOME, exists: true, readonly: false, overridable: true, overridden: false, default_path: null, parked_here: 0 },
+      { platform: "claude", scope: "project", project: PROJECT, path: `${PROJECT}/.claude/skills`, exists: true, readonly: false, overridable: false, overridden: false, default_path: null, parked_here: 0 },
+      { platform: "codex", scope: "global", project: null, path: "C:/Users/demo/.agents/skills", exists: true, readonly: false, overridable: false, overridden: false, default_path: null, parked_here: 0 },
+      { platform: "codex", scope: "global", project: null, path: "C:/Users/demo/.codex/skills", exists: true, readonly: false, overridable: true, overridden: false, default_path: null, parked_here: 0 },
     ].filter((r) => platform === "all" || r.platform === platform) as SkillsOverviewDto["roots"],
     projects: [
-      { path: PROJECT, source: "session", ignored: false, claude: true, codex: false },
-      { path: "D:/develop/jolu-docs", source: "session", ignored: false, claude: false, codex: false },
-      { path: "D:/work/api-proxy", source: "manual", ignored: false, claude: false, codex: false },
+      { path: PROJECT, source: "session", ignored: false, tools: ["claude"] },
+      { path: "D:/develop/jolu-docs", source: "session", ignored: false, tools: [] },
+      { path: "D:/work/api-proxy", source: "manual", ignored: false, tools: [] },
     ],
     errors: [],
     scanned_at: Date.now(),

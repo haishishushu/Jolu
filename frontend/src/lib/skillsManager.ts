@@ -1,8 +1,8 @@
-import type { SkillItemDto, SkillProjectDto, SkillScope, SkillSource, SkillStatus } from "./skillsApi"
+import type { SkillItemDto, SkillPlatformDto, SkillProjectDto, SkillRootDto, SkillScope, SkillSource, SkillStatus } from "./skillsApi"
 
 /** 模块 F · Skills 管理的纯逻辑：筛选、统计、文案、frontmatter 与 Markdown 预览 */
 
-/** 已核对目录与启停方式的工具（Context7：Claude Code / Codex） */
+/** 已核对目录与启停方式的工具，与后端 `skills.rs` 的 `SPECS` 一致（Context7：Claude Code / Codex） */
 export const SKILL_PLATFORMS = ["claude", "codex"] as const
 
 /** 画板 76 的供应商菜单：没有可靠目录依据的工具标「待接入」 */
@@ -121,7 +121,7 @@ export function skillStats(items: readonly SkillItemDto[]): SkillStats {
 /** 实际扫描到 Skills 目录的项目（不含已忽略的） */
 export function scannedProjects(projects: readonly SkillProjectDto[], platform: string): string[] {
   return projects
-    .filter((p) => !p.ignored && (platform === "claude" ? p.claude : platform === "codex" ? p.codex : p.claude || p.codex))
+    .filter((p) => !p.ignored && (platform === "all" ? p.tools.length > 0 : p.tools.includes(platform)))
     .map((p) => p.path)
 }
 
@@ -182,11 +182,62 @@ export function hasNameConflict(items: readonly SkillItemDto[], platform: string
   return items.some((i) => i.disabled_by !== "parked" && i.platform === platform && i.scope === scope && (scope !== "project" || i.project === project) && i.dir_name === name)
 }
 
-/** 新建与导入的目标目录提示（与后端 write_root 一致） */
-export function targetDirHint(platform: string, scope: SkillScope, project: string | null): string {
+/** 新建与导入的目标目录提示（与后端 write_root 一致）；全局目录以后端返回的 `global_dir` 为准（可能已在目录设置里更换） */
+export function targetDirHint(platform: string, scope: SkillScope, project: string | null, platforms: readonly Pick<SkillPlatformDto, "id" | "global_dir">[] = []): string {
+  const dir = scope === "global" ? platforms.find((p) => p.id === platform)?.global_dir : null
+  if (dir) {
+    const sep = dir.includes("\\") ? "\\" : "/"
+    return /[\\/]$/.test(dir) ? dir : `${dir}${sep}`
+  }
   const base = scope === "project" ? `${project ?? "<项目>"}/` : "~/"
   if (platform === "claude") return `${base}.claude/skills/`
   return `${base}.agents/skills/`
+}
+
+/* ───────────── 扫描目录设置：全局目录草稿（D-18） ───────────── */
+
+/** 与后端 norm_key 一致：统一分隔符、去掉末尾分隔符、不区分大小写（Windows） */
+function pathKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+}
+
+/** 弹窗里某个工具主目录的草稿：undefined 未改动；null 恢复默认；字符串为新选的目录 */
+export type GlobalDraft = string | null | undefined
+
+export interface GlobalRowView {
+  /** 按草稿显示的目录 */
+  path: string
+  /** 草稿生效后是否不是默认位置 */
+  overridden: boolean
+  /** 不是默认位置时显示的默认位置 */
+  defaultPath: string | null
+  /** 与当前生效的目录不同，保存时要提交 */
+  changed: boolean
+  /** 有改动时，停用区里仍记录在当前目录的 Skill 数（启用后会回到当前目录） */
+  staleParked: number
+}
+
+export function globalRowView(root: Pick<SkillRootDto, "path" | "overridden" | "default_path" | "parked_here">, draft: GlobalDraft): GlobalRowView {
+  const defaultPath = root.overridden ? root.default_path ?? root.path : root.path
+  const picked = draft === undefined ? root.path : draft === null ? defaultPath : draft
+  const path = pathKey(picked) === pathKey(defaultPath) ? defaultPath : picked
+  const overridden = pathKey(path) !== pathKey(defaultPath)
+  const changed = pathKey(path) !== pathKey(root.path)
+  return { path, overridden, defaultPath: overridden ? defaultPath : null, changed, staleParked: changed ? root.parked_here : 0 }
+}
+
+/** 「保存并扫描」时提交的全局目录改动：更换带路径，恢复默认为 null */
+export function globalChanges(roots: readonly SkillRootDto[], drafts: Readonly<Record<string, GlobalDraft>>): { platform: string; path: string | null }[] {
+  return roots
+    .filter((r) => r.scope === "global" && r.overridable)
+    .map((r) => ({ platform: r.platform, view: globalRowView(r, drafts[r.platform]) }))
+    .filter(({ view }) => view.changed)
+    .map(({ platform, view }) => ({ platform, path: view.overridden ? view.path : null }))
+}
+
+/** 待确认：画板 84 未画此状态 */
+export function staleParkedNote(count: number): string {
+  return `有 ${count} 个已停用的 Skill 仍记录在原目录，启用后会回到原目录，不会出现在新目录的列表里。`
 }
 
 /* ───────────── frontmatter ───────────── */
