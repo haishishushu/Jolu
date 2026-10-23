@@ -856,6 +856,10 @@ pub struct Progress {
     pub cache_read: Option<i64>,
     pub output: Option<i64>,
     pub files: Vec<String>,
+    /// Claude `rate_limit_event` 报告已到限额（`status: "rejected"`）
+    pub rate_limited: bool,
+    /// 同一事件给出的限额重置时间（毫秒）
+    pub limit_resets_at: Option<i64>,
 }
 
 fn add(slot: &mut Option<i64>, v: Option<i64>) {
@@ -884,6 +888,18 @@ impl Progress {
             match kind {
                 "system" => {
                     if let Some(id) = v.get("session_id").and_then(Json::as_str) { self.session_id = Some(id.to_string()); }
+                }
+                // 限额状态变化；`resetsAt` 为 Unix 秒（官方文档 Agent SDK 的 RateLimitInfo）。
+                // 主额度 rejected 但超额用量仍可用（`overageStatus` 为 allowed / allowed_warning）时会话继续，不记为耗尽
+                "rate_limit_event" => {
+                    let info = v.get("rate_limit_info");
+                    let field = |k: &str| info.and_then(|i| i.get(k)).and_then(Json::as_str);
+                    let overage_ok = matches!(field("overageStatus").or_else(|| field("overage_status")), Some("allowed" | "allowed_warning"));
+                    if field("status") == Some("rejected") && !overage_ok {
+                        self.rate_limited = true;
+                        let at = info.and_then(|i| i.get("resetsAt").or_else(|| i.get("resets_at"))).and_then(Json::as_i64);
+                        if let Some(at) = at.and_then(|n| parse_reset(&n.to_string())) { self.limit_resets_at = Some(at); }
+                    }
                 }
                 "assistant" => {
                     let blocks = v.pointer("/message/content").and_then(Json::as_array).cloned().unwrap_or_default();
@@ -986,7 +1002,16 @@ pub enum Outcome {
     Cancelled,
     Limit { resets_at: Option<i64>, message: String },
     Reauth(String),
+    /// Codex 拒绝在非 Git、未信任的目录执行；保留目录保护，不加 `--skip-git-repo-check`
+    UntrustedDir(String),
     Failed(String),
+}
+
+const UNTRUSTED_DIR_REASON: &str = "Codex 只能在 Git 仓库或已信任的目录中执行。请把工作目录改为 Git 仓库，或先在 Codex 中信任该目录。";
+
+/// codex-cli 0.162.0 原文：`Not inside a trusted directory and --skip-git-repo-check was not specified.`
+pub fn is_untrusted_dir(text: &str) -> bool {
+    has_any(text, &["not inside a trusted directory", "--skip-git-repo-check was not specified"])
 }
 
 fn has_any(text: &str, words: &[&str]) -> bool {
@@ -994,8 +1019,10 @@ fn has_any(text: &str, words: &[&str]) -> bool {
     words.iter().any(|w| lower.contains(w))
 }
 
+/// `ve hit your`：Claude Code 2.1.308 的 `You've hit your session limit / weekly limit / Opus limit …`
+/// 与 Codex 的 `You’ve hit your usage limit`（两种撇号）
 pub fn is_limit(text: &str) -> bool {
-    has_any(text, &["usage limit", "usage_limit", "rate limit", "rate_limit", "ratelimit", "limit reached", "hit your limit", "quota", "too many requests", "429", "额度"])
+    has_any(text, &["usage limit", "usage_limit", "rate limit", "rate_limit", "ratelimit", "limit reached", "hit your limit", "ve hit your", "quota", "too many requests", "429", "额度"])
 }
 
 pub fn is_auth(text: &str) -> bool {
@@ -1010,6 +1037,31 @@ pub fn limit_reset(text: &str) -> Option<i64> {
     })
 }
 
+/// Codex 限额提示末尾的 `try again at <时间>`，按本机时区：当天为 `3:05 PM`，跨天为 `Oct 23rd, 2026 3:05 PM`
+/// （codex-cli 0.162.0 内置格式 `%-I:%M %p` 与 `%b %-d{st|nd|rd|th}, %Y %-I:%M %p`）
+pub fn codex_retry_at<Tz: TimeZone>(tz: &Tz, text: &str, now_ms: i64) -> Option<i64> {
+    const KEY: &str = "try again at ";
+    let start = text.to_ascii_lowercase().find(KEY)? + KEY.len();
+    let rest = text[start..].split(['.', '\n']).next()?.trim();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let local = match parts.as_slice() {
+        [time, ampm] => {
+            let time = NaiveTime::parse_from_str(&format!("{time} {ampm}"), "%I:%M %p").ok()?;
+            let today = tz.timestamp_millis_opt(now_ms).single()?.date_naive();
+            let at = tz.from_local_datetime(&today.and_time(time)).earliest()?;
+            // 提示只精确到分钟：比现在早 5 分钟以内仍按当天算，更早才是次日
+            if at.timestamp_millis() > now_ms - 5 * 60_000 { at } else { tz.from_local_datetime(&today.succ_opt()?.and_time(time)).earliest()? }
+        }
+        [month, day, year, time, ampm] => {
+            let day: String = day.chars().take_while(char::is_ascii_digit).collect();
+            let naive = chrono::NaiveDateTime::parse_from_str(&format!("{month} {day} {year} {time} {ampm}"), "%b %d %Y %I:%M %p").ok()?;
+            tz.from_local_datetime(&naive).earliest()?
+        }
+        _ => return None,
+    };
+    Some(local.timestamp_millis())
+}
+
 pub fn classify(p: &Progress, exit_ok: bool, stderr_tail: &str, stopped: bool) -> Outcome {
     if stopped { return Outcome::Cancelled; }
     if p.completed && !p.failed { return Outcome::Completed; }
@@ -1017,10 +1069,19 @@ pub fn classify(p: &Progress, exit_ok: bool, stderr_tail: &str, stopped: bool) -
     let message = p.error.clone()
         .or_else(|| (!stderr.is_empty()).then(|| stderr.to_string()))
         .unwrap_or_else(|| if exit_ok { "执行器没有返回结果".into() } else { "执行器异常退出".into() });
-    if is_limit(&message) {
-        Outcome::Limit { resets_at: limit_reset(&message), message }
+    // 先按文本判断；`rate_limit_event` 的结构化标记只在文本没有给出其他判断时兜底，避免吞掉认证、网络等真实原因
+    let limit = |message: String| {
+        let resets_at = limit_reset(&message).or(p.limit_resets_at).or_else(|| codex_retry_at(&Local, &message, now_ms()));
+        Outcome::Limit { resets_at, message }
+    };
+    if is_untrusted_dir(&message) {
+        Outcome::UntrustedDir(message)
+    } else if is_limit(&message) {
+        limit(message)
     } else if is_auth(&message) {
         Outcome::Reauth(message)
+    } else if p.rate_limited {
+        limit(message)
     } else {
         Outcome::Failed(message)
     }
@@ -1109,6 +1170,13 @@ pub fn finish(conn: &Connection, run_id: i64, outcome: &Outcome, p: &Progress, n
                 params![run_id, clip(message, 1000)],
             )?;
             add_event(conn, run_id, now, "attention", "需要重新登录", Some(&clip(message, 200)))?;
+        }
+        Outcome::UntrustedDir(message) => {
+            conn.execute(
+                "UPDATE automation_runs SET status='attention', block_kind='cwd_missing', reason=?2, error=?3 WHERE id=?1",
+                params![run_id, UNTRUSTED_DIR_REASON, clip(message, 1000)],
+            )?;
+            add_event(conn, run_id, now, "attention", "需要处理", Some(UNTRUSTED_DIR_REASON))?;
         }
         Outcome::Failed(message) => {
             conn.execute("UPDATE automation_runs SET status='failed', ended_at=?2, error=?3 WHERE id=?1", params![run_id, now, clip(message, 2000)])?;
@@ -1770,6 +1838,142 @@ mod tests {
         act(&conn, first, "cancel", now + 200_000).unwrap();
         assert_eq!(load_run(&conn, run_id).unwrap().unwrap().status, "cancelled");
         assert_eq!(startable(&conn).unwrap().len(), 1, "取消后轮到下一个任务");
+    }
+
+    /// 额度耗尽：Claude Code 与 Codex 各一段输出喂给 `classify`，任务进入等待并记下重置时间。
+    /// 样例出处（2026-10-22 核对，本机 Claude Code 2.1.308、codex-cli 0.162.0）：
+    /// - Claude：`rate_limit_event` 的字段与 `status: "rejected"`（已到限额）、重置时间为 Unix 秒，见官方文档
+    ///   https://code.claude.com/docs/en/agent-sdk/python 的 RateLimitEvent / RateLimitInfo（CLI 原始字段名 `resetsAt`，
+    ///   取自 claude.exe 内置的 `{status, resetsAt, rateLimitType}` 序列化代码）；提示文本 `You've hit your <限额名> · resets <时间>`
+    ///   与限额名 `session limit` 取自 claude.exe 内置字符串。旧格式 `Claude AI usage limit reached|<时间戳>` 在 2.1.308 中已不存在。
+    ///   整行 JSON（result 的 `is_error: true`）按上述字段构造。
+    /// - Codex：提示文本 `You’ve hit your usage limit. Upgrade to Pro (…), visit … to purchase more credits or try again at <时间>.`
+    ///   与跨天时间格式 `%b %-d{st|nd|rd|th}, %Y %-I:%M %p`（本机时区）取自 codex.exe 内置字符串；
+    ///   JSONL 外壳（`error`、`turn.failed`）按 `Progress::feed` 现有的解析规则构造。
+    #[test]
+    fn classify_quota_exhausted_enters_waiting() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let running = |task: i64| {
+            let run_id = active_run(&conn, task).unwrap().unwrap().id;
+            conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run_id, now]).unwrap();
+            run_id
+        };
+
+        let claude = create_task(&conn, &input("now"), now).unwrap();
+        let run_id = running(claude);
+        let text = "You've hit your session limit · resets 3pm (Asia/Shanghai)";
+        let mut p = Progress::default();
+        p.feed("claude", r#"{"type":"system","subtype":"init","session_id":"s-limit"}"#);
+        p.feed("claude", r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792738800,"rateLimitType":"five_hour"},"uuid":"u-1","session_id":"s-limit"}"#);
+        p.feed("claude", &serde_json::json!({"type":"result","subtype":"success","is_error":true,"result":text,"session_id":"s-limit"}).to_string());
+        let outcome = classify(&p, false, "", false);
+        assert_eq!(outcome, Outcome::Limit { resets_at: Some(1_792_738_800_000), message: text.into() });
+        finish(&conn, run_id, &outcome, &p, now + 5_000).unwrap();
+        let run = load_run(&conn, run_id).unwrap().unwrap();
+        assert_eq!(
+            (run.status.as_str(), run.block_kind.as_deref(), run.resets_at, run.next_check_at, run.resume_pending, run.session_id.as_deref()),
+            ("waiting", Some("quota"), Some(1_792_738_800_000), Some(1_792_738_830_000), true, Some("s-limit")),
+        );
+
+        let mut codex_input = input("now");
+        codex_input.platform = "codex".into();
+        codex_input.connection_id = "c2".into();
+        codex_input.model = None;
+        let codex = create_task(&conn, &codex_input, now).unwrap();
+        let run_id = running(codex);
+        let text = "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 23rd, 2026 3:05 PM.";
+        let mut p = Progress::default();
+        p.feed("codex", r#"{"type":"thread.started","thread_id":"t-limit"}"#);
+        p.feed("codex", &serde_json::json!({"type":"error","message":text}).to_string());
+        p.feed("codex", &serde_json::json!({"type":"turn.failed","error":{"message":text}}).to_string());
+        let reset = Local.with_ymd_and_hms(2026, 10, 23, 15, 5, 0).earliest().unwrap().timestamp_millis();
+        let outcome = classify(&p, false, "", false);
+        assert_eq!(outcome, Outcome::Limit { resets_at: Some(reset), message: text.into() });
+        finish(&conn, run_id, &outcome, &p, now + 5_000).unwrap();
+        let run = load_run(&conn, run_id).unwrap().unwrap();
+        assert_eq!(
+            (run.status.as_str(), run.resets_at, run.resume_pending, run.session_id.as_deref()),
+            ("waiting", Some(reset), true, Some("t-limit")),
+        );
+    }
+
+    /// `rate_limit_event` 只在文本没有给出判断时兜底；超额用量仍可用（`overageStatus` 为 allowed / allowed_warning）时会话会继续，
+    /// 不算额度耗尽。字段名：官方 RateLimitInfo 的 `overage_status`，CLI 原始输出为 `overageStatus`（claude.exe 2.1.308 内置代码）。
+    /// 认证与 5xx 的提示文本为构造样例。
+    #[test]
+    fn rate_limit_event_does_not_hide_other_failures() {
+        let rejected = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792738800,"rateLimitType":"five_hour"},"uuid":"u-1","session_id":"s-1"}"#;
+        let overage = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792738800,"rateLimitType":"five_hour","overageStatus":"allowed","isUsingOverage":true},"uuid":"u-1","session_id":"s-1"}"#;
+        let result = |text: &str| serde_json::json!({"type":"result","subtype":"success","is_error":true,"result":text,"session_id":"s-1"}).to_string();
+
+        // 主额度耗尽后又因认证过期失败：按文本判为需要重新登录
+        let mut p = Progress::default();
+        p.feed("claude", rejected);
+        p.feed("claude", &result("OAuth token has expired. Please run /login"));
+        assert!(matches!(classify(&p, false, "", false), Outcome::Reauth(_)));
+
+        // 超额用量可用：不置限额标记；成功即完成，普通失败仍是失败
+        let mut p = Progress::default();
+        p.feed("claude", overage);
+        assert!(!p.rate_limited);
+        p.feed("claude", r#"{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s-1"}"#);
+        assert_eq!(classify(&p, true, "", false), Outcome::Completed);
+        let mut p = Progress::default();
+        p.feed("claude", overage);
+        p.feed("claude", &result("API Error: 500 Internal server error"));
+        assert_eq!(classify(&p, false, "", false), Outcome::Failed("API Error: 500 Internal server error".into()));
+
+        // 文本没有判断依据时，rejected 事件兜底判为额度耗尽并带上重置时间
+        let mut p = Progress::default();
+        p.feed("claude", rejected);
+        p.feed("claude", r#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s-1"}"#);
+        assert_eq!(
+            classify(&p, false, "", false),
+            Outcome::Limit { resets_at: Some(1_792_738_800_000), message: "执行器返回 error_during_execution".into() },
+        );
+    }
+
+    /// 样例为真实记录：2026-10-22 16:02 Codex 在非 Git 目录执行时 stderr 的原文（codex-cli 0.162.0）
+    #[test]
+    fn codex_untrusted_dir_needs_attention() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let mut i = input("now");
+        i.platform = "codex".into();
+        i.model = None;
+        let id = create_task(&conn, &i, now).unwrap();
+        let run_id = active_run(&conn, id).unwrap().unwrap().id;
+        conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run_id, now]).unwrap();
+        let stderr = "Not inside a trusted directory and --skip-git-repo-check was not specified.";
+        let outcome = classify(&Progress::default(), false, stderr, false);
+        assert!(!matches!(outcome, Outcome::Failed(_)), "不应归为运行失败：{outcome:?}");
+        finish(&conn, run_id, &outcome, &Progress::default(), now + 1_000).unwrap();
+        let run = load_run(&conn, run_id).unwrap().unwrap();
+        assert_eq!(
+            (run.status.as_str(), run.block_kind.as_deref(), run.reason.as_deref(), run.error.as_deref()),
+            ("attention", Some("cwd_missing"), Some("Codex 只能在 Git 仓库或已信任的目录中执行。请把工作目录改为 Git 仓库，或先在 Codex 中信任该目录。"), Some(stderr)),
+        );
+        assert_eq!(run.ended_at, None, "需要处理的运行仍可重新排队");
+    }
+
+    #[test]
+    fn codex_retry_time_handles_same_day_and_dated_formats() {
+        let tz = shanghai();
+        let now = ms(&tz, 2026, 10, 22, 14, 0);
+        let msg = |at: &str| format!("You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at {at}.");
+        assert_eq!(codex_retry_at(&tz, &msg("3:05 PM"), now), Some(ms(&tz, 2026, 10, 22, 15, 5)));
+        // 当天的时刻已经过去时视为次日
+        assert_eq!(codex_retry_at(&tz, &msg("9:30 AM"), now), Some(ms(&tz, 2026, 10, 23, 9, 30)));
+        // 提示只精确到分钟：恰好在重置的那一分钟内（或刚过几分钟）仍按当天算，不推迟 24 小时
+        assert_eq!(codex_retry_at(&tz, &msg("2:00 PM"), now + 30_000), Some(ms(&tz, 2026, 10, 22, 14, 0)));
+        assert_eq!(codex_retry_at(&tz, &msg("1:56 PM"), now), Some(ms(&tz, 2026, 10, 22, 13, 56)));
+        assert_eq!(codex_retry_at(&tz, &msg("1:50 PM"), now), Some(ms(&tz, 2026, 10, 23, 13, 50)));
+        assert_eq!(codex_retry_at(&tz, &msg("Nov 1st, 2026 12:00 AM"), now), Some(ms(&tz, 2026, 11, 1, 0, 0)));
+        assert_eq!(codex_retry_at(&tz, "You’ve hit your usage limit. or try again later.", now), None);
+        assert!(is_limit("You've hit your weekly limit · resets Oct 27, 9am"));
     }
 
     #[test]
