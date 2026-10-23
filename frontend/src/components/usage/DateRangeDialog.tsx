@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Dialog from "@radix-ui/react-dialog"
 import { useState } from "react"
 import { CalendarDays, ChevronLeft, ChevronRight, X } from "lucide-react"
@@ -10,13 +11,14 @@ const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
  * 选择日期范围（画板 36）：双月日历点选开始与结束，确认后才生效；取消保持原筛选。
  * 允许同一天；缺日期或开始晚于结束时确认不可用；今天之后的日期不可选（画板 38）。
  */
-export function DateRangeDialog({ value, currentLabel, onConfirm, onClose }: {
+export function DateRangeDialog({ value, currentLabel, onConfirm, onClose: onDismiss }: {
   value: DateRange
   /** 「当前筛选」的文案；导出弹窗未选日期时传「全部日期」，不传则按 value 显示 */
   currentLabel?: string
   onConfirm: (range: DateRange) => void
   onClose: () => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const today = dateKey(new Date())
   const [draft, setDraft] = useState<{ start: string | null; end: string | null }>({ start: value.start, end: value.end })
   // 右侧显示结束日所在月份，左侧是前一个月
@@ -35,7 +37,7 @@ export function DateRangeDialog({ value, currentLabel, onConfirm, onClose }: {
   const editing = draft.start === null ? "start" : "end"
 
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
+    <Dialog.Root open={dialogOpen} onOpenChange={(open) => !open && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content
@@ -68,7 +70,7 @@ export function DateRangeDialog({ value, currentLabel, onConfirm, onClose }: {
               <button
                 type="button"
                 disabled={!valid}
-                onClick={() => valid && onConfirm({ start: draft.start!, end: draft.end! })}
+                onClick={() => valid && finish(() => onConfirm({ start: draft.start!, end: draft.end! }))}
                 className="inline-flex h-[34px] items-center rounded-lg bg-jolu-accent px-3 text-xs font-medium text-[#071B10] outline-none hover:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45"
               >
                 确认

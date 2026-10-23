@@ -196,7 +196,8 @@ export const INPUT_CLASS = "h-[38px] w-full min-w-0 rounded-lg border border-jol
 
 /* ───────────── 弹窗外壳 ───────────── */
 
-export function DialogShell({ width, title, onClose, busy, children, height }: {
+export function DialogShell({ open = true, width, title, onClose, busy, children, height }: {
+  open?: boolean
   width: number
   title: ReactNode
   onClose: () => void
@@ -205,7 +206,7 @@ export function DialogShell({ width, title, onClose, busy, children, height }: {
   height?: number
 }) {
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog.Root open={open} onOpenChange={(open) => !open && !busy && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content

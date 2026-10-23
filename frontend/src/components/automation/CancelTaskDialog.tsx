@@ -1,10 +1,12 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Dialog from "@radix-ui/react-dialog"
 import { useState } from "react"
 import { X } from "lucide-react"
 import { JoluButton } from "@/components/ui/JoluButton"
 
 /** 取消任务确认（画板 68 第 09 格）：停止后续等待与调度，保留运行记录和已完成的文件修改 */
-export function CancelTaskDialog({ name, running, onClose, onConfirm }: { name: string; running: boolean; onClose: () => void; onConfirm: () => Promise<void> }) {
+export function CancelTaskDialog({ name, running, onClose: onDismiss, onConfirm }: { name: string; running: boolean; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const { open: dialogOpen, close: onClose } = useDialogClose(onDismiss)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const confirm = async () => {
@@ -12,13 +14,14 @@ export function CancelTaskDialog({ name, running, onClose, onConfirm }: { name: 
     setError(null)
     try {
       await onConfirm()
+      onClose()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
       setBusy(false)
     }
   }
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog.Root open={dialogOpen} onOpenChange={(open) => !open && !busy && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content

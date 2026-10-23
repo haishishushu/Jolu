@@ -1,3 +1,4 @@
+import { queryCache } from "@/lib/queryCache"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { isTauri } from "@/lib/api"
 
@@ -16,7 +17,8 @@ export interface LiveQuery<T> {
  * 浏览器预览直接用示例数据；桌面端出错不回落示例。
  */
 export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () => T, enabled = true): LiveQuery<T> {
-  const [data, setData] = useState<T | null>(null)
+  const [result, setResult] = useState<{ key: string; data: T | null }>(() => ({ key, data: queryCache.get<T>(key) }))
+  const data = result.key === key ? result.data : queryCache.get<T>(key)
   const [loading, setLoading] = useState(isTauri)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
@@ -30,9 +32,13 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
 
   useEffect(() => {
     if (!enabled) return
+    setResult((previous) => previous.key === key ? previous : { key, data: queryCache.get<T>(key) })
+    setError(null)
     const current = ++revision.current
     if (!isTauri) {
-      setData(demoRef.current())
+      const value = demoRef.current()
+      queryCache.set(key, value)
+      setResult({ key, data: value })
       setLoading(false)
       return
     }
@@ -42,7 +48,8 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
     loadRef.current()
       .then((value) => {
         if (current !== revision.current) return
-        setData(value)
+        queryCache.set(key, value)
+        setResult({ key, data: value })
         setError(null)
       })
       .catch((reason: unknown) => {
@@ -58,6 +65,11 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
           setTick((value) => value + 1)
         }
       })
+    return () => {
+      revision.current++
+      inFlight.current = false
+      queued.current = false
+    }
   }, [key, tick, enabled])
 
   const refresh = useCallback(() => {
@@ -65,5 +77,5 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
     else setTick((value) => value + 1)
   }, [])
 
-  return { data, loading, error, refresh }
+  return { data, loading, error: result.key === key ? error : null, refresh }
 }

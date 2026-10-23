@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Dialog from "@radix-ui/react-dialog"
 import { useEffect, useState, type ReactNode } from "react"
 import { ArrowUpRight, Bot, ChevronRight, CircleAlert, CircleCheck, LoaderCircle, X } from "lucide-react"
@@ -8,9 +9,9 @@ import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { providerName } from "@/components/usage/usageControls"
 import type { PlatformId } from "@/types"
 
-function Shell({ width, onClose, children, busy }: { width: number; onClose: () => void; children: ReactNode; busy?: boolean }) {
+function Shell({ open = true, width, onClose, children, busy }: { open?: boolean; width: number; onClose: () => void; children: ReactNode; busy?: boolean }) {
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog.Root open={open} onOpenChange={(open) => !open && !busy && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content
@@ -32,12 +33,13 @@ const primary = "inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-jolu-ac
  * 在原工具继续（画板 44）：检查原工具与项目目录，确认后在新的控制台窗口里续聊。
  * 沿用原工具当前的登录状态；打开失败保留当前会话，可重试或复制 ID（画板 46）。
  */
-export function ContinueDialog({ session, accountKnown, onClose, onDone }: {
+export function ContinueDialog({ session, accountKnown, onClose: onDismiss, onDone }: {
   session: SessionItemDto
   accountKnown: boolean
   onClose: () => void
   onDone: () => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const name = providerName(session.platform)
   const [check, setCheck] = useState<ContinueCheckDto | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -53,12 +55,12 @@ export function ContinueDialog({ session, accountKnown, onClose, onDone }: {
 
   const ready = !!check && check.supported && check.tool_found && check.cwd_accessible
   const open = async () => {
-    if (!isTauri) return onDone()
+    if (!isTauri) return finish(onDone)
     setOpening(true)
     setError(null)
     try {
       await api.sessionContinue(session.platform, session.session_id)
-      onDone()
+      finish(onDone)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -74,7 +76,7 @@ export function ContinueDialog({ session, accountKnown, onClose, onDone }: {
   )
 
   return (
-    <Shell width={540} onClose={onClose} busy={opening}>
+    <Shell open={dialogOpen} width={540} onClose={onClose} busy={opening}>
       <div className="flex items-center gap-2.5">
         <PlatformLogo platform={session.platform as PlatformId} size={24} />
         <Dialog.Title className="flex-1 text-[19px] font-semibold text-jolu-text">在 {name} 中继续</Dialog.Title>
@@ -114,9 +116,10 @@ export function ContinueDialog({ session, accountKnown, onClose, onDone }: {
 }
 
 /** 从会话创建自动化（画板 56）：确认后前往「自动化 → 新建任务」，不会立即执行 */
-export function AutomationConfirmDialog({ session, onClose, onConfirm }: { session: SessionItemDto; onClose: () => void; onConfirm: () => void }) {
+export function AutomationConfirmDialog({ session, onClose: onDismiss, onConfirm }: { session: SessionItemDto; onClose: () => void; onConfirm: () => void }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   return (
-    <Shell width={520} onClose={onClose}>
+    <Shell open={dialogOpen} width={520} onClose={onClose}>
       <div className="flex items-center gap-2.5">
         <Bot aria-hidden className="size-[22px] text-jolu-on" />
         <Dialog.Title className="text-xl font-semibold text-jolu-text">为此会话创建自动化任务？</Dialog.Title>
@@ -133,7 +136,7 @@ export function AutomationConfirmDialog({ session, onClose, onConfirm }: { sessi
       </div>
       <div className="flex justify-end gap-2">
         <button type="button" className={secondary} onClick={onClose}>取消</button>
-        <button type="button" className={primary} onClick={onConfirm}>继续新建<ChevronRight aria-hidden className="size-3.5" /></button>
+        <button type="button" className={primary} onClick={() => finish(onConfirm)}>继续新建<ChevronRight aria-hidden className="size-3.5" /></button>
       </div>
     </Shell>
   )

@@ -1,3 +1,5 @@
+import { useContentMotion } from "@/lib/motion"
+import { LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useEffect, useMemo, useState } from "react"
 import { ArrowDownLeft, ArrowDownWideNarrow, ArrowUpRight, Database, Files, Layers, MessagesSquare, RefreshCw, RotateCcw, Search, Target } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -53,12 +55,13 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
   const [pending, setPending] = useState<string | null>(null)
 
   const query = useStatsQuery(
-    JSON.stringify([platform, account, time, search]),
+    "sessions:" + JSON.stringify([platform, account, time, search]),
     () => api.sessionsList({ platform, connection: account, project: null, since: sinceFor(time), search: search.trim() || null }),
     () => demoSessions(Date.now()),
     platform,
     active,
   )
+  const listMotion = useContentMotion(String(!!query.data))
   useEffect(() => { if (query.data) setSyncedAt(Date.now()) }, [query.data])
 
   const all = useMemo(() => query.data?.sessions ?? [], [query.data])
@@ -210,9 +213,9 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
 
       {query.error && <ErrorNotice error={query.error} stale={query.data !== null} onRetry={query.refresh} />}
 
-      <div className="flex h-[630px] gap-4">
+      <div ref={listMotion} className="flex h-[630px] gap-4">
         {!query.data ? (
-          !query.error && <Placeholder title="正在读取本机会话" note="刷新保留项目展开状态、列表位置及选中会话。" loading />
+          !query.error && <LoadingSurface layout="sessions" label="正在读取本机会话" />
         ) : !all.length && !filtered ? (
           <Placeholder icon={<MessagesSquare />} title="还没有本机会话" note="先在支持的工具中开始会话，再回来重新扫描。" action={<ToolButton icon={<RefreshCw />} busy={scanning} onClick={() => void rescan()}>重新扫描</ToolButton>} />
         ) : !sessions.length ? (

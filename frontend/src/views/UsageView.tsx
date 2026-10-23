@@ -1,3 +1,4 @@
+import { ContentTransition } from "@/components/ui/LoadingSurface"
 import { useEffect, useState } from "react"
 import { CalendarDays, Download, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -75,21 +76,21 @@ export function UsageView({ active, request, onOpenSession }: {
   const callsFilter = (): StatsFilterDto => ({ ...rangeToMillis(range), platform, connections: [], model, status, search: search.trim() || null })
 
   const overview = useStatsQuery(
-    JSON.stringify([range, platform, accounts]),
+    "stats-overview:" + JSON.stringify([range, platform, accounts]),
     () => api.statsOverview(statsFilter()),
     () => demoOverview(rangeToMillis(range).start),
     platform,
     active && tab !== "calls",
   )
   const activity = useStatsQuery(
-    JSON.stringify([platform, accounts]),
+    "stats-activity:" + JSON.stringify([platform, accounts]),
     () => api.statsActivity(platform, accounts, Date.now()),
     () => demoActivity(new Date()),
     platform,
     active && tab === "analysis",
   )
   const calls = useStatsQuery<StatsCallPageDto>(
-    JSON.stringify([range, platform, model, status, search, page]),
+    "stats-calls:" + JSON.stringify([range, platform, model, status, search, page]),
     () => api.statsCalls(callsFilter(), page),
     () => demoCalls(Date.now(), page),
     platform,
@@ -245,6 +246,8 @@ export function UsageView({ active, request, onOpenSession }: {
 
       {current.error && <ErrorNotice error={current.error} stale={current.data !== null} onRetry={current.refresh} />}
 
+      {tab === "analysis" && activity.error && <ErrorNotice error={activity.error} stale={!!activity.data} onRetry={activity.refresh} />}
+      <ContentTransition identity={`${tab}-${!!current.data}`} className="flex flex-col gap-4">
       {tab === "calls" ? (
         calls.data ? (
           <CallsPanel data={calls.data} selectedId={selectedId} onSelect={setSelected} onPage={setPage} onOpenSession={onOpenSession} />
@@ -255,9 +258,10 @@ export function UsageView({ active, request, onOpenSession }: {
         ) : tab === "overview" ? (
           <OverviewPanel data={overview.data} isToday={isToday} onDrillBucket={drillBucket} onDrillModel={drillModel} onOpenSession={onOpenSession} />
         ) : (
-          <AnalysisPanel data={overview.data} activity={activity.data} onDrillModel={drillModel} onDrillProvider={drillProvider} />
+          <AnalysisPanel data={overview.data} activity={activity.data} activityError={activity.error} onDrillModel={drillModel} onDrillProvider={drillProvider} />
         )
-      ) : !overview.error && <LoadingCard />}
+      ) : !overview.error && <LoadingCard layout="stats" />}
+      </ContentTransition>
 
       {picking && (
         <DateRangeDialog

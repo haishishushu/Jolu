@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Dialog from "@radix-ui/react-dialog"
 import { useState } from "react"
 import { CircleAlert, Trash2 } from "lucide-react"
@@ -7,7 +8,8 @@ import { JoluButton } from "@/components/ui/JoluButton"
  * 删除任务确认（画板 68 / 69 第 10、11 格）：任务和运行记录一起删除，用量统计保留。
  * 成功后由调用方关闭弹窗和任务详情并刷新列表；失败时不关闭，在弹窗内显示后端返回的原因，可再次点击「删除」重试。
  */
-export function DeleteTaskDialog({ name, onClose, onConfirm }: { name: string; onClose: () => void; onConfirm: () => Promise<void> }) {
+export function DeleteTaskDialog({ name, onClose: onDismiss, onConfirm }: { name: string; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const { open: dialogOpen, close: onClose } = useDialogClose(onDismiss)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const confirm = async () => {
@@ -15,13 +17,14 @@ export function DeleteTaskDialog({ name, onClose, onConfirm }: { name: string; o
     setError(null)
     try {
       await onConfirm()
+      onClose()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
       setBusy(false)
     }
   }
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && !busy && onClose()}>
+    <Dialog.Root open={dialogOpen} onOpenChange={(open) => !open && !busy && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content

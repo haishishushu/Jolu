@@ -1,3 +1,4 @@
+import { useDialogClose } from "@/hooks/useDialogClose"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
@@ -136,12 +137,13 @@ function Checkbox({ checked, disabled, onChange, title, note }: { checked: boole
  * 新建 / 编辑任务弹窗（画板 60、70、72）：居中弹窗，标题与底部操作栏固定、表单区单独滚动；执行工具与账号、模型与项目、执行会话、执行内容、
  * Skills（可选）、启动方式与定时 / 额度提示、自动续跑与高级设置。
  */
-export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
+export function TaskDialog({ request, onClose: onDismiss, onSaved, onBackToSession }: {
   request: TaskDialogRequest
   onClose: () => void
   onSaved: (id: number, launch: TaskInputDto["launch"]) => void
   onBackToSession: (session: SessionItemDto) => void
 }) {
+  const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const [form, setForm] = useState<TaskForm>(() => initialForm(request))
   const [submitted, setSubmitted] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -215,15 +217,16 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
       schedule: form.launch === "schedule" ? toSchedule(form) : null, auto_resume: form.autoResume,
       wait_deadline: form.deadline ? new Date(form.deadline).getTime() : null, serial_queue: form.serialQueue,
     }
-    if (!isTauri) return onSaved(request.task?.id ?? 0, input.launch)
+    if (!isTauri) return finish(() => onSaved(request.task?.id ?? 0, input.launch))
     setSaving(true)
     setSaveError(null)
     try {
       if (request.mode === "edit" && request.task) {
         await automationApi.update(request.task.id, input)
-        onSaved(request.task.id, input.launch)
+        finish(() => onSaved(request.task!.id, input.launch))
       } else {
-        onSaved(await automationApi.create(input), input.launch)
+        const id = await automationApi.create(input)
+        finish(() => onSaved(id, input.launch))
       }
     } catch (reason) {
       setSaveError(reason instanceof Error ? reason.message : String(reason))
@@ -253,7 +256,7 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
   const modelOptions: Option[] = [{ value: "", label: `跟随 ${toolName(form.platform)} 默认`, note: "不指定模型参数" }, ...models.map((m) => ({ value: m, label: m }))]
 
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && !saving && onClose()}>
+    <Dialog.Root open={dialogOpen} onOpenChange={(open) => !open && !saving && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content
@@ -464,7 +467,7 @@ export function TaskDialog({ request, onClose, onSaved, onBackToSession }: {
           {saveError && <p role="alert" className="text-[11px] text-jolu-danger">{saveError}</p>}
           <div className="flex h-[42px] items-end justify-end gap-2.5 border-t border-jolu-border pt-2">
             {fromSession && request.session ? (
-              <JoluButton size="sm" variant="outline" disabled={saving} onClick={() => onBackToSession(request.session!)}>返回会话</JoluButton>
+              <JoluButton size="sm" variant="outline" disabled={saving} onClick={() => finish(() => onBackToSession(request.session!))}>返回会话</JoluButton>
             ) : (
               <JoluButton size="sm" variant="outline" disabled={saving} onClick={onClose}>取消</JoluButton>
             )}

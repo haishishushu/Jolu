@@ -1,3 +1,6 @@
+import { queryCache } from "@/lib/queryCache"
+import { useContentMotion } from "@/lib/motion"
+import { LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Blocks, Check, CircleCheck, Copy, Download, FolderCog, FolderOpen, Pause, Plus, RefreshCw, RotateCcw, Search, TriangleAlert, X } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -10,7 +13,7 @@ import {
 import { demoSkillsOverview } from "@/mock/skills"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { useToast } from "@/components/ui/Toast"
-import { MenuFilter, Spinner } from "@/components/usage/usageControls"
+import { MenuFilter } from "@/components/usage/usageControls"
 import { SkillDetail } from "@/components/skills/SkillDetail"
 import { SkillEditor, type EditorTarget } from "@/components/skills/SkillEditor"
 import { SkillsTable, skillKey } from "@/components/skills/SkillsTable"
@@ -30,7 +33,7 @@ function errorText(reason: unknown): string {
 export function SkillsView({ active }: { active: boolean }) {
   const toast = useToast()
   const [platform, setPlatform] = useState("claude")
-  const [data, setData] = useState<SkillsOverviewDto | null>(null)
+  const [data, setData] = useState<SkillsOverviewDto | null>(() => queryCache.get("skills:claude"))
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
@@ -59,6 +62,7 @@ export function SkillsView({ active }: { active: boolean }) {
     setForce(false)
     load.then((value) => {
       if (stale) return
+      queryCache.set(`skills:${platform}`, value)
       setData(value)
       setError(null)
     }, (reason: unknown) => !stale && setError(errorText(reason))).finally(() => !stale && setLoading(false))
@@ -78,7 +82,12 @@ export function SkillsView({ active }: { active: boolean }) {
   const scanned = useMemo(() => scannedProjects(data?.projects ?? [], platform), [data, platform])
   const targets = useMemo(() => targetProjects(data?.projects ?? []), [data])
 
+  const contentMotion = useContentMotion(`${mode.kind}-${platform}-${!!data}`)
+
   const changePlatform = (next: string) => {
+    setData(queryCache.get<SkillsOverviewDto>(`skills:${next}`))
+    setLoading(true)
+    setError(null)
     setPlatform(next)
     setSelected(new Set())
     setFilters((f) => ({ ...f, scope: "all" }))
@@ -211,7 +220,7 @@ export function SkillsView({ active }: { active: boolean }) {
   const nothingDetected = !!data && !data.roots.some((r) => r.exists) && items.length === 0
 
   return (
-    <div className="flex w-full flex-col gap-4">
+    <div ref={contentMotion} className="flex w-full flex-col gap-4">
       <div className="flex h-12 items-center justify-between gap-4">
         <div className="flex flex-col gap-[5px]">
           <h2 className="text-[22px] font-semibold text-jolu-text">我的 Skills</h2>
@@ -284,7 +293,7 @@ export function SkillsView({ active }: { active: boolean }) {
       )}
 
       {!data && loading ? (
-        <div className="flex items-center gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-4 text-xs text-jolu-muted"><Spinner />正在扫描 Skills 目录…</div>
+        <LoadingSurface layout="table" label="正在扫描 Skills 目录" />
       ) : nothingDetected ? (
         <section className="flex flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-5">
           <span className="text-[13px] font-semibold text-jolu-text">没有检测到 Skills 目录</span>

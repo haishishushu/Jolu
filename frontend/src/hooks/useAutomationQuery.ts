@@ -10,7 +10,7 @@ export type AutomationQuery<T> = LiveQuery<T>
  * `pollMs` 大于 0 时定时刷新（执行中的日志）。
  */
 export function useAutomationQuery<T>(key: string, load: () => Promise<T>, demo: () => T, enabled = true, pollMs = 0): AutomationQuery<T> {
-  const query = useLiveQuery(key, load, demo, enabled)
+  const query = useLiveQuery(`automation:${key}`, load, demo, enabled)
   const { refresh } = query
 
   useEffect(() => {

@@ -113,7 +113,7 @@ export function ActionButton({ tone = "secondary", icon, busy, children, classNa
       disabled={props.disabled || busy}
       aria-busy={busy || undefined}
       className={cn(
-        "inline-flex h-[34px] shrink-0 items-center gap-[7px] rounded-lg px-3 text-xs font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
+        "motion-button inline-flex h-[34px] shrink-0 items-center gap-[7px] rounded-lg px-3 text-xs font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
         TONES[tone],
         className,
       )}

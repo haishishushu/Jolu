@@ -111,7 +111,9 @@ export function useContentMotion(key: string, duration = 180, distance = 4) {
       { opacity: 1, ...(distance ? { transform: "translateY(0)" } : {}) },
     ], { duration, easing: MOTION_EASE })
     const query = window.matchMedia("(prefers-reduced-motion: reduce)")
-    const stop = () => { if (query.matches) animation.cancel() }
+    const stop = () => { if (reducedMotion()) animation.cancel() }
+    const observer = new MutationObserver(stop)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] })
     query.addEventListener("change", stop)
     return () => {
       // 连续切换从当前可见帧接续，不能反复跳回固定的淡入起点。
@@ -121,6 +123,7 @@ export function useContentMotion(key: string, duration = 180, distance = 4) {
       } else interrupted.current = null
       animation.cancel()
       query.removeEventListener("change", stop)
+      observer.disconnect()
     }
   }, [key, duration, distance])
   return ref
