@@ -266,8 +266,34 @@ pub struct CleanupPreview {
 
 #[derive(Debug, Serialize)]
 pub struct ImportSummary {
+    /// 新导入的请求条数（重复项不再合并更新，见 D-26）
     pub requests_changed: usize,
     pub sessions_changed: usize,
+    /// 跳过的条数：重复项 + 无效项
+    pub skipped: usize,
+}
+
+/// 导入前预览（画板 100 · 05）：有效、重复、无效三个数字；原因最多 20 条
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportPreview {
+    pub token: String,
+    pub file_name: String,
+    pub valid: usize,
+    pub duplicate: usize,
+    pub invalid: usize,
+    pub invalid_reasons: Vec<String>,
+}
+
+/// 通过逐条校验的备份内容。是否重复在导入时按库里的现状再判断一次，
+/// 预览之后采集写入的新记录同样会被跳过。
+#[derive(Debug, Default)]
+pub struct ParsedBackup {
+    requests: Vec<RequestRecord>,
+    metrics: std::collections::HashMap<(String, String), BackupMetric>,
+    attributions: std::collections::HashMap<(String, String), String>,
+    contexts: Vec<crate::source_store::ContextSnapshot>,
+    sessions: Vec<BackupSession>,
+    invalid: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -303,6 +329,20 @@ struct BackupFile {
     platform: Option<String>,
     requests: Vec<RequestRecord>,
     sessions: Vec<BackupSession>,
+}
+
+/// 导入时的外层结构：各列表先按 JSON 值读入，再逐条转换和校验，单条出错只跳过该条
+#[derive(Deserialize)]
+struct BackupInput {
+    schema_version: u32,
+    requests: Vec<serde_json::Value>,
+    sessions: Vec<serde_json::Value>,
+    #[serde(default)]
+    metrics: Vec<serde_json::Value>,
+    #[serde(default)]
+    attributions: Vec<serde_json::Value>,
+    #[serde(default)]
+    contexts: Vec<serde_json::Value>,
 }
 
 pub fn get_scan_state(conn: &Connection, path: &str) -> Option<(i64, i64)> {
@@ -606,17 +646,19 @@ pub fn cleanup_history(conn: &mut Connection, cutoff_ms: i64) -> rusqlite::Resul
     Ok(preview)
 }
 
-pub fn export_backup(conn: &Connection, platform: Option<&str>) -> Result<String, String> {
+/// 导出备份。`start_ms` / `end_ms` 为左闭右开区间，不传表示全部日期；
+/// 会话标题只导出区间内有请求的会话。
+pub fn export_backup(conn: &Connection, platform: Option<&str>, start_ms: Option<i64>, end_ms: Option<i64>) -> Result<String, String> {
     let mut request_stmt = conn.prepare(
         "SELECT platform, source, dedup_key, session_id, ts, model,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
                 input_known, output_known, cache_read_known, cache_write_known, total_known,
                 effort
          FROM requests
-         WHERE ?1 IS NULL OR platform = ?1
+         WHERE (?1 IS NULL OR platform = ?1) AND (?2 IS NULL OR ts >= ?2) AND (?3 IS NULL OR ts < ?3)
          ORDER BY ts ASC",
     ).map_err(|error| error.to_string())?;
-    let requests = request_stmt.query_map(params![platform], |row| {
+    let requests = request_stmt.query_map(params![platform, start_ms, end_ms], |row| {
         let known = [
             row.get::<_, i32>(11)? != 0,
             row.get::<_, i32>(12)? != 0,
@@ -643,11 +685,15 @@ pub fn export_backup(conn: &Connection, platform: Option<&str>) -> Result<String
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
 
     let mut session_stmt = conn.prepare(
-        "SELECT platform, session_id, title FROM sessions
-         WHERE title IS NOT NULL AND (?1 IS NULL OR platform = ?1)
-         ORDER BY platform, session_id",
+        "SELECT s.platform, s.session_id, s.title FROM sessions s
+         WHERE s.title IS NOT NULL AND (?1 IS NULL OR s.platform = ?1)
+           AND ((?2 IS NULL AND ?3 IS NULL) OR EXISTS (
+             SELECT 1 FROM requests r
+             WHERE r.platform = s.platform AND r.session_id = s.session_id
+               AND (?2 IS NULL OR r.ts >= ?2) AND (?3 IS NULL OR r.ts < ?3)))
+         ORDER BY s.platform, s.session_id",
     ).map_err(|error| error.to_string())?;
-    let sessions = session_stmt.query_map(params![platform], |row| Ok(BackupSession {
+    let sessions = session_stmt.query_map(params![platform, start_ms, end_ms], |row| Ok(BackupSession {
         platform: row.get(0)?,
         session_id: row.get(1)?,
         title: row.get(2)?,
@@ -655,19 +701,21 @@ pub fn export_backup(conn: &Connection, platform: Option<&str>) -> Result<String
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
 
     let mut stmt=conn.prepare("SELECT r.source,r.dedup_key,r.input_semantics,m.credits,m.original_credits,m.billable,m.context_ratio,m.reasoning,r.native_outcome,m.tool
-        FROM requests r LEFT JOIN request_metrics m ON m.request_id=r.id WHERE ?1 IS NULL OR r.platform=?1").map_err(|e|e.to_string())?;
-    let metrics=stmt.query_map(params![platform],|r|Ok(BackupMetric { source:r.get(0)?,dedup_key:r.get(1)?,input_semantics:r.get(2)?,
+        FROM requests r LEFT JOIN request_metrics m ON m.request_id=r.id
+        WHERE (?1 IS NULL OR r.platform=?1) AND (?2 IS NULL OR r.ts>=?2) AND (?3 IS NULL OR r.ts<?3)").map_err(|e|e.to_string())?;
+    let metrics=stmt.query_map(params![platform, start_ms, end_ms],|r|Ok(BackupMetric { source:r.get(0)?,dedup_key:r.get(1)?,input_semantics:r.get(2)?,
         credits:r.get(3)?,original_credits:r.get(4)?,billable:r.get(5)?,context_ratio:r.get(6)?,reasoning:r.get(7)?,native_outcome:r.get(8)?,tool:r.get(9)? }))
         .map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
     let mut attribution_stmt = conn.prepare("SELECT source, dedup_key, connection_id FROM requests
-        WHERE connection_id IS NOT NULL AND (?1 IS NULL OR platform = ?1)").map_err(|e| e.to_string())?;
-    let attributions = attribution_stmt.query_map(params![platform], |r| Ok(BackupAttribution {
+        WHERE connection_id IS NOT NULL AND (?1 IS NULL OR platform = ?1)
+          AND (?2 IS NULL OR ts >= ?2) AND (?3 IS NULL OR ts < ?3)").map_err(|e| e.to_string())?;
+    let attributions = attribution_stmt.query_map(params![platform, start_ms, end_ms], |r| Ok(BackupAttribution {
         source: r.get(0)?, dedup_key: r.get(1)?, connection_id: r.get(2)?,
     })).map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&BackupFile {
         metrics,
         attributions,
-        contexts: crate::source_store::contexts(conn,platform).map_err(|e|e.to_string())?,
+        contexts: crate::source_store::contexts(conn, platform, start_ms, end_ms).map_err(|e|e.to_string())?,
         schema_version: 2,
         exported_at_ms: chrono::Utc::now().timestamp_millis(),
         platform: platform.map(str::to_string),
@@ -676,11 +724,81 @@ pub fn export_backup(conn: &Connection, platform: Option<&str>) -> Result<String
     }).map_err(|error| error.to_string())
 }
 
-pub fn import_backup(conn: &mut Connection, json: &str) -> Result<ImportSummary, String> {
+const MAX_INVALID_REASONS: usize = 20;
+
+/// 无效项计数与原因（最多保留 20 条）
+#[derive(Default)]
+struct InvalidLog { count: usize, reasons: Vec<String> }
+
+impl InvalidLog {
+    fn push(&mut self, kind: &str, index: usize, reason: impl Into<String>) {
+        self.count += 1;
+        if self.reasons.len() < MAX_INVALID_REASONS {
+            self.reasons.push(format!("第 {} 条{kind}：{}", index + 1, reason.into()));
+        }
+    }
+}
+
+/// 把 serde 的转换错误改成可读原因；缺字段时写「缺少 字段名」
+fn shape_problem(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    match text.strip_prefix("missing field `").and_then(|rest| rest.split('`').next()) {
+        Some(field) => format!("缺少 {field}"),
+        None => format!("格式无效（{text}）"),
+    }
+}
+
+fn clip(value: &str) -> String {
+    let mut text: String = value.chars().take(32).collect();
+    if text.len() < value.len() { text.push('…'); }
+    text
+}
+
+fn request_problem(record: &RequestRecord) -> Option<String> {
+    if !crate::platforms::known(&record.platform) { return Some(format!("未知平台 {}", clip(&record.platform))); }
+    if record.source.trim().is_empty() { return Some("缺少 source".into()); }
+    if record.dedup_key.trim().is_empty() { return Some("缺少 dedup_key".into()); }
+    if record.source.len() > 512 { return Some("source 超过 512 字节".into()); }
+    if record.dedup_key.len() > 1_024 { return Some("dedup_key 超过 1024 字节".into()); }
+    if record.model.as_ref().is_some_and(|model| model.len() > 512) { return Some("模型名超过 512 字节".into()); }
+    if record.ts <= 0 { return Some("时间无效".into()); }
+    if [record.input_tokens, record.output_tokens, record.cache_read_tokens, record.cache_write_tokens, record.total_tokens]
+        .into_iter().flatten().any(|value| value < 0) {
+        return Some("Token 数值为负".into());
+    }
+    None
+}
+
+fn metric_valid(m: &BackupMetric) -> bool {
+    matches!(m.input_semantics.as_str(), "includes_cache" | "excludes_cache" | "unknown")
+        && [m.credits, m.original_credits, m.context_ratio].into_iter().flatten().all(|n| n.is_finite() && n >= 0.0)
+        && !m.native_outcome.as_deref().is_some_and(|s| !matches!(s, "success" | "failed" | "unknown"))
+        && !m.context_ratio.is_some_and(|n| n > 1.0) && !m.reasoning.is_some_and(|n| n < 0) && !m.tool.is_some_and(|n| n < 0)
+}
+
+fn request_exists(conn: &Connection, source: &str, dedup_key: &str) -> rusqlite::Result<bool> {
+    conn.prepare_cached("SELECT 1 FROM requests WHERE source = ?1 AND dedup_key = ?2")?
+        .exists(params![source, dedup_key])
+}
+
+/// 预览 token：时间 + 序号保证唯一，再拼两段 `RandomState`（每进程随机密钥）哈希，
+/// 共 128 位，不能由时间推出；不新增依赖。
+fn import_token() -> String {
+    use std::hash::BuildHasher;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let random = |salt: u8| std::collections::hash_map::RandomState::new().hash_one((nanos, seq, salt));
+    format!("{nanos:x}-{seq:x}-{:016x}{:016x}", random(0), random(1))
+}
+
+/// 导入前预览：逐条校验并统计有效、重复、无效，只读不写库。
+/// 单条无效只跳过该条；文件本身不是合法备份（JSON 错误、版本不支持、超限）时整体报错。
+pub fn preview_backup(conn: &Connection, json: &str) -> Result<(ImportPreview, ParsedBackup), String> {
     if json.len() > 100 * 1024 * 1024 {
         return Err("导入文件超过 100 MB 限制".into());
     }
-    let backup: BackupFile = serde_json::from_str(json)
+    let backup: BackupInput = serde_json::from_str(json)
         .map_err(|error| format!("备份 JSON 格式无效：{error}"))?;
     if !matches!(backup.schema_version, 1 | 2) {
         return Err(format!("不支持的备份版本：{}", backup.schema_version));
@@ -688,79 +806,151 @@ pub fn import_backup(conn: &mut Connection, json: &str) -> Result<ImportSummary,
     if backup.requests.len() > 1_000_000 {
         return Err("导入记录超过 100 万条限制".into());
     }
-    for record in &backup.requests {
-        if !crate::platforms::known(&record.platform)
-            || record.source.trim().is_empty()
-            || record.dedup_key.trim().is_empty()
-            || record.source.len() > 512
-            || record.dedup_key.len() > 1_024
-            || record.model.as_ref().is_some_and(|model| model.len() > 512)
-            || record.ts <= 0
-            || [record.input_tokens, record.output_tokens, record.cache_read_tokens,
-                record.cache_write_tokens, record.total_tokens]
-                .into_iter().flatten().any(|value| value < 0)
-        {
-            return Err("备份包含无效的平台、标识、时间或 Token 数值".into());
+    let mut invalid = InvalidLog::default();
+    let mut parsed = ParsedBackup::default();
+
+    // 来源指标无效或同一请求出现多份时，对应请求整条按无效跳过，不导入残缺数据
+    let mut bad_metrics = std::collections::HashSet::new();
+    for (index, value) in backup.metrics.into_iter().enumerate() {
+        match serde_json::from_value::<BackupMetric>(value) {
+            Err(error) => invalid.push("来源指标", index, shape_problem(&error)),
+            Ok(metric) => {
+                let key = (metric.source.clone(), metric.dedup_key.clone());
+                if !metric_valid(&metric) || bad_metrics.contains(&key) || parsed.metrics.contains_key(&key) {
+                    parsed.metrics.remove(&key);
+                    bad_metrics.insert(key);
+                } else {
+                    parsed.metrics.insert(key, metric);
+                }
+            }
         }
     }
-    for session in &backup.sessions {
-        if !crate::platforms::known(&session.platform)
-            || session.session_id.trim().is_empty()
-            || session.session_id.len() > 512
-            || session.title.len() > 4_096
-        {
-            return Err("备份包含无效的会话平台、标识或标题".into());
+
+    let cutoff = crate::source_store::cutoff(conn).map_err(|e| e.to_string())?;
+    let mut seen = std::collections::HashSet::new();
+    let (mut valid, mut duplicate) = (0, 0);
+    for (index, value) in backup.requests.into_iter().enumerate() {
+        let record = match serde_json::from_value::<RequestRecord>(value) {
+            Ok(record) => record,
+            Err(error) => { invalid.push("请求", index, shape_problem(&error)); continue; }
+        };
+        if let Some(problem) = request_problem(&record) { invalid.push("请求", index, problem); continue; }
+        let key = (record.source.clone(), record.dedup_key.clone());
+        if bad_metrics.contains(&key) { invalid.push("请求", index, "来源指标无效或重复"); continue; }
+        // 原生来源按清理规则不再收录截止日期之前的记录，导入时同样会被跳过
+        if crate::platforms::native(&record.platform) && record.ts < cutoff {
+            invalid.push("请求", index, "早于历史清理截止日期，按清理规则不再收录");
+            continue;
+        }
+        if !seen.insert(key) || request_exists(conn, &record.source, &record.dedup_key).map_err(|e| e.to_string())? {
+            duplicate += 1;
+        } else {
+            valid += 1;
+        }
+        parsed.requests.push(record);
+    }
+
+    for (index, value) in backup.sessions.into_iter().enumerate() {
+        match serde_json::from_value::<BackupSession>(value) {
+            Err(error) => invalid.push("会话标题", index, shape_problem(&error)),
+            Ok(session) if !crate::platforms::known(&session.platform) => invalid.push("会话标题", index, format!("未知平台 {}", clip(&session.platform))),
+            Ok(session) if session.session_id.trim().is_empty() || session.session_id.len() > 512 => invalid.push("会话标题", index, "会话标识为空或过长"),
+            Ok(session) if session.title.len() > 4_096 => invalid.push("会话标题", index, "标题超过 4096 字节"),
+            // 空标题没有可导入的内容，与旧版一致直接忽略
+            Ok(session) if session.title.trim().is_empty() => {}
+            Ok(session) => parsed.sessions.push(session),
         }
     }
+
+    for (index, value) in backup.contexts.into_iter().enumerate() {
+        match serde_json::from_value::<crate::source_store::ContextSnapshot>(value) {
+            Err(error) => invalid.push("上下文快照", index, shape_problem(&error)),
+            Ok(c) if !crate::platforms::known(&c.platform) || c.source.len() > 512 || c.session_id.len() > 1_024
+                || c.ts <= 0 || !c.ratio.is_finite() || !(0.0..=1.0).contains(&c.ratio) => {
+                invalid.push("上下文快照", index, "平台、标识、时间或占用比例无效");
+            }
+            Ok(c) => parsed.contexts.push(c),
+        }
+    }
+
+    for (index, value) in backup.attributions.into_iter().enumerate() {
+        match serde_json::from_value::<BackupAttribution>(value) {
+            Err(error) => invalid.push("连接归属", index, shape_problem(&error)),
+            Ok(a) if a.source.len() > 512 || a.dedup_key.len() > 1_024 || a.connection_id.trim().is_empty() || a.connection_id.len() > 128 => {
+                invalid.push("连接归属", index, "来源、标识或连接 ID 无效");
+            }
+            Ok(a) => { parsed.attributions.insert((a.source, a.dedup_key), a.connection_id); }
+        }
+    }
+
+    parsed.invalid = invalid.count;
+    let preview = ImportPreview {
+        token: import_token(),
+        file_name: String::new(),
+        valid,
+        duplicate,
+        invalid: invalid.count,
+        invalid_reasons: invalid.reasons,
+    };
+    Ok((preview, parsed))
+}
+
+/// 按预览结果导入：只插入有效且不重复的记录，库里已有的记录保持原值（D-26）。
+/// 连接归属、来源结果只写到本次新插入的请求上；上下文快照只补库里没有的；
+/// 会话标题只补库里还没有标题的会话，已有标题不覆盖。
+pub fn import_parsed(conn: &mut Connection, parsed: &ParsedBackup) -> Result<ImportSummary, String> {
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    let mut metrics=std::collections::HashMap::new();
-    for m in &backup.metrics {
-        if !matches!(m.input_semantics.as_str(),"includes_cache"|"excludes_cache"|"unknown")
-            || [m.credits,m.original_credits,m.context_ratio].into_iter().flatten().any(|n| !n.is_finite() || n<0.0)
-            || m.native_outcome.as_deref().is_some_and(|s|!matches!(s,"success"|"failed"|"unknown"))
-            || m.context_ratio.is_some_and(|n|n>1.0) || m.reasoning.is_some_and(|n|n<0) || m.tool.is_some_and(|n|n<0)
-            || metrics.insert((m.source.as_str(),m.dedup_key.as_str()),m).is_some() {
-            return Err("备份包含无效或重复的来源指标".into());
-        }
-    }
-    let mut requests_changed=0;
-    for r in &backup.requests {
-        if crate::platforms::native(&r.platform) {
-            let m=metrics.get(&(r.source.as_str(),r.dedup_key.as_str()));
-            let input_semantics=match m.map(|m|m.input_semantics.as_str()) {
-                Some("includes_cache")=>"includes_cache",Some("excludes_cache")=>"excludes_cache",_=>"unknown"
+    let mut requests_changed = 0;
+    for r in &parsed.requests {
+        if request_exists(&tx, &r.source, &r.dedup_key).map_err(|e| e.to_string())? { continue; }
+        let key = (r.source.clone(), r.dedup_key.clone());
+        let native = crate::platforms::native(&r.platform);
+        let metric = parsed.metrics.get(&key);
+        let added = if native {
+            let input_semantics = match metric.map(|m| m.input_semantics.as_str()) {
+                Some("includes_cache") => "includes_cache", Some("excludes_cache") => "excludes_cache", _ => "unknown",
             };
-            requests_changed+=crate::source_store::write(&tx,&[crate::source_store::Record { request:r.clone(),input_semantics,
-                credits:m.and_then(|m|m.credits),original_credits:m.and_then(|m|m.original_credits),billable:m.and_then(|m|m.billable),
-                context_ratio:m.and_then(|m|m.context_ratio),reasoning:m.and_then(|m|m.reasoning),tool:m.and_then(|m|m.tool) }]).map_err(|e|e.to_string())?;
-            if let Some(m)=m {tx.execute("UPDATE requests SET native_outcome=?1 WHERE source=?2 AND dedup_key=?3",params![m.native_outcome,r.source,r.dedup_key]).map_err(|e|e.to_string())?;}
-        } else {requests_changed+=insert_records_into(&tx,std::slice::from_ref(r)).map_err(|e|e.to_string())?;}
-    }
-    for c in backup.contexts {
-        if !crate::platforms::known(&c.platform) || c.source.len()>512 || c.session_id.len()>1024 || c.ts<=0
-            || !c.ratio.is_finite() || !(0.0..=1.0).contains(&c.ratio) {return Err("备份包含无效上下文快照".into());}
-        crate::source_store::context(&tx,&c).map_err(|e|e.to_string())?;
-    }
-    for a in &backup.attributions {
-        if a.source.len() > 512 || a.dedup_key.len() > 1_024 || a.connection_id.trim().is_empty() || a.connection_id.len() > 128 {
-            return Err("备份包含无效的连接归属".into());
+            crate::source_store::write(&tx, &[crate::source_store::Record { request: r.clone(), input_semantics,
+                credits: metric.and_then(|m| m.credits), original_credits: metric.and_then(|m| m.original_credits),
+                billable: metric.and_then(|m| m.billable), context_ratio: metric.and_then(|m| m.context_ratio),
+                reasoning: metric.and_then(|m| m.reasoning), tool: metric.and_then(|m| m.tool) }]).map_err(|e| e.to_string())?
+        } else {
+            insert_records_into(&tx, std::slice::from_ref(r)).map_err(|e| e.to_string())?
+        };
+        if added == 0 { continue; }
+        requests_changed += 1;
+        if let Some(m) = metric.filter(|_| native) {
+            tx.execute("UPDATE requests SET native_outcome=?1 WHERE source=?2 AND dedup_key=?3",
+                params![m.native_outcome, r.source, r.dedup_key]).map_err(|e| e.to_string())?;
         }
-        tx.execute("UPDATE requests SET connection_id = ?1 WHERE source = ?2 AND dedup_key = ?3",
-            params![a.connection_id, a.source, a.dedup_key]).map_err(|e| e.to_string())?;
+        if let Some(connection_id) = parsed.attributions.get(&key) {
+            tx.execute("UPDATE requests SET connection_id = ?1 WHERE source = ?2 AND dedup_key = ?3",
+                params![connection_id, r.source, r.dedup_key]).map_err(|e| e.to_string())?;
+        }
+    }
+    for c in &parsed.contexts {
+        let exists = tx.prepare_cached("SELECT 1 FROM native_context WHERE source = ?1 AND session_id = ?2")
+            .and_then(|mut q| q.exists(params![c.source, c.session_id])).map_err(|e| e.to_string())?;
+        if !exists { crate::source_store::context(&tx, c).map_err(|e| e.to_string())?; }
     }
     let mut sessions_changed = 0;
-    for session in backup.sessions {
-        if !session.title.trim().is_empty() {
-            sessions_changed += tx.execute(
-                "INSERT INTO sessions(platform, session_id, title) VALUES(?1,?2,?3)
-                 ON CONFLICT(platform, session_id) DO UPDATE SET title = ?3
-                 WHERE sessions.title IS NOT excluded.title",
-                params![session.platform, session.session_id, session.title],
-            ).map_err(|error| error.to_string())?;
-        }
+    for session in &parsed.sessions {
+        sessions_changed += tx.execute(
+            "INSERT INTO sessions(platform, session_id, title) VALUES(?1,?2,?3)
+             ON CONFLICT(platform, session_id) DO UPDATE SET title = excluded.title
+             WHERE sessions.title IS NULL",
+            params![session.platform, session.session_id, session.title],
+        ).map_err(|error| error.to_string())?;
     }
     tx.commit().map_err(|error| error.to_string())?;
-    Ok(ImportSummary { requests_changed, sessions_changed })
+    Ok(ImportSummary { requests_changed, sessions_changed, skipped: parsed.invalid + parsed.requests.len() - requests_changed })
+}
+
+/// 测试用：预览后立即导入
+#[cfg(test)]
+pub fn import_backup(conn: &mut Connection, json: &str) -> Result<ImportSummary, String> {
+    let (_, parsed) = preview_backup(conn, json)?;
+    import_parsed(conn, &parsed)
 }
 
 /// 批量写入；重复的 (source, dedup_key) 直接忽略 —— 去重在数据库层做。
@@ -2496,7 +2686,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let json = export_backup(&source, Some("claude")).unwrap();
+        let json = export_backup(&source, Some("claude"), None, None).unwrap();
         assert!(!json.contains("secret-value"));
         assert!(!json.contains("私有连接"));
 
@@ -2506,8 +2696,125 @@ mod tests {
         let second = import_backup(&mut target, &json).unwrap();
         assert_eq!((first.requests_changed, first.sessions_changed), (1, 1));
         assert_eq!((second.requests_changed, second.sessions_changed), (0, 0));
+        assert_eq!((first.skipped, second.skipped), (0, 1));
         let row = request_log_at(&target, "claude", "total", 1, None, None, 2_000).unwrap().rows.remove(0);
         assert_eq!((row.input, row.output, row.total), (Some(10), None, Some(12)));
+    }
+
+    fn import_record(key: &str, ts: i64, total: i64) -> RequestRecord {
+        RequestRecord {
+            platform: "claude".into(), source: "local".into(), dedup_key: key.into(),
+            session_id: Some(format!("session-{key}")), ts, model: Some("claude-sonnet-4".into()),
+            input_tokens: Some(total), output_tokens: Some(0), cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0), total_tokens: Some(total), effort: None,
+        }
+    }
+
+    /// 文件 5 条：2 条与库里重复（Token 值不同）、2 条新记录、1 条缺 dedup_key
+    fn preview_fixture() -> (Connection, String) {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        insert_records(&mut conn, &[import_record("dup-1", 1_000, 100), import_record("dup-2", 2_000, 200)]).unwrap();
+        let mut missing = serde_json::to_value(import_record("broken", 5_000, 5)).unwrap();
+        missing.as_object_mut().unwrap().remove("dedup_key");
+        let requests = vec![
+            serde_json::to_value(import_record("dup-1", 1_000, 999)).unwrap(),
+            serde_json::to_value(import_record("dup-2", 2_000, 999)).unwrap(),
+            serde_json::to_value(import_record("new-1", 3_000, 30)).unwrap(),
+            serde_json::to_value(import_record("new-2", 4_000, 40)).unwrap(),
+            missing,
+        ];
+        let json = serde_json::json!({
+            "schema_version": 2, "exported_at_ms": 9_000, "platform": null,
+            "requests": requests,
+            "sessions": [{ "platform": "claude", "session_id": "session-new-1", "title": "新会话" }],
+        }).to_string();
+        (conn, json)
+    }
+
+    fn total_of(conn: &Connection, key: &str) -> i64 {
+        conn.query_row("SELECT total_tokens FROM requests WHERE dedup_key = ?1", [key], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn preview_counts_match_import() {
+        let (mut conn, json) = preview_fixture();
+        let (preview, parsed) = preview_backup(&conn, &json).unwrap();
+        assert_eq!((preview.valid, preview.duplicate, preview.invalid), (2, 2, 1));
+        assert_eq!(preview.invalid_reasons.len(), 1);
+        assert!(preview.invalid_reasons[0].contains("dedup_key"), "{:?}", preview.invalid_reasons);
+        assert!(!preview.token.is_empty());
+
+        let summary = import_parsed(&mut conn, &parsed).unwrap();
+        assert_eq!((summary.requests_changed, summary.skipped), (2, 3));
+        // 重复项跳过：库里原来那 2 条的 Token 值不变
+        assert_eq!((total_of(&conn, "dup-1"), total_of(&conn, "dup-2")), (100, 200));
+        assert_eq!((total_of(&conn, "new-1"), total_of(&conn, "new-2")), (30, 40));
+    }
+
+    #[test]
+    fn import_tokens_carry_random_part_and_are_unique() {
+        let (a, b) = (import_token(), import_token());
+        assert_ne!(a, b);
+        // 最后一段是 RandomState 哈希得到的 32 位十六进制，不能由时间和序号推出
+        let random = a.rsplit('-').next().unwrap();
+        assert_eq!(random.len(), 32, "{a}");
+        assert!(random.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(random, b.rsplit('-').next().unwrap());
+    }
+
+    #[test]
+    fn preview_writes_nothing() {
+        let (conn, json) = preview_fixture();
+        let counts = |conn: &Connection| -> Vec<i64> {
+            ["requests", "sessions", "usage_events", "request_metrics", "native_context"].iter()
+                .map(|table| conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap())
+                .collect()
+        };
+        let before = counts(&conn);
+        preview_backup(&conn, &json).unwrap();
+        assert_eq!(counts(&conn), before);
+    }
+
+    #[test]
+    fn preview_skips_native_records_before_cleanup_cutoff() {
+        let (mut conn, _) = preview_fixture();
+        conn.execute("UPDATE collection_policy SET cutoff_ms = 3_500 WHERE singleton = 1", []).unwrap();
+        let native = |key: &str, ts: i64| RequestRecord { platform: "workbuddy".into(), source: "native:workbuddy:main".into(), ..import_record(key, ts, 7) };
+        let json = serde_json::json!({
+            "schema_version": 2, "exported_at_ms": 9_000, "platform": null,
+            "requests": [native("old", 3_000), native("fresh", 4_000)], "sessions": [],
+        }).to_string();
+        let (preview, parsed) = preview_backup(&conn, &json).unwrap();
+        assert_eq!((preview.valid, preview.duplicate, preview.invalid), (1, 0, 1));
+        assert!(preview.invalid_reasons[0].starts_with("第 1 条请求"), "{:?}", preview.invalid_reasons);
+        let summary = import_parsed(&mut conn, &parsed).unwrap();
+        assert_eq!((summary.requests_changed, summary.skipped), (1, 1));
+    }
+
+    #[test]
+    fn export_range_is_half_open() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let (start, end) = (10_000, 20_000);
+        insert_records(&mut conn, &[
+            import_record("at-start", start, 1),
+            import_record("before-end", end - 1, 2),
+            import_record("at-end", end, 3),
+        ]).unwrap();
+        for key in ["at-start", "before-end", "at-end"] {
+            upsert_session_title(&conn, "claude", &format!("session-{key}"), key).unwrap();
+        }
+        let json = export_backup(&conn, None, Some(start), Some(end)).unwrap();
+        let file: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let keys: Vec<&str> = file["requests"].as_array().unwrap().iter().map(|r| r["dedup_key"].as_str().unwrap()).collect();
+        assert_eq!(keys, ["at-start", "before-end"]);
+        // 会话标题只导出区间内有请求的会话
+        let titles: Vec<&str> = file["sessions"].as_array().unwrap().iter().map(|s| s["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["at-start", "before-end"]);
+        // 不传日期时导出全部
+        let all: serde_json::Value = serde_json::from_str(&export_backup(&conn, None, None, None).unwrap()).unwrap();
+        assert_eq!(all["requests"].as_array().unwrap().len(), 3);
     }
 }
 
