@@ -65,6 +65,12 @@ node scripts/acceptance/async-components.e2e.mjs
 - 任务额度：切账号立即移除旧值；旧成功/失败不能覆盖新状态；同账号新检查失败清除旧额度，再成功清除错误。
 - 只输出通过摘要，不打印正文、草稿或输入值；任何断言失败返回非零退出码，finally 关闭自建浏览器。不代替真实桌面/文件系统/API 联调。
 
+## ZCode 首次接入模型验证
+
+使用上面的 5311 Vite 开发服务器和 `output/acceptance/node` 内的 playwright-core，执行 `node scripts/acceptance/zcode-model-verify.e2e.mjs`。`JOLU_COMPONENT_URL` 可覆盖本机地址。脚本挂载真实 `ConnectDialog`，仅用合成 Key、模型和可控 Promise，所有未替换的原生调用一律拒绝；不查询或保存真实账号，不向供应商发送请求。
+
+覆盖模型枚举不可用时改手填、明确用量确认后才验证、取消确认不请求、连点不重复、验证期间禁止保存、换 Key/区域/模型后旧结果失效、失败保留输入、重新获取模型重置状态，以及四组国内/国际 OpenAI/Anthropic 传参和保存。枚举选择和自定义供应商的既有保存规则也做回归。截图保存在 `output/acceptance/zcode-model/`；只输出通过摘要，失败亦关闭自建浏览器。它不能替代用户填入真实 ZCode Key 后的接口联调。
+
 ## 真实只读接口的执行条件
 
 明确获用户授权后执行忽略的 `local_auth_read_only_smoke`（Codex）或 `local_claude_gateway_read_only_smoke`（Claude 网关）。不打印 Key、token、账号、历史记录或完整响应，不发送模型请求。其他账号类型缺失时记录缺口。

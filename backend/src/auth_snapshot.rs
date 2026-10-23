@@ -1,4 +1,4 @@
-//! 完整 Codex OAuth 授权快照，使用当前 Windows 用户的 DPAPI 保护。
+//! 完整 Codex / Claude OAuth 授权快照，使用当前 Windows 用户的 DPAPI 保护。
 //! 快照与解密结果不进入前端 DTO 或统计导出。
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
@@ -106,7 +106,7 @@ fn preserve_current_value(conn: &Connection, value: &Value) -> Result<(), String
     Ok(())
 }
 
-fn save(conn: &Connection, id: &str, bundle: &Value) -> Result<(), String> {
+pub(crate) fn save(conn: &Connection, id: &str, bundle: &Value) -> Result<(), String> {
     let bytes = serde_json::to_vec(bundle).map_err(|_| "完整授权无法编码")?;
     let protected = protect(&bytes, id.as_bytes(), true)?;
     conn.execute("INSERT INTO auth_snapshots(connection_id,protected,updated_ms) VALUES(?1,?2,?3)
@@ -122,7 +122,24 @@ pub fn load(conn: &Connection, id: &str, expected: &str) -> Result<Option<Value>
     let Some(protected) = protected else { return Ok(None) };
     let bytes = protect(&protected, id.as_bytes(), false)?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| "完整授权格式无效，请重新同步")?;
-    complete_codex(&value, expected).map(Some).ok_or_else(|| "保存的完整授权与连接身份不一致，请重新同步".into())
+    complete_codex(&value, expected).or_else(|| crate::claude_auth::complete(&value, expected))
+        .map(Some).ok_or_else(|| "保存的完整授权与连接身份不一致，请重新同步".into())
+}
+
+/// 仅供用户切换前复用同 token 的身份证据；解密结果不离开后端。
+pub(crate) fn claude_saved(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut statement = conn.prepare("SELECT id,secret FROM connections WHERE platform='claude' AND kind='auth'")
+        .map_err(|_| "无法读取 Claude 授权快照")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+        .map_err(|_| "无法读取 Claude 授权快照")?;
+    let mut saved = Vec::new();
+    for row in rows {
+        let (id, secret) = row.map_err(|_| "无法读取 Claude 授权快照")?;
+        if let Some(value) = secret.as_deref().and_then(|secret| load(conn, &id, secret).ok()).flatten() {
+            saved.push(value);
+        }
+    }
+    Ok(saved)
 }
 
 /// DPAPI 默认限定当前用户，不使用允许同机其他用户解密的 LOCAL_MACHINE 标记。

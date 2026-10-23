@@ -74,7 +74,24 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   /** 模型列表为空或接口不支持枚举时，改为手动填写模型 ID（画板 27） */
   const [manualModel, setManualModel] = useState(false)
   const [modelError, setModelError] = useState<string | null>(null)
+  const [askVerify, setAskVerify] = useState(false)
+  const [verifying, setVerifying] = useState(false)
+  const verifyingRef = useRef(false)
+  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+
+  // 对话框关闭或卸载后，正在返回的获取 / 验证结果不再写入草稿。
+  useEffect(() => {
+    if (!dialogOpen) modelRequest.current++
+    return () => { modelRequest.current++ }
+  }, [dialogOpen])
+
+  const resetVerification = () => {
+    verifyingRef.current = false
+    setVerifying(false)
+    setAskVerify(false)
+    setVerifyResult(null)
+  }
 
   const custom = platform === "custom"
   const tabs = platform!=="opencode" && showsModeTabs(entry)
@@ -86,6 +103,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     const nextEntry = providerEntry(next)
     // 更换平台不携带原平台的密钥与检测结果（画板 29）
     modelRequest.current++
+    setFetching(false)
+    resetVerification()
     setPlatform(next)
     setMode(next==="opencode"?"apiKey":defaultMode(nextEntry))
     setService("opencode-go")
@@ -119,6 +138,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
 
   const invalidateModels = () => {
     modelRequest.current++
+    resetVerification()
     setModels([])
     if (!manualModel) setModel("")
     setModelError(null)
@@ -132,6 +152,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
 
   const fetchModels = async () => {
     const request = ++modelRequest.current
+    resetVerification()
     setFetching(true)
     setModelError(null)
     try {
@@ -146,8 +167,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
       if (request !== modelRequest.current) return
       // 失败就地说明，已填写内容保留（画板 27）
       setModelError(String(reason))
-      // 自定义供应商：模型接口不可用时直接改为手填模型 ID（画板 29A 状态 A）；密钥被拒时不改
-      if (custom && !manualModel && fallsBackToManualModel(String(reason))) {
+      // 模型接口不可用时改为手填（画板 27）；密钥被拒时不改。ZCode 手填后还须验证模型。
+      if ((custom || platform === "zcode") && !manualModel && fallsBackToManualModel(String(reason))) {
         setManualModel(true)
         setModel("")
       }
@@ -156,11 +177,35 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     }
   }
 
+  const verifyModel = async () => {
+    if (verifyingRef.current || fetching || !model.trim() || !secret.trim() || !baseUrl.trim()) return
+    const request = ++modelRequest.current
+    verifyingRef.current = true
+    setVerifying(true)
+    setAskVerify(false)
+    setVerifyResult(null)
+    try {
+      await api.verifyCustomModel(baseUrl.trim(), secret.trim(), protocol, model.trim())
+      if (request === modelRequest.current) {
+        setVerifyResult({ ok: true, message: "验证通过：服务已接受该模型的请求。" })
+        setModelError(null)
+      }
+    } catch (reason) {
+      if (request === modelRequest.current) setVerifyResult({ ok: false, message: String(reason) })
+    } finally {
+      if (request === modelRequest.current) {
+        verifyingRef.current = false
+        setVerifying(false)
+      }
+    }
+  }
+
   const nameError = validateConnectionName(name, actions.connections, platform, kind)
   const urlError = baseUrl.trim() && !/^https?:\/\/[^\s/]+/i.test(baseUrl.trim()) ? "请输入完整地址，例如 https://api.example.com/v1" : null
   const canSave = !saving && !nameError && (mode === "subscription"
     ? Boolean(detection?.found)
-    : Boolean(baseUrl.trim() && !urlError && secret.trim() && model.trim()))
+    : Boolean(baseUrl.trim() && !urlError && secret.trim() && model.trim())
+      && (platform !== "zcode" || (!fetching && !verifying && (!manualModel || verifyResult?.ok === true))))
 
   const save = async () => {
     if (!canSave) return
@@ -241,7 +286,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                     type="button"
                     role="tab"
                     aria-selected={mode === value}
-                    onClick={() => { setMode(value); setError(null) }}
+                    onClick={() => { if (value !== mode) { invalidateModels(); setMode(value); setError(null) } }}
                     className={cn(
                       "flex-1 rounded-md text-[13px] outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
                       mode === value ? "bg-jolu-bg font-semibold text-jolu-on" : "text-jolu-muted hover:text-jolu-text",
@@ -331,7 +376,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                   <div className="flex gap-2">
                     {manualModel ? (
                       <div className="min-w-0 flex-1">
-                        <TextInput id="manual-model" value={model} onChange={setModel} placeholder="输入服务支持的完整模型 ID" mono />
+                        <TextInput id="manual-model" value={model} disabled={fetching || verifying} onChange={(value) => { modelRequest.current++; resetVerification(); setModel(value) }} placeholder="输入服务支持的完整模型 ID" mono />
                       </div>
                     ) : (
                       <ModelPicker models={models} value={model} onChange={setModel} />
@@ -342,14 +387,35 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                       <JoluButton
                         variant="soft"
                         className="h-10 w-[116px] px-3"
-                        disabled={!baseUrl.trim() || Boolean(urlError) || !secret.trim() || !isTauri}
+                        disabled={verifying || !baseUrl.trim() || Boolean(urlError) || !secret.trim() || !isTauri}
                         onClick={() => void fetchModels()}
                       >
                         <RefreshCw aria-hidden />
                         {custom ? (models.length ? "重新获取" : "获取模型") : models.length || modelError ? "重新获取" : "获取模型"}
                       </JoluButton>
                     )}
+                    {platform === "zcode" && manualModel && (
+                      <JoluButton variant="outline" className="h-10 px-3" disabled={fetching || verifying || !model.trim() || !secret.trim() || !isTauri} onClick={() => setAskVerify(true)}>
+                        {verifying ? <LoaderCircle aria-hidden className="animate-spin" /> : <BadgeCheck aria-hidden />}
+                        {verifying ? "正在验证" : "验证模型"}
+                      </JoluButton>
+                    )}
                   </div>
+                  {platform === "zcode" && manualModel && (
+                    <>
+                      {askVerify && (
+                        <div role="alertdialog" aria-label="验证模型" className="flex items-center gap-3 rounded-[10px] border border-jolu-border bg-jolu-side px-4 py-2.5 text-xs text-jolu-text">
+                          <span className="min-w-0 flex-1">验证会向服务发送一次最小请求，可能产生少量 API 用量。</span>
+                          <JoluButton size="sm" variant="outline" onClick={() => setAskVerify(false)}>取消</JoluButton>
+                          <JoluButton size="sm" variant="soft" disabled={fetching || verifying} onClick={() => void verifyModel()}>继续验证</JoluButton>
+                        </div>
+                      )}
+                      <span role={verifyResult?.ok === false ? "alert" : "status"} className={cn("flex items-center gap-1.5 text-[11px]", verifyResult ? verifyResult.ok ? "text-jolu-on" : "text-jolu-danger" : "text-jolu-muted")}>
+                        {verifyResult?.ok && <CircleCheck aria-hidden className="size-3.5 shrink-0" />}
+                        {verifying ? "正在验证模型，请等待服务返回…" : verifyResult?.message ?? "未验证 · 验证模型通过后才能保存连接。"}
+                      </span>
+                    </>
+                  )}
                   {fetching ? (
                     <span role="status" className="flex items-center gap-1.5 text-[11px] text-jolu-muted">
                       <LoaderCircle aria-hidden className="size-3 animate-spin" />正在获取可用模型…等待接口返回，请勿重复提交。
@@ -367,7 +433,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                     <span className="text-[11px] text-jolu-muted">
                       {custom
                         ? (manualModel ? "手填模型后即可保存，作为接口可达的依据；可再次点击「获取模型」改回从列表选择。" : "填写地址与密钥后点击「获取模型」，再从下拉框选择；模型接口不可用时改为手填模型 ID。")
-                        : manualModel ? "模型接口不支持枚举时手动填写；保存时会验证地址与密钥。" : "填写地址与密钥后点击「获取模型」，再从下拉框选择；修改后需重新获取。"}
+                        : manualModel ? platform === "zcode" ? "模型接口不支持枚举时手动填写；验证当前模型后再保存。" : "模型接口不支持枚举时手动填写；保存时会验证地址与密钥。" : "填写地址与密钥后点击「获取模型」，再从下拉框选择；修改后需重新获取。"}
                     </span>
                   )}
                 </div>
@@ -658,7 +724,7 @@ function Field({ label, hint, error, children }: { label: string; hint?: string;
   )
 }
 
-function TextInput({ id, value, onChange, onBlur, placeholder, type = "text", readOnly, mono, trailing }: {
+function TextInput({ id, value, onChange, onBlur, placeholder, type = "text", readOnly, disabled, mono, trailing }: {
   id: string
   value: string
   onChange: (value: string) => void
@@ -666,6 +732,7 @@ function TextInput({ id, value, onChange, onBlur, placeholder, type = "text", re
   placeholder?: string
   type?: "text" | "password"
   readOnly?: boolean
+  disabled?: boolean
   mono?: boolean
   trailing?: ReactNode
 }) {
@@ -679,6 +746,7 @@ function TextInput({ id, value, onChange, onBlur, placeholder, type = "text", re
         type={type}
         value={value}
         readOnly={readOnly}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         onBlur={onBlur}
         placeholder={placeholder}

@@ -3,7 +3,7 @@
 //! 三种来源的连接（官方订阅 / API 本机读取 / API 手动填写）启用时，
 //! 都把连接保存的凭证与地址写回对应 CLI 的配置文件，使新会话即刻生效：
 //! - Claude API  ：`~/.claude/settings.json` 的 `env.ANTHROPIC_AUTH_TOKEN`（+ `ANTHROPIC_BASE_URL`）
-//! - Claude Auth ：仅选择当前完整授权，拒绝拼接不同账号的 token
+//! - Claude Auth ：恢复已核实身份的完整授权与账号资料，拒绝混拼不同账号
 //! - Codex  API  ：`~/.codex/auth.json` 的 `OPENAI_API_KEY`（+ config.toml 当前 provider 的 base_url）
 //! - Codex  Auth ：恢复该账号已保护的完整授权，清除 API 模式覆盖
 //!
@@ -36,7 +36,7 @@ pub fn apply_to_cli(
     if platform == "codex" { validate_codex_environment(base_url, |key| std::env::var(key).ok())?; }
     match (platform, kind) {
         ("claude", "api") => apply_claude_api(secret, base_url, backup_dir),
-        ("claude", _) => apply_claude_auth(secret, backup_dir),
+        ("claude", _) => Err("Claude 订阅切换需要先核实当前完整身份".into()),
         ("codex", "api") => apply_codex_api(secret, base_url, backup_dir),
         ("codex", _) => apply_codex_auth(secret, backup_dir, auth_snapshot),
         _ => Err(format!("暂不支持把 {platform} 连接写入 CLI 配置")),
@@ -49,10 +49,6 @@ fn claude_settings_path() -> Result<PathBuf, String> {
     claude_home().map(|dir| dir.join("settings.json"))
 }
 
-fn claude_credentials_path() -> Result<PathBuf, String> {
-    claude_home().map(|dir| dir.join(".credentials.json"))
-}
-
 /// settings.json 的 env 段写入：token 必写；base_url 有则写、无则删（官方 API 直连）。
 fn apply_claude_api(
     secret: &str,
@@ -60,6 +56,10 @@ fn apply_claude_api(
     backup_dir: &Path,
 ) -> Result<ApplyNote, String> {
     let path = claude_settings_path()?;
+    apply_claude_api_at(&path, secret, base_url, backup_dir)
+}
+
+fn apply_claude_api_at(path: &Path, secret: &str, base_url: Option<&str>, backup_dir: &Path) -> Result<ApplyNote, String> {
     update_json(&path, backup_dir, |v| {
         let env = v
             .as_object_mut()
@@ -96,33 +96,81 @@ fn apply_claude_api(
     })
 }
 
-/// OAuth 必须保留同一身份的完整凭证，不能用保存的 accessToken 覆盖另一账号。
-fn apply_claude_auth(secret: &str, backup_dir: &Path) -> Result<ApplyNote, String> {
-    verify_current_auth(
-        &claude_credentials_path()?,
-        "/claudeAiOauth/accessToken",
-        secret,
-    )?;
-    let path = claude_settings_path()?;
-    if path.exists() {
-        update_json(&path, backup_dir, |v| {
-            let object = v.as_object_mut().ok_or("settings.json 不是对象")?;
-            object.remove("apiKeyHelper");
-            if let Some(env) = object.get_mut("env").and_then(|v| v.as_object_mut()) {
-                for key in [
-                    "ANTHROPIC_API_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_BASE_URL",
-                ] {
-                    env.remove(key);
+const CLAUDE_AUTH_OVERRIDES: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD"];
+
+pub(crate) fn apply_claude_verified(secret: &str, backup_dir: &Path, snapshot: &serde_json::Value, prepared: &crate::claude_auth::PreparedClaude) -> Result<ApplyNote, String> {
+    if crate::validation::isolated() { return Err("隔离验收不修改真实 Claude 配置".into()); }
+    if CLAUDE_AUTH_OVERRIDES.iter().any(|key| std::env::var(key).ok().is_some_and(|value| !value.trim().is_empty())) {
+        return Err("当前进程存在 Claude 授权或服务环境覆盖，请清除覆盖并重启应用后切换订阅".into());
+    }
+    prepared.check_unchanged()?;
+    apply_claude_snapshot_at(secret, snapshot, &prepared.files, backup_dir, write_atomic)
+}
+
+fn apply_claude_snapshot_at(secret: &str, snapshot: &serde_json::Value, files: &[(PathBuf, Option<Vec<u8>>)], backup_dir: &Path,
+    write: impl FnMut(&Path, Vec<u8>) -> Result<(), String>) -> Result<ApplyNote, String> {
+    let snapshot = crate::claude_auth::complete(snapshot, secret).ok_or("Claude 完整授权缺失或身份不一致，请重新同步")?;
+    if files.len() != 3 { return Err("Claude 配置预检不完整".into()); }
+    let mut values: Vec<serde_json::Value> = files.iter().map(|(_, bytes)| {
+        serde_json::from_slice(bytes.as_deref().unwrap_or(b"{}"))
+            .map_err(|_| "Claude 配置不是有效 JSON".to_string())
+    }).collect::<Result<_, _>>()?;
+    if values.iter().any(|value| !value.is_object()) { return Err("Claude 配置顶层不是对象".into()); }
+    values[0]["claudeAiOauth"] = snapshot["claudeAiOauth"].clone();
+    values[1]["oauthAccount"] = snapshot["oauthAccount"].clone();
+    let settings = values[2].as_object_mut().ok_or("Claude 设置不是对象")?;
+    if settings.get("forceLoginMethod").and_then(|value| value.as_str()).is_some_and(|value| value != "claudeai") {
+        return Err("Claude 设置限制了其他登录方式，未修改当前登录".into());
+    }
+    if settings.get("forceLoginOrgUUID").and_then(|value| value.as_str()).is_some_and(|value| snapshot["oauthAccount"]["organizationUuid"].as_str() != Some(value)) {
+        return Err("目标 Claude 账号不符合配置要求的组织，未修改当前登录".into());
+    }
+    settings.remove("apiKeyHelper");
+    if let Some(env) = settings.get_mut("env") {
+        let env = env.as_object_mut().ok_or("Claude env 配置不是对象")?;
+        for key in CLAUDE_AUTH_OVERRIDES { env.remove(*key); }
+    }
+    let changes: Vec<_> = files.iter().zip(values).map(|((path, old), value)| {
+        serde_json::to_vec_pretty(&value).map(|new| (path.clone(), old.clone(), new)).map_err(|_| "Claude 配置编码失败".to_string())
+    }).collect::<Result<_, _>>()?;
+    write_group_expected(&changes, backup_dir, write)?;
+    Ok(ApplyNote { message: "已恢复该 Claude 账号的完整授权与身份资料，原配置已加密备份；新会话由 Claude 按需刷新授权，若登录失效需重新登录".into() })
+}
+
+/// 三份文件基于同一预检快照；失败回滚已写部分，绝不覆盖写入期间的外部变更。
+fn write_group_expected(changes: &[(PathBuf, Option<Vec<u8>>, Vec<u8>)], backup_dir: &Path,
+    mut write: impl FnMut(&Path, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+    for (path, expected, _) in changes {
+        if &read_optional(path)? != expected { return Err("Claude 配置在准备期间发生变化，请重试".into()); }
+    }
+    for (path, old, _) in changes { if old.is_some() { backup_file(path, backup_dir)?; } }
+    for (index, (path, expected, new)) in changes.iter().enumerate() {
+        let result = (|| {
+            // 在每次写前核对全部已写和未写文件，缩小外部 CLI 竞争窗口。
+            for (i, (other, old, written)) in changes.iter().enumerate() {
+                let actual = read_optional(other)?;
+                if (i < index && actual.as_ref() != Some(written)) || (i >= index && &actual != old) {
+                    return Err("Claude 配置在写入期间发生变化".to_string());
                 }
             }
-            Ok(())
-        })?;
+            if &read_optional(path)? != expected { return Err("Claude 配置在写入期间发生变化".into()); }
+            write(path, new.clone())
+        })();
+        if let Err(error) = result {
+            let mut failed = false;
+            for (path, old, written) in changes[..index].iter().rev() {
+                if read_optional(path).ok().flatten().as_ref() != Some(written) { failed = true; continue; }
+                let rollback = match old {
+                    Some(bytes) => write(path, bytes.clone()),
+                    None => std::fs::remove_file(path).map_err(|_| "无法清理本次新建配置".to_string()),
+                };
+                if rollback.is_err() { failed = true; }
+            }
+            return Err(if failed { format!("{error}；部分文件已被外部修改或回滚失败，请使用加密备份恢复") }
+                else { format!("{error}；已恢复本次写入前状态") });
+        }
     }
-    Ok(ApplyNote {
-        message: "已选择当前本机完整授权，并清除配置中的 API 覆盖；终端环境变量仍由终端管理".into(),
-    })
+    Ok(())
 }
 
 /* ─────────────────────────── Codex ─────────────────────────── */
@@ -205,16 +253,6 @@ fn restore_codex_bundle(current: &serde_json::Value, saved: Option<&serde_json::
     crate::auth_snapshot::complete_codex(current, secret)
         .or_else(|| saved.and_then(|snapshot| crate::auth_snapshot::complete_codex(snapshot, secret)))
         .ok_or_else(|| "该账号尚无可恢复的完整授权，请在 Codex 登录此账号后重新同步；不能仅替换 access token".into())
-}
-
-fn verify_current_auth(path: &Path, pointer: &str, secret: &str) -> Result<(), String> {
-    let value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
-            .map_err(|_| "授权文件格式无效")?;
-    if secret.is_empty() || value.pointer(pointer).and_then(|v| v.as_str()) != Some(secret) {
-        return Err("保存的授权与当前 CLI 登录不同；请在对应 CLI 登录目标账号，再重新获取完整授权。不能仅替换 access token".into());
-    }
-    Ok(())
 }
 
 fn validate_codex_environment(url: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
@@ -348,24 +386,19 @@ fn codex_home() -> Result<PathBuf, String> {
     crate::creds::codex_dir().ok_or_else(|| "未找到 Codex 配置目录".into())
 }
 
-/// 读 JSON → 修改 → 备份 → 原子写。文件不存在时如实报错，不代用户创建。
+/// 缺文件按空配置创建；已有无效 JSON 拒绝，写前按最初读取字节比较并备份。
 fn update_json(
     path: &Path,
     backup_dir: &Path,
     edit: impl FnOnce(&mut serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    let mut value: serde_json::Value = serde_json::from_str(&text)
+    let original = read_optional(path)?;
+    let mut value: serde_json::Value = serde_json::from_slice(original.as_deref().unwrap_or(b"{}"))
         .map_err(|e| format!("{} 不是有效 JSON：{e}", path.display()))?;
     edit(&mut value)?;
-    backup_file(path, backup_dir)?;
-    if std::fs::read(path).ok().as_deref() != Some(text.as_bytes()) {
-        return Err("配置在读取后发生变化，请重试".into());
-    }
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|e| format!("{} 序列化失败：{e}", path.display()))?;
-    write_atomic(path, bytes)
+    write_group_expected(&[(path.to_path_buf(), original, bytes)], backup_dir, write_atomic)
 }
 
 /// 写前备份：DPAPI 当前用户加密后写入 cli-backups/；熵为原文件名，便于同用户恢复。
@@ -414,6 +447,84 @@ fn write_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn claude_bundle(token: &str, account: &str) -> serde_json::Value {
+        serde_json::json!({"type":"claude_oauth_v1", "claudeAiOauth":{"accessToken":token,"refreshToken":format!("refresh-{account}"),"expiresAt":4102444800000i64,"scopes":["user:profile"]},
+            "oauthAccount":{"accountUuid":account,"organizationUuid":"org","emailAddress":"fixture@example.test"},"verifiedIdentity":{"accountUuid":account,"organizationUuid":"org"}})
+    }
+    fn claude_files(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        [".credentials.json", ".claude.json", "settings.json"].into_iter().map(|name| {
+            let path = root.join(name); let bytes = read_optional(&path).unwrap(); (path, bytes)
+        }).collect()
+    }
+    #[test]
+    #[cfg(windows)]
+    fn claude_complete_accounts_round_trip_preserves_unrelated_preferences() {
+        let root = std::env::temp_dir().join(format!("jolu-claude-roundtrip-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".credentials.json"), br#"{"otherCredential":{"keep":true}}"#).unwrap();
+        std::fs::write(root.join(".claude.json"), br#"{"theme":"dark","projects":{"fixture":{}}}"#).unwrap();
+        std::fs::write(root.join("settings.json"), br#"{"permissions":{"allow":["Read"]},"apiKeyHelper":"old","env":{"ANTHROPIC_AUTH_TOKEN":"api-old","ANTHROPIC_BASE_URL":"https://old.example","KEEP":"yes"}}"#).unwrap();
+        for (token, account) in [("token-a", "account-a"), ("token-b", "account-b"), ("token-a", "account-a")] {
+            let saved = claude_bundle(token, account);
+            apply_claude_snapshot_at(token, &saved, &claude_files(&root), &root.join("backups"), write_atomic).unwrap();
+            let read = |name| serde_json::from_slice::<serde_json::Value>(&std::fs::read(root.join(name)).unwrap()).unwrap();
+            assert_eq!(read(".credentials.json")["claudeAiOauth"], saved["claudeAiOauth"]);
+            assert_eq!(read(".credentials.json")["otherCredential"]["keep"], true);
+            assert_eq!(read(".claude.json")["oauthAccount"], saved["oauthAccount"]);
+            assert_eq!(read(".claude.json")["theme"], "dark");
+            assert_eq!(read("settings.json")["env"], serde_json::json!({"KEEP":"yes"}));
+            assert!(read("settings.json").get("apiKeyHelper").is_none());
+            assert_eq!(read("settings.json")["permissions"]["allow"][0], "Read");
+        }
+        for backup in std::fs::read_dir(root.join("backups")).unwrap().map(Result::unwrap) {
+            assert!(!String::from_utf8_lossy(&std::fs::read(backup.path()).unwrap()).contains("token-a"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    #[cfg(windows)]
+    fn claude_third_write_failure_rolls_back_credentials_and_profile() {
+        for initially_exists in [false, true] {
+            let root = std::env::temp_dir().join(format!("jolu-claude-rollback-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+            std::fs::create_dir_all(&root).unwrap();
+            if initially_exists {
+                for name in [".credentials.json", ".claude.json", "settings.json"] { std::fs::write(root.join(name), b"{\"keep\":true}").unwrap(); }
+            }
+            let files = claude_files(&root);
+            let settings = root.join("settings.json");
+            assert!(apply_claude_snapshot_at("a", &claude_bundle("a", "account-a"), &files, &root.join("backups"), |path, bytes| {
+                if path == settings { Err("synthetic third write failure".into()) } else { write_atomic(path, bytes) }
+            }).err().unwrap().contains("已恢复"));
+            for (path, old) in files { assert_eq!(read_optional(&path).unwrap(), old); }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn claude_incomplete_mismatched_or_stale_snapshot_never_writes() {
+        let root = std::env::temp_dir().join(format!("jolu-claude-reject-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let files = claude_files(&root);
+        let mut incomplete = claude_bundle("a", "account-a"); incomplete["claudeAiOauth"].as_object_mut().unwrap().remove("refreshToken");
+        assert!(apply_claude_snapshot_at("a", &incomplete, &files, &root.join("backups"), write_atomic).is_err());
+        assert!(apply_claude_snapshot_at("other-token", &claude_bundle("a", "account-a"), &files, &root.join("backups"), write_atomic).is_err());
+        std::fs::write(root.join(".credentials.json"), b"{\"external\":true}").unwrap();
+        assert!(apply_claude_snapshot_at("a", &claude_bundle("a", "account-a"), &files, &root.join("backups"), write_atomic).is_err());
+        assert_eq!(std::fs::read(root.join(".credentials.json")).unwrap(), b"{\"external\":true}");
+        assert!(!root.join("backups").exists() && !root.join(".claude.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn claude_expired_access_with_complete_refresh_restores_without_claiming_online_success() {
+        let root = std::env::temp_dir().join(format!("jolu-claude-expired-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut saved = claude_bundle("expired-a", "account-a");
+        saved["claudeAiOauth"]["expiresAt"] = serde_json::json!(1);
+        let note = apply_claude_snapshot_at("expired-a", &saved, &claude_files(&root), &root.join("backups"), write_atomic).unwrap();
+        let current: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join(".credentials.json")).unwrap()).unwrap();
+        assert_eq!(current["claudeAiOauth"], saved["claudeAiOauth"]);
+        assert!(note.message.contains("按需刷新") && note.message.contains("若登录失效"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     #[cfg(windows)]
     fn codex_auth_api_auth_round_trip_restores_complete_identity_and_encrypted_backups() {
@@ -589,17 +700,52 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn mismatched_oauth_is_rejected_without_replacing_refresh_token() {
-        let path = std::env::temp_dir().join(format!(
-            "jolu-oauth-test-{}-{}.json",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
-        ));
-        let value = br#"{"tokens":{"access_token":"account-a","refresh_token":"refresh-a"}}"#;
-        std::fs::write(&path, value).unwrap();
-        assert!(verify_current_auth(&path, "/tokens/access_token", "account-b").is_err());
-        assert!(verify_current_auth(&path, "/tokens/access_token", "account-a").is_ok());
-        assert_eq!(std::fs::read(&path).unwrap(), value);
-        std::fs::remove_file(path).unwrap();
+    #[cfg(windows)]
+    fn claude_first_api_switch_creates_settings_and_preserves_oauth_and_preferences() {
+        let root = std::env::temp_dir().join(format!("jolu-claude-api-create-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        let dir = root.join("new-config");
+        let settings = dir.join("settings.json");
+        let backup = root.join("backups");
+        assert!(!dir.exists());
+        apply_claude_api_at(&settings, "fixture-first", Some("https://fixture.example/v1"), &backup).unwrap();
+        assert!(!backup.exists(), "首次创建没有旧文件可备份");
+        let mut first: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(first["env"]["ANTHROPIC_AUTH_TOKEN"], "fixture-first");
+        assert_eq!(first["env"]["ANTHROPIC_BASE_URL"], "https://fixture.example/v1");
+        first["theme"] = serde_json::json!("dark");
+        std::fs::write(&settings, serde_json::to_vec(&first).unwrap()).unwrap();
+        let oauth = br#"{"claudeAiOauth":{"accessToken":"fixture-auth","refreshToken":"fixture-refresh"}}"#;
+        let profile = br#"{"oauthAccount":{"accountUuid":"fixture-account"}}"#;
+        std::fs::write(dir.join(".credentials.json"), oauth).unwrap();
+        std::fs::write(dir.join(".claude.json"), profile).unwrap();
+        apply_claude_api_at(&settings, "fixture-second", None, &backup).unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(second["theme"], "dark");
+        assert_eq!(second["env"]["ANTHROPIC_AUTH_TOKEN"], "fixture-second");
+        assert!(second["env"].get("ANTHROPIC_BASE_URL").is_none());
+        assert_eq!(std::fs::read(dir.join(".credentials.json")).unwrap(), oauth);
+        assert_eq!(std::fs::read(dir.join(".claude.json")).unwrap(), profile);
+        assert_eq!(std::fs::read_dir(backup).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn claude_api_rejects_existing_invalid_json_and_concurrent_creation() {
+        let root = std::env::temp_dir().join(format!("jolu-claude-api-reject-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let backups = root.join("backups");
+        std::fs::write(&path, b"broken-json").unwrap();
+        assert!(apply_claude_api_at(&path, "replacement", None, &backups).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken-json");
+        std::fs::remove_file(&path).unwrap();
+        let external = b"{\"external\":true}";
+        assert!(update_json(&path, &backups, |value| {
+            std::fs::write(&path, external).unwrap();
+            value["env"] = serde_json::json!({"ANTHROPIC_AUTH_TOKEN":"must-not-overwrite"});
+            Ok(())
+        }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        assert!(!backups.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

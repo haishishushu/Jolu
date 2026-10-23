@@ -24,7 +24,7 @@
 
 - 单个订阅账号也不能被不同本机登录静默覆盖。
 - Codex 只有完整快照与新授权的工作区 ID、用户 ID 都匹配才允许 token 轮换；同工作区的不同用户拒绝。未知身份保持原连接和邮箱。
-- Claude 官方 CLI 已核实可通过 `/api/oauth/profile` 把 token 绑定到账号与组织身份；本机缺完整订阅 OAuth 登录，尚未实现或验证跨账号完整快照。本阶段保留切换当前完整授权、清除 API 覆盖的能力；不把另一个账号的凭证与 `.claude.json` 资料拼接成多账号切换。
+- Claude 官方 CLI 已核实可通过 `/api/oauth/profile` 把 token 绑定到账号与组织身份；新增预检、完整授权快照及三文件恢复已通过合成专项。本机缺完整订阅 OAuth 登录，真实接口与跨账号切换仍未验证；不把另一个账号的凭证与 `.claude.json` 资料拼接。
 - 读取、检测与写入统一遵守 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`。设置后 Claude 的 `.claude.json` 在配置目录内，默认仍在用户主目录。
 
 ## 来源核实
@@ -81,7 +81,7 @@ powershell.exe -NoProfile -File .\scripts\restore-cli-backup.ps1 -BackupPath 'C:
 
 - 实时订阅接口对当前 OAuth 凭证返回 403；只能展示明确的未获取状态和带来源的历史到期记录。
 - 未确认的其他供应商重置卡/到期能力保持未提供。
-- Claude 跨账号完整快照尚未实现或验证，保持拒绝。官方 CLI 身份来源已核实，当前缺口是本机没有完整订阅 OAuth 登录可用于接口预检及跨账号验证，不能表述为官方没有身份查询来源。
+- Claude 跨账号完整快照、身份核实和恢复已实现并通过合成专项；当前缺口是本机没有完整订阅 OAuth 登录可用于真实接口及跨账号验证，不能表述为官方没有身份查询来源，也不能把合成通过当作真实账号通过。
 - Windows 用户保护的快照不能在另一 Windows 用户下直接解密；用户变更后需要重新同步。
 
 ## 最终供应商配置优先级复审
@@ -107,4 +107,22 @@ profile 回归先红（实际仍为 old，期望 jolu），修复后 `cargo test
 - 先通过 Context7 查询官方文档库 `/websites/code_claude`。[CLI 参考](https://code.claude.com/docs/en/cli-reference) 公开支持 `claude auth status` 输出当前认证状态 JSON，但没有文档化的任意保存 token 身份查询参数。
 - 只读核对本机官方 npm 包 `@anthropic-ai/claude-code` 2.1.309 的 `package.json` 与 `bin/claude.exe` 内嵌实现：使用 `GET https://api.anthropic.com/api/oauth/profile`，Bearer 为被查询的 access token；响应校验要求 `account.uuid`、`account.email`、`organization.uuid`，随后映射为 `oauthAccount.accountUuid`、`emailAddress`、`organizationUuid`。这是官方 CLI 实现证据，尚未查到该接口公开稳定 API 契约。
 - 官方请求头为 `User-Agent: claude-code/2.1.309`、Bearer 认证、`Content-Type: application/json`、`Cache-Control: no-cache`，超时 10 秒。本次预检准备禁用重定向，但在读取本机凭据时即停止：未设置 `CLAUDE_CONFIG_DIR`，默认 `~/.claude/.credentials.json` 不存在，未设置 `CLAUDE_CODE_OAUTH_TOKEN`；仅检测到代理认证变量 `ANTHROPIC_AUTH_TOKEN` 已设置，没有展示或转发其值，也没有把它当作订阅 OAuth 凭据。
-- 结果为 **0 次 HTTP 请求、无 HTTP 状态**，不能据此判断接口拒绝访问或无权限。未修改真实登录、产品代码或调用付费推理；跨账号完整快照仍未实现、未验证。后续需要完整订阅 OAuth 登录样本，再核对 token 返回的账号 UUID 与组织 UUID，不能仅凭邮箱关联身份。
+- 该次预检结果为 **0 次 HTTP 请求、无 HTTP 状态**，不能据此判断接口拒绝访问或无权限。预检本身未修改真实登录、产品代码或调用付费推理；后续继续完成下述实现与合成验证。真实接口及账号切换仍需要完整订阅 OAuth 登录样本，不能仅凭邮箱关联身份。
+
+## Claude 完整授权实现与合成验证
+
+- 新增 `claude_auth.rs`。添加、从本机读取、重新同步与订阅切换均接入完整身份预检；网络在 blocking 任务中完成，取数据库锁前结束。普通 API 连接操作不触发订阅身份查询。
+- 身份请求使用应用统一的系统/手动代理或直连设置，固定官方 HTTPS 地址，禁止重定向，10 秒超时；响应限制 256 KiB，本机配置限制 4 MiB。预检要求完整刷新凭据与 `user:profile` 权限，保存原始完整 scopes。错误仅含固定中文及 HTTP 状态，不返回上游响应正文、令牌、邮箱或 UUID。隔离模式在读取真实文件或联网前拒绝。
+- 同时核对账号 UUID、组织 UUID 与本机 `oauthAccount`。完整 `claudeAiOauth` 与对应 `oauthAccount`、已核实身份共同使用现有 DPAPI 表保存，不保存整份项目/偏好配置，不进入前端 DTO 或统计导出。
+- 旧连接只有 access token 时，仅允许与当前完整凭据完全相同 token 的记录升级；换新 token 必须有已保护身份快照且两项 UUID 一致。跨账号或跨组织拒绝覆盖原连接，邮箱不作为身份判据。
+- 切换前保全已登记的当前授权，自动轮换可按强身份找到原记录；较早插入的未知旧记录不阻挡后续已匹配身份。已保护快照中完全相同 token 的身份可复用，避免当前过期 token 因重复联网查询阻挡恢复其他账号；新 token 仍须在线核实。
+- 通过预检原始字节核对 `.credentials.json`、`.claude.json`、`settings.json`，仅替换授权/身份片段并清除 API 覆盖，保留其他凭据、项目和偏好。写入前备份，第二或第三份写入失败时回滚已写部分，原本不存在的文件恢复不存在；检测外部变更后不覆盖外部内容。
+- 当前进程存在会覆盖订阅的环境变量，或设置限制其他登录方式/组织时明确拒绝切换。目标完整快照不匹配或缺少 refresh token 时拒绝，不借用当前其他账号的 refresh token。
+- 官方[错误文档](https://code.claude.com/docs/en/errors)及 2.1.309 CLI 刷新实现确认：访问令牌到期不等于完整登录或订阅到期。已核实身份的完整授权即使 access token 已到期也可恢复，由官方 CLI 按需刷新；提示不会承诺在线可用或刷新必定成功，真正失效时仍须重新登录。本应用不主动调用刷新接口。
+- 首条身份绑定回归先红后绿；`cargo test --manifest-path backend/Cargo.toml claude_ --lib --quiet` 的首轮结果为 **26 通过、0 失败、1 忽略**。覆盖身份匹配/错组织、旧记录升级与拒绝、token 轮换、身份响应失败/体积上限、预检期间文件变化、缺凭据不查询、隔离子进程、双账号往返及第三文件失败回滚。复审后增加访问令牌过期但完整刷新凭据可恢复的回归，最终结果见下方补充。忽略项不是通过项。
+- 本次实现未向真实接口发送请求，未改真实 CLI 登录，也未执行付费推理；真实跨账号验收仍列入待验证清单。后续整合测试结果见本节末。
+- 复审修正代理配置与访问令牌到期策略后，同一专项最终结果为 **27 通过、0 失败、1 忽略**，退出码 0；新增过期访问令牌的完整授权恢复测试通过，缺失 refresh token 和身份不匹配仍拒绝。
+- 首次 Claude API 切换补齐：`settings.json` 不存在时从空配置创建，父目录随原子写建立；已有无效 JSON 不覆盖。继续比较最初读取字节并备份旧配置，保留订阅凭据、账号资料和无关偏好，不触发网络查询。删除已不再用于产品路径的 `verify_current_auth` 旧函数及只验证该函数的过时测试，完整身份回归仍保留。
+- 上述首次创建修复后的 `cargo test --manifest-path backend/Cargo.toml cli_apply:: --lib --quiet`：**16 通过、0 失败、0 忽略**，退出码 0。新增临时文件测试覆盖缺目录/缺文件、已有配置备份、OAuth 文件保持原样、无效 JSON 以及预检后被外部创建时拒绝覆盖；`git diff --check` 通过。此前全量结果不代表此新增代码的最终全量验收，后续统一补跑。
+
+最终整合（包含首次 API 配置修复与交接重名建议）：cargo test --manifest-path backend/Cargo.toml --features handoff-eval --quiet，484 通过、0 失败、12 忽略，退出码 0。它覆盖本阶段最新后端代码；真实 OAuth 服务与双账号切换仍未验收。

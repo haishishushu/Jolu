@@ -2128,6 +2128,8 @@ pub async fn handoff_save(app: AppHandle, markdown: String, file_name: String, p
     let default_dir = data_dir.join("handoffs");
     std::fs::create_dir_all(&default_dir).map_err(|e| format!("创建交接目录失败：{e}"))?;
     let dir = prefer_project_dir.map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or(default_dir);
+    // 默认另存为首个可用名称；用户主动改回已有文件时由系统保存框确认覆盖。
+    let name = available_name(&dir, &name);
     let mut dialog = app.dialog().file().set_title("保存交接文档").add_filter("Markdown", &["md"]).set_directory(&dir).set_file_name(&name);
     if let Some(window) = app.get_webview_window(crate::MAIN) {
         dialog = dialog.set_parent(&window);
