@@ -3,7 +3,8 @@ import { Power, RefreshCw } from "lucide-react"
 import { api, isTauri } from "@/lib/api"
 import { useSettings } from "@/hooks/useSettings"
 import { useToast } from "@/components/ui/Toast"
-import { ActionButton, PendingBadge, SelectButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
+import { DEFAULT_PAGE_OPTIONS, resolveOpenPage, type DefaultPage } from "@/lib/mainNavigation"
+import { ActionButton, SelectButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 
 type Cfg = ReturnType<typeof useSettings>
 
@@ -67,9 +68,17 @@ export function GeneralSection({ cfg }: { cfg: Cfg }) {
           control={<Switch label="静默启动" on={cfg.settings.silent_startup} disabled={disabled || autostart !== true} onChange={(on) => void cfg.setSilentStartup(on)} />}
         />
         <SettingsRow
-          title={<span className="inline-flex items-center gap-2">默认打开页面<PendingBadge /></span>}
+          title="默认打开页面"
           desc="手动启动或重新打开主窗口时使用。"
-          control={<SelectButton label="默认打开页面" value="last" options={[{ value: "last", label: "上次访问的页面" }]} disabled onChange={() => {}} />}
+          control={
+            <SelectButton
+              label="默认打开页面"
+              value={cfg.settings.default_page === "last" ? "last" : resolveOpenPage(cfg.settings.default_page, null)}
+              options={[...DEFAULT_PAGE_OPTIONS]}
+              disabled={disabled}
+              onChange={(v) => void cfg.setDefaultPage(v as DefaultPage)}
+            />
+          }
         />
       </SettingsGroup>
 

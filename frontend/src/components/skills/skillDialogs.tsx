@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, Copy, Download, Folder, FolderOpen, GitBranch, Info, LoaderCircle, Plus, RefreshCw, Square, SquareCheck, Trash2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { isTauri } from "@/lib/api"
@@ -12,7 +12,7 @@ import { JoluButton } from "@/components/ui/JoluButton"
 import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
 import { providerName } from "@/components/usage/usageControls"
-import { DialogShell, Field, FieldSelect, Tag } from "./skillParts"
+import { DialogShell, Field, FieldSelect, INPUT_CLASS, Tag } from "./skillParts"
 
 function errorText(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
@@ -45,7 +45,28 @@ export function ImportDialog({ platform, projects, onClose, onDone }: {
   const [actions, setActions] = useState<Record<string, SkillImportAction>>({})
   const [enable, setEnable] = useState(false)
   const [importing, setImporting] = useState(false)
+  // Git 仓库来源（D-16；画板 82 只画了入口，输入区与状态文案待确认）
+  const [mode, setMode] = useState<"local" | "git">("local")
+  const [gitUrl, setGitUrl] = useState("")
+  const [gitBranch, setGitBranch] = useState("")
+  const [fetching, setFetching] = useState(false)
+  const checkout = useRef<string | null>(null)
+  const closed = useRef(false)
   const { scope, project } = parseScope(scopeKey)
+
+  /** 删除上一次拉取的临时克隆目录（导入完成、取消、重新获取或切回本地目录时） */
+  const dropCheckout = () => {
+    const dir = checkout.current
+    checkout.current = null
+    if (dir && isTauri) void skillsApi.importGitCleanup(dir).catch(() => undefined)
+  }
+  useEffect(() => {
+    closed.current = false
+    return () => {
+      closed.current = true
+      dropCheckout()
+    }
+  }, [])
 
   useEffect(() => {
     if (!source) return
@@ -69,6 +90,37 @@ export function ImportDialog({ platform, projects, onClose, onDone }: {
       if (folder) setSource(folder)
     } catch (reason) {
       setError(errorText(reason))
+    }
+  }
+
+  const switchMode = (next: "local" | "git") => {
+    if (next === mode || fetching) return
+    dropCheckout()
+    setMode(next)
+    setScan(null)
+    setError(null)
+    setSource(next === "local" && !isTauri ? "D:/Downloads/jolu-skills/" : null)
+  }
+
+  const gitUrlOk = gitUrl.trim().startsWith("https://")
+  const fetchGit = async () => {
+    if (!gitUrlOk || fetching) return
+    dropCheckout()
+    setSource(null)
+    setScan(null)
+    setError(null)
+    if (!isTauri) return setSource(gitUrl.trim())
+    setFetching(true)
+    try {
+      const result = await skillsApi.importGit(gitUrl.trim(), gitBranch.trim() || null, target, scope, project)
+      // 弹窗已关闭：结果用不上了，直接删掉临时目录
+      if (closed.current) return void skillsApi.importGitCleanup(result.checkout_dir).catch(() => undefined)
+      checkout.current = result.checkout_dir
+      setSource(result.scan.source)
+    } catch (reason) {
+      if (!closed.current) setError(errorText(reason))
+    } finally {
+      if (!closed.current) setFetching(false)
     }
   }
 
@@ -113,22 +165,44 @@ export function ImportDialog({ platform, projects, onClose, onDone }: {
           </span>
         ))}
       </div>
-      <div className="flex gap-2">
-        <JoluButton variant="soft" className="h-[34px]"><Folder aria-hidden />本地目录</JoluButton>
-        <Tip label="从 Git 仓库导入待接入">
-          <span tabIndex={0}><JoluButton variant="outline" className="h-[34px]" disabled><GitBranch aria-hidden />Git 仓库</JoluButton></span>
-        </Tip>
+      <div role="radiogroup" aria-label="导入来源" className="flex gap-2">
+        <JoluButton role="radio" aria-checked={mode === "local"} variant={mode === "local" ? "soft" : "outline"} className="h-[34px]" disabled={fetching} onClick={() => switchMode("local")}><Folder aria-hidden />本地目录</JoluButton>
+        <JoluButton role="radio" aria-checked={mode === "git"} variant={mode === "git" ? "soft" : "outline"} className="h-[34px]" disabled={fetching} onClick={() => switchMode("git")}><GitBranch aria-hidden />Git 仓库</JoluButton>
       </div>
-      <div className="flex min-h-[58px] items-center gap-2.5 rounded-lg bg-jolu-side p-3">
-        <FolderOpen aria-hidden className="size-4 shrink-0 text-jolu-on" />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate font-mono text-xs text-jolu-text">{source ?? "尚未选择目录"}</span>
-          <span className="text-[10px] text-jolu-muted">
-            {scanning ? "正在检查…" : scan ? `已扫描 ${scan.items.length} 个 Skill · 包含引用文件与资源` : "选择包含 SKILL.md 的目录，或其上一级目录"}
+      {mode === "local" ? (
+        <div className="flex min-h-[58px] items-center gap-2.5 rounded-lg bg-jolu-side p-3">
+          <FolderOpen aria-hidden className="size-4 shrink-0 text-jolu-on" />
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <span className="truncate font-mono text-xs text-jolu-text">{source ?? "尚未选择目录"}</span>
+            <span className="text-[10px] text-jolu-muted">
+              {scanning ? "正在检查…" : scan ? `已扫描 ${scan.items.length} 个 Skill · 包含引用文件与资源` : "选择包含 SKILL.md 的目录，或其上一级目录"}
+            </span>
+          </div>
+          <JoluButton variant="outline" size="sm" className="h-[30px]" onClick={() => void pick()}>{source ? "更换目录" : "选择目录"}</JoluButton>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2 rounded-lg bg-jolu-side p-3">
+          <form className="flex items-end gap-2.5" onSubmit={(e) => { e.preventDefault(); void fetchGit() }}>
+            <label className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <span className="text-[11px] text-jolu-muted">仓库地址</span>
+              <input value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} disabled={fetching} placeholder="https://github.com/owner/repo" spellCheck={false} aria-label="仓库地址" className={cn(INPUT_CLASS, "font-mono")} />
+            </label>
+            <label className="flex w-[150px] shrink-0 flex-col gap-1.5">
+              <span className="text-[11px] text-jolu-muted">分支（可选）</span>
+              <input value={gitBranch} onChange={(e) => setGitBranch(e.target.value)} disabled={fetching} placeholder="默认分支" spellCheck={false} aria-label="分支（可选）" className={cn(INPUT_CLASS, "font-mono")} />
+            </label>
+            <JoluButton type="submit" variant="outline" className="h-[38px] shrink-0" disabled={!gitUrlOk || fetching}>
+              {fetching ? <LoaderCircle aria-hidden className="animate-spin" /> : <Download aria-hidden />}{fetching ? "获取中…" : "获取"}
+            </JoluButton>
+          </form>
+          <span className="truncate text-[10px] text-jolu-muted" title={scan?.source}>
+            {fetching ? "正在用本机 git 拉取仓库（最长 60 秒）…"
+              : scanning ? "正在检查…"
+                : scan ? `已扫描 ${scan.items.length} 个 Skill · 包含引用文件与资源`
+                  : gitUrl.trim() && !gitUrlOk ? "仓库地址只支持 https:// 开头" : "只接受 https:// 地址；用本机 git 拉取到临时目录，导入后自动删除"}
           </span>
         </div>
-        <JoluButton variant="outline" size="sm" className="h-[30px]" onClick={() => void pick()}>{source ? "更换目录" : "选择目录"}</JoluButton>
-      </div>
+      )}
       <div className="flex gap-3.5">
         <Field label="目标供应商">
           <FieldSelect label="目标供应商" value={target} onChange={setTarget} options={SKILL_PLATFORMS.map((id) => ({ value: id, label: providerName(id) }))} />
