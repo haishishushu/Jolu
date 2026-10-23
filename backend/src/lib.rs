@@ -2654,6 +2654,9 @@ pub fn run() {
             automation::automation_quota,
             automation::automation_tools,
             automation::automation_pick_dir,
+            // 任务 2.9 开始
+            automation::automation_delete,
+            // 任务 2.9 结束
             // 模块 F · Skills 管理（命令登记在此行下方）
             skills::skills_overview, skills::skill_detail, skills::skill_file, skills::skill_set_enabled, skills::skill_save, skills::skill_copy, skills::skill_remove, skills::skills_import_scan, skills::skills_import, skills::skills_set_projects, skills::skills_ignore_project, skills::skills_pick_folder, skills::skill_open_dir,
             // 模块 G · 设置（命令登记在此行下方）

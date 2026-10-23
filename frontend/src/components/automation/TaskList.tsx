@@ -23,7 +23,7 @@ export interface AccountRef {
 }
 
 /** 任务页签（画板 58）：四项指标、状态 / 账号筛选与搜索、任务表格 */
-export function TaskList({ data, now, accounts, onOpen, onCreate, onEdit, onAction, onCancel }: {
+export function TaskList({ data, now, accounts, onOpen, onCreate, onEdit, onAction, onCancel, onDelete }: {
   data: { tasks: TaskItemDto[]; enabled: number; running: number; running_note: string | null; waiting: number; next_reset: number | null; done_today: number; failed_today: number }
   now: number
   accounts: Map<string, AccountRef>
@@ -32,6 +32,7 @@ export function TaskList({ data, now, accounts, onOpen, onCreate, onEdit, onActi
   onEdit: (item: TaskItemDto) => void
   onAction: (item: TaskItemDto, action: TaskAction) => void
   onCancel: (item: TaskItemDto) => void
+  onDelete: (item: TaskItemDto) => void
 }) {
   const [filter, setFilter] = useState<TaskFilter>("all")
   const [account, setAccount] = useState<string>("__all__")
@@ -152,6 +153,7 @@ export function TaskList({ data, now, accounts, onOpen, onCreate, onEdit, onActi
                       onEdit={() => onEdit(item)}
                       onQueue={() => onOpen(item, "task")}
                       onCancel={() => onCancel(item)}
+                      onDelete={() => onDelete(item)}
                     />
                   </div>
                 </div>
