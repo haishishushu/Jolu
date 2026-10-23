@@ -83,6 +83,15 @@ pub struct Settings {
     /// 上次访问的主窗口页面；只由 `remember_page` 写入，从未记录时为 None。
     #[serde(default)]
     pub last_page: Option<String>,
+    /// 主窗口界面缩放百分比（画板 88）；只作用于 `main` 窗口，灵动岛不受影响。
+    #[serde(default = "default_main_zoom")]
+    pub main_zoom: u16,
+    /// 列表密度：`comfortable` 或 `compact`，只作用于主窗口。
+    #[serde(default = "default_list_density")]
+    pub list_density: String,
+    /// 减少动效开关；系统开启「减少动画」时主窗口同样减少，与本值无关。
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 fn default_kind() -> String { "api".into() }
@@ -98,6 +107,8 @@ fn default_dock_enabled() -> bool { true }
 fn default_proxy_port() -> u16 { 12731 }
 fn default_proxy_fallback() -> bool { true }
 fn default_default_page() -> String { "last".into() }
+fn default_main_zoom() -> u16 { 100 }
+fn default_list_density() -> String { "comfortable".into() }
 
 /// 主窗口的七个页面，与前端 `MainPage` 一致。
 const MAIN_PAGES: [&str; 7] = ["island", "providers", "usage", "sessions", "automation", "skills", "settings"];
@@ -150,6 +161,9 @@ impl Default for Settings {
             proxy_codex_upstream: None,
             default_page: default_default_page(),
             last_page: None,
+            main_zoom: default_main_zoom(),
+            list_density: default_list_density(),
+            reduce_motion: false,
         }
     }
 }
@@ -341,3 +355,45 @@ mod tests {
         assert_eq!(Settings::default().default_page, "last");
     }
 }
+
+// 任务 2.2 开始
+/// 主窗口界面缩放档位（画板 88 / D-21）。
+pub const MAIN_ZOOM_STEPS: [u16; 6] = [80, 90, 100, 110, 125, 150];
+
+pub fn validate_appearance(zoom: u16, density: &str) -> Result<(), String> {
+    if !MAIN_ZOOM_STEPS.contains(&zoom) {
+        return Err("界面缩放须为 80/90/100/110/125/150%".into());
+    }
+    if !matches!(density, "comfortable" | "compact") {
+        return Err("列表密度须为 comfortable 或 compact".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::Settings;
+
+    #[test]
+    fn appearance_validation() {
+        for zoom in [80, 90, 100, 110, 125, 150] {
+            assert!(super::validate_appearance(zoom, "comfortable").is_ok(), "{zoom}% 应当可选");
+        }
+        for zoom in [0, 75, 100 - 1, 115, 175, 200] {
+            assert!(super::validate_appearance(zoom, "comfortable").is_err(), "{zoom}% 不在档位里");
+        }
+        assert!(super::validate_appearance(100, "compact").is_ok());
+        for density in ["", "Compact", "dense"] {
+            assert!(super::validate_appearance(100, density).is_err(), "密度只接受 comfortable / compact：{density}");
+        }
+    }
+
+    #[test]
+    fn old_settings_default_to_standard_appearance() {
+        let settings: Settings = serde_json::from_str(r#"{"island_platform":"claude","dnd":false,"island_visible":true}"#).unwrap();
+        assert_eq!((settings.main_zoom, settings.list_density.as_str(), settings.reduce_motion), (100, "comfortable", false));
+        let defaults = Settings::default();
+        assert_eq!((defaults.main_zoom, defaults.list_density.as_str(), defaults.reduce_motion), (100, "comfortable", false));
+    }
+}
+// 任务 2.2 结束

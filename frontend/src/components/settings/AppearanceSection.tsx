@@ -1,7 +1,9 @@
 import { CircleCheck, MessageSquare, Monitor, Moon, Palette, Sparkles, Sun, TextCursorInput, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useSettings } from "@/hooks/useSettings"
-import { PendingBadge, Segmented, SelectButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
+import { useSystemReducedMotion } from "@/hooks/useSystemReducedMotion"
+import { DENSITY_LABEL, ZOOM_STEPS, appearancePreview, normalizeDensity, normalizeZoom, reduceMotionHint, type Density } from "@/lib/appearance"
+import { Segmented, SelectButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 
 type Cfg = ReturnType<typeof useSettings>
 type Theme = "light" | "dark" | "system"
@@ -13,10 +15,13 @@ const THEMES: { value: Theme; label: string; icon: LucideIcon; bg: string; side:
   { value: "system", label: "跟随系统", icon: Monitor, bg: "#FFFFFF", side: "#2A2D2B", line: "#2A2D2B" },
 ]
 
-/** 外观（画板 88）：界面主题已接入；缩放、列表密度与减少动效待接入 */
+/** 外观（画板 88）：界面主题、界面缩放、列表密度与减少动效；后三项只作用于主窗口 */
 export function AppearanceSection({ cfg }: { cfg: Cfg }) {
   const theme = cfg.settings.theme as Theme
   const disabled = !cfg.ready || cfg.saving
+  const zoom = normalizeZoom(cfg.settings.main_zoom)
+  const density = normalizeDensity(cfg.settings.list_density)
+  const motionHint = reduceMotionHint(useSystemReducedMotion())
 
   return (
     <>
@@ -59,22 +64,39 @@ export function AppearanceSection({ cfg }: { cfg: Cfg }) {
 
       <SettingsGroup icon={TextCursorInput} title="阅读与布局" desc="适配显示器和工作信息量。">
         <SettingsRow
-          title={<span className="inline-flex items-center gap-2">界面缩放<PendingBadge /></span>}
+          title="界面缩放"
           desc="仅影响主窗口，灵动岛保持独立大小。"
-          control={<SelectButton label="界面缩放" value="100" options={[{ value: "100", label: "100%" }]} disabled onChange={() => {}} />}
+          control={
+            <SelectButton
+              label="界面缩放"
+              value={String(zoom)}
+              options={ZOOM_STEPS.map((step) => ({ value: String(step), label: `${step}%` }))}
+              disabled={disabled}
+              onChange={(value) => void cfg.setAppearance({ main_zoom: Number(value) })}
+            />
+          }
         />
         <SettingsRow
-          title={<span className="inline-flex items-center gap-2">列表密度<PendingBadge /></span>}
+          title="列表密度"
           desc="应用于会话、用量记录与 Skills 列表。"
-          control={<Segmented label="列表密度" value="comfortable" disabled items={[{ value: "comfortable", label: "舒适" }, { value: "compact", label: "紧凑" }]} />}
+          control={
+            <Segmented<Density>
+              label="列表密度"
+              value={density}
+              disabled={disabled}
+              onChange={(value) => void cfg.setAppearance({ list_density: value })}
+              items={[{ value: "comfortable", label: DENSITY_LABEL.comfortable }, { value: "compact", label: DENSITY_LABEL.compact }]}
+            />
+          }
         />
         <div className="mb-4 flex flex-col rounded-lg bg-jolu-side px-3.5 py-3">
           <div className="flex h-[26px] items-center justify-between text-[10px] text-jolu-muted">
-            <span>效果预览 · 示例</span>
-            <span>100% · 舒适</span>
+            <span>效果预览</span>
+            <span>{appearancePreview(zoom, density)}</span>
           </div>
+          {/* 紧凑态行高 40px → 32px（D-22，画板 88 未画紧凑态，待确认） */}
           {[["优化登录流程", "12.8K Token"], ["整理接口文档", "8.4K Token"]].map(([title, tokens]) => (
-            <div key={title} className="flex h-10 items-center gap-2 border-t border-jolu-border">
+            <div key={title} className="flex h-10 items-center gap-2 border-t border-jolu-border [.density-compact_&]:h-8">
               <MessageSquare aria-hidden className="size-3.5 text-jolu-muted" />
               <span className="flex-1 text-xs text-jolu-text">{title}</span>
               <span className="text-[11px] text-jolu-on">{tokens}</span>
@@ -85,9 +107,15 @@ export function AppearanceSection({ cfg }: { cfg: Cfg }) {
 
       <SettingsGroup icon={Sparkles} title="动效偏好" desc="减少移动和缩放，保留清晰的状态反馈。">
         <SettingsRow
-          title={<span className="inline-flex items-center gap-2">减少动效<PendingBadge /></span>}
-          desc="减少过渡动画与图标动效。当前跟随系统的「减少动画」设置。"
-          control={<Switch label="减少动效" on={false} disabled />}
+          title="减少动效"
+          desc={
+            <>
+              减少过渡动画与图标动效。
+              {/* 待确认：画板 88 未画此状态。系统已开启减少动画时，开关为关也会生效（D-23） */}
+              {motionHint && <span className="mt-1 block">{motionHint}</span>}
+            </>
+          }
+          control={<Switch label="减少动效" on={cfg.settings.reduce_motion} disabled={disabled} onChange={(on) => void cfg.setAppearance({ reduce_motion: on })} />}
         />
       </SettingsGroup>
     </>

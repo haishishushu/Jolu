@@ -3,6 +3,8 @@ import { useEffect, useId, useRef, useState } from "react"
 import { api, isTauri, listenEvent, openUrl, type MainIntentDto } from "@/lib/api"
 import { pageForIntent, pageLabel, readSidebarCollapsed, resolveOpenPage, writeSidebarCollapsed, type MainPage } from "@/lib/mainNavigation"
 import { settingsApi } from "@/lib/settingsApi"
+import { applyAppearance, normalizeDensity } from "@/lib/appearance"
+import { useSettings } from "@/hooks/useSettings"
 import { AppIcon } from "@/components/brand/AppIcon"
 import { ToastProvider, ToastViewport } from "@/components/ui/Toast"
 import { TipProvider } from "@/components/ui/Tip"
@@ -60,6 +62,15 @@ export function MainPanelWindow({
   // 页面包含 fixed 弹窗，避免祖先 transform 改变弹窗的定位参照。
   const pageMotion = useContentMotion(page, 180, 0)
   const aboutPresence = useExitPresence(about)
+  /** 设置 · 外观（画板 88）：列表密度与减少动效挂在 <html> 上；缩放由后端对 main 窗口 set_zoom */
+  const { list_density: listDensity, reduce_motion: reduceMotion } = useSettings().settings
+
+  useEffect(() => {
+    const root = document.documentElement
+    applyAppearance(root, normalizeDensity(listDensity), reduceMotion)
+    // 浏览器预览会在同一文档里切到灵动岛视图，卸载时还原
+    return () => applyAppearance(root, "comfortable", false)
+  }, [listDensity, reduceMotion])
 
   const navigate = (next: MainPage) => {
     if (scrollRef.current) scrollPositions.current.set(page, scrollRef.current.scrollTop)

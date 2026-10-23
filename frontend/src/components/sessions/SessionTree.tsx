@@ -90,7 +90,7 @@ export function SessionTree({ groups, expanded, selected, searching, total, onTo
                         aria-selected={active}
                         onClick={() => onSelect(key)}
                         className={cn(
-                          "flex h-9 shrink-0 flex-col justify-center gap-0.5 rounded-md px-1.5 text-left outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
+                          "flex h-9 shrink-0 flex-col justify-center gap-0.5 rounded-md px-1.5 text-left [.density-compact_&]:h-8 outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
                           active ? "bg-jolu-selected" : "hover:bg-jolu-side",
                         )}
                       >

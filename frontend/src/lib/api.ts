@@ -289,6 +289,12 @@ export interface AppSettings {
   default_page: string
   /** 上次访问的主窗口页面；从未记录时为 null */
   last_page: string | null
+  /** 主窗口界面缩放百分比（80/90/100/110/125/150），灵动岛不受影响 */
+  main_zoom: number
+  /** 列表密度：comfortable = 舒适，compact = 紧凑 */
+  list_density: string
+  /** 减少动效开关；系统开启「减少动画」时同样生效 */
+  reduce_motion: boolean
 }
 
 export interface ProxyStatusDto {
