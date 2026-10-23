@@ -568,6 +568,15 @@
   }
   .motion-button:not(:disabled):active { transform: none; }
 }
+/* 设置 · 外观的「减少动效」（D-23）：只由主窗口挂在 <html> 上，灵动岛窗口不会出现该 class */
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0ms !important;
+  scroll-behavior: auto !important;
+}
+html.reduce-motion .motion-button:not(:disabled):active { transform: none; }
 /* 保存锁由 fieldset 统一承担；继承锁的无关控件保持原外观。
    显式 disabled 的控件仍保留其原有禁用样式。 */
 fieldset[data-saving="true"] :disabled:not([disabled]) {
