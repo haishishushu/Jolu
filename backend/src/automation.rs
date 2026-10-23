@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::notify::TaskNotice;
 use crate::quota::QuotaState;
 
 type Shared = Arc<Mutex<Connection>>;
@@ -95,6 +96,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             next_check_at   INTEGER,
             check_failures  INTEGER NOT NULL DEFAULT 0,
             resume_pending  INTEGER NOT NULL DEFAULT 0,
+            resume_confirmed INTEGER NOT NULL DEFAULT 0,
             session_id      TEXT,
             account         TEXT,
             model           TEXT,
@@ -130,6 +132,11 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     let has_serial = conn.prepare("SELECT 1 FROM pragma_table_info('automation_tasks') WHERE name = 'serial_queue'")?.exists([])?;
     if !has_serial {
         conn.execute("ALTER TABLE automation_tasks ADD COLUMN serial_queue INTEGER NOT NULL DEFAULT 1", [])?;
+    }
+    // 任务 2.5：旧库补「额度已确认」标记列（见 [`take_resume_confirmed`]），默认未确认
+    let has_confirmed = conn.prepare("SELECT 1 FROM pragma_table_info('automation_runs') WHERE name = 'resume_confirmed'")?.exists([])?;
+    if !has_confirmed {
+        conn.execute("ALTER TABLE automation_runs ADD COLUMN resume_confirmed INTEGER NOT NULL DEFAULT 0", [])?;
     }
     Ok(())
 }
@@ -800,7 +807,7 @@ pub fn apply_check(conn: &Connection, run_id: i64, v: &QuotaVerdict, now: i64) -
     match v.state.as_str() {
         "available" => {
             conn.execute(
-                "UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL, last_check_at=?2, next_check_at=NULL, check_failures=0, wait_ms=wait_ms+?3, wait_started_at=NULL WHERE id=?1",
+                "UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL, last_check_at=?2, next_check_at=NULL, check_failures=0, wait_ms=wait_ms+?3, wait_started_at=NULL, resume_confirmed=resume_pending WHERE id=?1",
                 params![run_id, now, waited],
             )?;
             let detail = if windows.is_empty() { "额度已可用".to_string() } else { windows };
@@ -836,7 +843,7 @@ pub fn apply_check(conn: &Connection, run_id: i64, v: &QuotaVerdict, now: i64) -
                 match run.resets_at {
                     Some(at) if now >= at => {
                         conn.execute(
-                            "UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL, last_check_at=?2, next_check_at=NULL, wait_ms=wait_ms+?3, wait_started_at=NULL WHERE id=?1",
+                            "UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL, last_check_at=?2, next_check_at=NULL, wait_ms=wait_ms+?3, wait_started_at=NULL, resume_confirmed=1 WHERE id=?1",
                             params![run_id, now, waited],
                         )?;
                         add_event(conn, run_id, now, "check", "到达预计恢复时间", Some("该账号不支持读取额度，直接尝试继续"))?;
@@ -1259,10 +1266,70 @@ pub fn finish(conn: &Connection, run_id: i64, outcome: &Outcome, p: &Progress, n
     Ok(())
 }
 
+// 任务 2.5 开始
+/// 运行当前状态对应的通知（D-10）：完成；失败、需要处理（含等待超时）归入失败；已取消、排队、等待、执行中不通知
+pub fn notice_for(run: &Run) -> Option<TaskNotice> {
+    let failed = |text: Option<&String>, fallback: &str| TaskNotice::Failed {
+        reason: text.map(|t| t.trim()).filter(|t| !t.is_empty()).unwrap_or(fallback).to_string(),
+    };
+    match run.status.as_str() {
+        "completed" => Some(TaskNotice::Completed),
+        "failed" => Some(failed(run.error.as_ref(), "运行失败")),
+        "attention" => Some(failed(run.reason.as_ref(), "需要处理")),
+        _ => None,
+    }
+}
+
+/// 一条待发的任务通知：任务 ID、通知种类、工具名、任务名
+pub struct PendingNotice {
+    task_id: i64,
+    kind: TaskNotice,
+    platform: &'static str,
+    task_name: String,
+}
+
+/// 在刚改完状态的同一把锁里读出这些运行的当前状态，算出该发的通知，锁外再发；
+/// 避免锁外重读时运行已被调度线程推进到下一个状态而重复提醒。调用方只传刚经历状态变化的运行
+pub fn notices_of(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<PendingNotice>> {
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(run) = load_run(conn, *id)? else { continue };
+        if let Some(kind) = notice_for(&run) {
+            out.push(PendingNotice { task_id: run.task_id, kind, platform: display_name(&run.platform), task_name: run.task_name });
+        }
+    }
+    Ok(out)
+}
+
+fn send_notices(app: &AppHandle, notices: Vec<PendingNotice>) {
+    for n in notices {
+        crate::notify::notify_task(app, n.task_id, n.kind, n.platform, &n.task_name);
+    }
+}
+
+/// 续跑前取走「额度已确认」标记（只用一次）。
+/// 只有 `apply_check` 确认额度可用（或不支持读额度、到达预计恢复时间）转回排队时才置位；
+/// 转为需要处理、手动重新排队都会清掉，所以手动重新排队后的续跑不算「额度已恢复」。
+/// 用运行表列而不是最近一条事件判断：事件只是展示用的日志，以后新增事件不会悄悄改变通知行为
+pub fn take_resume_confirmed(conn: &Connection, run_id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute("UPDATE automation_runs SET resume_confirmed=0 WHERE id=?1 AND resume_confirmed=1", [run_id])?;
+    Ok(n == 1)
+}
+
+/// 该账号下等待额度的运行：额度检查前记下，检查后转为「需要处理」的发失败通知
+fn waiting_runs(conn: &Connection, connection_id: &str) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id WHERE r.status = 'waiting' AND t.connection_id = ?1",
+    )?;
+    let ids = stmt.query_map([connection_id], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+// 任务 2.5 结束
+
 /// 只改仍在启动流程里的运行（排队中，或刚认领为执行中）；启动途中被删除或取消的运行不再写入
 fn set_attention(conn: &Connection, run_id: i64, kind: &str, reason: &str, now: i64) -> rusqlite::Result<()> {
     let n = conn.execute(
-        "UPDATE automation_runs SET status='attention', block_kind=?2, reason=?3 WHERE id=?1 AND status IN ('queued','running')",
+        "UPDATE automation_runs SET status='attention', block_kind=?2, reason=?3, resume_confirmed=0 WHERE id=?1 AND status IN ('queued','running')",
         params![run_id, kind, reason],
     )?;
     if n == 0 { return Ok(()); }
@@ -1342,7 +1409,8 @@ pub fn fire_schedules<Tz: TimeZone>(conn: &Connection, tz: &Tz, now: i64) -> rus
 }
 
 /// 等待截止已过的运行转为「需要处理」，返回有运行到期需要检查额度的账号（D-09：同账号合并成一次检查）
-pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>, bool)> {
+/// 与这次超时的运行（任务 2.5：调度线程据此发失败通知）
+pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>, Vec<i64>)> {
     let mut stmt = conn.prepare(
         "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
          WHERE r.status = 'waiting' AND t.wait_deadline IS NOT NULL AND t.wait_deadline < ?1",
@@ -1361,7 +1429,7 @@ pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>,
          GROUP BY t.connection_id ORDER BY MIN(r.created_at), MIN(r.id)",
     )?;
     let due = stmt.query_map([now], |r| r.get(0))?.collect::<Result<_, _>>()?;
-    Ok((due, !expired.is_empty()))
+    Ok((due, expired))
 }
 
 /// D-09 ③：额度检查按账号合并，一次检查的结果写入该账号全部等待中的运行（暂停的任务除外）；
@@ -1443,7 +1511,8 @@ pub fn act(conn: &Connection, id: i64, action: &str, now: i64) -> Result<Option<
             if task.state == "paused" { return Err("请先恢复任务".into()); }
             match &active {
                 Some(r) if r.status == "attention" => {
-                    conn.execute("UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL WHERE id=?1", [r.id]).map_err(e)?;
+                    // 手动重新排队没有确认过额度：续跑时不发「任务已继续」（任务 2.5）
+                    conn.execute("UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL, resume_confirmed=0 WHERE id=?1", [r.id]).map_err(e)?;
                     add_event(conn, r.id, now, "queue", "重新排队", None).map_err(e)?;
                 }
                 Some(_) => return Err("任务已有进行中的运行".into()),
@@ -1589,9 +1658,20 @@ fn current_connection_ids(db: &Shared) -> Vec<String> {
 /// 应用初始化后启动：建表、恢复中断的运行，然后每 30 秒（或有操作时）检查一次
 pub fn start(app: AppHandle) {
     let db = shared(&app);
-    if let Err(error) = with_conn(&db, |conn| recover(conn, now_ms()).map_err(|e| e.to_string())) {
-        eprintln!("[自动化] 初始化失败：{error}");
-        return;
+    let interrupted = with_conn(&db, |conn| {
+        // 任务 2.5：上次退出时还在执行的运行会转为「需要处理」，恢复后发失败通知
+        let mut stmt = conn.prepare("SELECT id FROM automation_runs WHERE status = 'running'").map_err(|e| e.to_string())?;
+        let ids: Vec<i64> = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+        drop(stmt);
+        recover(conn, now_ms()).map_err(|e| e.to_string())?;
+        notices_of(conn, &ids).map_err(|e| e.to_string())
+    });
+    match interrupted {
+        Ok(notices) => send_notices(&app, notices),
+        Err(error) => {
+            eprintln!("[自动化] 初始化失败：{error}");
+            return;
+        }
     }
     let spawned = std::thread::Builder::new().name("jolu-automation".into()).spawn(move || loop {
         tick(&app);
@@ -1609,11 +1689,13 @@ fn tick(app: &AppHandle) {
     let due = with_conn(&db, |conn| {
         let fired = fire_schedules(conn, &Local, now).map_err(|e| e.to_string())?;
         let (due, expired) = due_checks(conn, now).map_err(|e| e.to_string())?;
-        Ok((due, fired || expired))
+        let notices = notices_of(conn, &expired).map_err(|e| e.to_string())?; // 任务 2.5：等待超时归入失败通知
+        Ok((due, fired || !expired.is_empty(), notices))
     });
     let due = match due {
-        Ok((due, changed)) => {
+        Ok((due, changed, notices)) => {
             if changed { emit(app); }
+            send_notices(app, notices);
             due
         }
         Err(error) => {
@@ -1640,7 +1722,15 @@ fn check_account_blocking(app: &AppHandle, connection_id: &str) {
         Ok(state) => verdict(&state),
         Err(error) => QuotaVerdict::simple("unknown", error),
     };
-    if with_conn(&db, |conn| apply_account_check(conn, connection_id, None, checked_from, &v, now_ms()).map_err(|e| e.to_string())).is_ok() { emit(app); }
+    let checked = with_conn(&db, |conn| {
+        let waiting = waiting_runs(conn, connection_id).map_err(|e| e.to_string())?;
+        apply_account_check(conn, connection_id, None, checked_from, &v, now_ms()).map_err(|e| e.to_string())?;
+        notices_of(conn, &waiting).map_err(|e| e.to_string()) // 任务 2.5：需要重新登录、无法读取额度归入失败通知
+    });
+    if let Ok(notices) = checked {
+        emit(app);
+        send_notices(app, notices);
+    }
 }
 
 fn start_run(app: &AppHandle, run_id: i64) {
@@ -1654,8 +1744,12 @@ fn start_run(app: &AppHandle, run_id: i64) {
     let Ok((run, task)) = loaded else { return };
     if run.status != "queued" { return; }
     let attention = |kind: &str, reason: String| {
-        let _ = with_conn(&db, |conn| set_attention(conn, run_id, kind, &reason, now).map_err(|e| e.to_string()));
+        let notices = with_conn(&db, |conn| {
+            set_attention(conn, run_id, kind, &reason, now).map_err(|e| e.to_string())?;
+            notices_of(conn, &[run_id]).map_err(|e| e.to_string()) // 任务 2.5：需要处理归入失败通知
+        });
         emit(app);
+        send_notices(app, notices.unwrap_or_default());
     };
     let Some(tool) = tool_name(&task.platform) else { return attention("tool_missing", "该工具尚未接入执行器".into()) };
     let Some(exe) = crate::session_threads::find_executable(tool) else {
@@ -1677,17 +1771,33 @@ fn start_run(app: &AppHandle, run_id: i64) {
             Ok(list) => list,
             Err(error) => return attention("skill_missing", format!("无法读取 Skills：{error}")),
         };
-        if !matches!(with_conn(&db, |conn| skills_ready(conn, run_id, &task.skills, &available, now).map_err(|e| e.to_string())), Ok(true)) {
-            emit(app);
-            return;
+        let checked = with_conn(&db, |conn| {
+            if skills_ready(conn, run_id, &task.skills, &available, now).map_err(|e| e.to_string())? { return Ok(None); }
+            notices_of(conn, &[run_id]).map(Some).map_err(|e| e.to_string()) // 任务 2.5
+        });
+        match checked {
+            Ok(None) => {}
+            Ok(Some(notices)) => {
+                emit(app);
+                send_notices(app, notices);
+                return;
+            }
+            Err(_) => {
+                emit(app);
+                return;
+            }
         }
     }
     // 先认领再拉起进程：认领之后删除会被拒绝（运行中），认领之前被删除或取消则不启动
     engine().procs.lock().unwrap_or_else(|p| p.into_inner()).clear_stop(run_id);
-    match with_conn(&db, |conn| claim_run(conn, run_id).map_err(|e| e.to_string())) {
-        Ok(true) => {}
+    // 任务 2.5：认领的同时取走「额度已确认」标记，只有额度检查确认可用后的续跑才发「任务已继续」
+    let confirmed = match with_conn(&db, |conn| {
+        if !claim_run(conn, run_id).map_err(|e| e.to_string())? { return Ok(None); }
+        take_resume_confirmed(conn, run_id).map(Some).map_err(|e| e.to_string())
+    }) {
+        Ok(Some(confirmed)) => confirmed,
         _ => return,
-    }
+    };
     let session = run.session_id.clone();
     let prompt = run_prompt(&task.platform, &task.skills, &task.prompt, run.resume_pending);
     let args = build_args(&task.platform, task.model.as_deref(), session.as_deref());
@@ -1715,6 +1825,10 @@ fn start_run(app: &AppHandle, run_id: i64) {
     let stop_now = engine().procs.lock().unwrap_or_else(|p| p.into_inner()).register(run_id, child.id());
     if stop_now { kill_tree(child.id()); }
     emit(app);
+    // 任务 2.5：额度恢复后在原会话中继续（等待中的运行经 apply_check 的 available 分支转回排队，到这里真正续跑）
+    if resumed && confirmed && !stop_now {
+        crate::notify::notify_task(app, task.id, TaskNotice::Resumed, display_name(&task.platform), &task.name);
+    }
 
     let app = app.clone();
     let platform = task.platform.clone();
@@ -1755,10 +1869,16 @@ fn start_run(app: &AppHandle, run_id: i64) {
         let stderr_tail = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
         let stopped = engine().procs.lock().unwrap_or_else(|p| p.into_inner()).exited(run_id);
         let outcome = classify(&progress, exit_ok, &stderr_tail, stopped);
-        if let Err(error) = with_conn(&db, |conn| finish(conn, run_id, &outcome, &progress, now_ms()).map_err(|e| e.to_string())) {
+        let finished = with_conn(&db, |conn| {
+            finish(conn, run_id, &outcome, &progress, now_ms()).map_err(|e| e.to_string())?;
+            notices_of(conn, &[run_id]).map_err(|e| e.to_string()) // 任务 2.5：完成 / 失败 / 需要处理；已取消与进入等待不通知
+        });
+        let notices = finished.unwrap_or_else(|error| {
             eprintln!("[自动化] 记录运行结果失败：{error}");
-        }
+            Vec::new()
+        });
         emit(&app);
+        send_notices(&app, notices);
         kick();
     });
 }
@@ -1839,7 +1959,13 @@ pub async fn automation_action(app: AppHandle, id: i64, action: String) -> Resul
             Ok(state) => verdict(&state),
             Err(error) => QuotaVerdict::simple("unknown", error),
         };
-        blocking(&app, move |conn| apply_account_check(conn, &run.connection_id, Some(run.id), checked_from, &v, now_ms()).map_err(|e| e.to_string())).await?;
+        // 任务 2.5：在同一把锁里算出转为需要处理的运行该发的通知
+        let notices = blocking(&app, move |conn| {
+            let waiting = waiting_runs(conn, &run.connection_id).map_err(|e| e.to_string())?;
+            apply_account_check(conn, &run.connection_id, Some(run.id), checked_from, &v, now_ms()).map_err(|e| e.to_string())?;
+            notices_of(conn, &waiting).map_err(|e| e.to_string())
+        }).await?;
+        send_notices(&app, notices);
     } else {
         let kill = blocking(&app, move |conn| act(conn, id, &action, now_ms())).await?;
         if let Some(run_id) = kill { kill_run(run_id); }
@@ -2763,4 +2889,167 @@ mod tests {
         i.skills = vec!["a".into(), "b".into(), "a".into()];
         assert_eq!(validate(&i, 1_000_000).unwrap_err(), "Skills 不能重复选择");
     }
+
+    // 任务 2.5 开始
+    fn notice_of(conn: &Connection, run: i64) -> Option<TaskNotice> {
+        notice_for(&load_run(conn, run).unwrap().unwrap())
+    }
+
+    #[test]
+    fn notices_follow_run_outcome() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let p = Progress { session_id: Some("s-1".into()), ..Default::default() };
+        let running = |cwd: &str, at: i64| {
+            let run = queued(&conn, "c1", cwd, false, at);
+            assert_eq!(notice_of(&conn, run), None, "排队中不通知");
+            conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run, at]).unwrap();
+            assert_eq!(notice_of(&conn, run), None, "执行中不通知");
+            run
+        };
+
+        let done = running(r"D:\work\n1", now);
+        finish(&conn, done, &Outcome::Completed, &p, now + 1).unwrap();
+        assert_eq!(notice_of(&conn, done), Some(TaskNotice::Completed));
+
+        let failed = running(r"D:\work\n2", now + 2);
+        finish(&conn, failed, &Outcome::Failed("进程退出码 1".into()), &p, now + 3).unwrap();
+        assert_eq!(notice_of(&conn, failed), Some(TaskNotice::Failed { reason: "进程退出码 1".into() }));
+
+        let limited = running(r"D:\work\n3", now + 4);
+        finish(&conn, limited, &Outcome::Limit { resets_at: Some(now + 60_000), message: "usage limit".into() }, &p, now + 5).unwrap();
+        assert_eq!(load_run(&conn, limited).unwrap().unwrap().status, "waiting");
+        assert_eq!(notice_of(&conn, limited), None, "额度耗尽进入等待不通知，恢复或超时时再通知");
+
+        let reauth = running(r"D:\work\n4", now + 6);
+        finish(&conn, reauth, &Outcome::Reauth("401".into()), &p, now + 7).unwrap();
+        assert!(matches!(notice_of(&conn, reauth), Some(TaskNotice::Failed { reason }) if reason.starts_with("需要重新登录")), "需要处理归入失败");
+
+        let stopped = running(r"D:\work\n5", now + 8);
+        finish(&conn, stopped, &Outcome::Cancelled, &p, now + 9).unwrap();
+        assert_eq!(notice_of(&conn, stopped), None, "停止运行不通知");
+
+        let cancelled = running(r"D:\work\n6", now + 10);
+        act(&conn, load_run(&conn, cancelled).unwrap().unwrap().task_id, "cancel", now + 11).unwrap();
+        finish(&conn, cancelled, &Outcome::Reauth("401".into()), &p, now + 12).unwrap();
+        assert_eq!(notice_of(&conn, cancelled), None, "任务已取消的收尾不通知");
+
+        let blocked = queued(&conn, "c1", r"D:\work\n7", false, now + 13);
+        set_attention(&conn, blocked, "cwd_missing", "项目目录不可访问，无法在原目录执行。", now + 14).unwrap();
+        assert_eq!(notice_of(&conn, blocked), Some(TaskNotice::Failed { reason: "项目目录不可访问，无法在原目录执行。".into() }));
+    }
+
+    #[test]
+    fn wait_timeout_reports_expired_runs_as_failed() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let mut i = input("quota");
+        i.wait_deadline = Some(now + 1_000);
+        let task = create_task(&conn, &i, now).unwrap();
+        let run = active_run(&conn, task).unwrap().unwrap().id;
+        assert_eq!(notice_of(&conn, run), None, "等待额度中不通知");
+        assert!(due_checks(&conn, now + 10).unwrap().1.is_empty(), "截止前不超时");
+        let (_, expired) = due_checks(&conn, now + 2_000).unwrap();
+        assert_eq!(expired, vec![run], "返回超时的运行，供调度线程发通知");
+        assert!(matches!(notice_of(&conn, run), Some(TaskNotice::Failed { reason }) if reason.starts_with("等待超时")));
+        assert!(due_checks(&conn, now + 3_000).unwrap().1.is_empty(), "只超时一次");
+    }
+    fn resume_waiting(conn: &Connection, cwd: &str, at: i64, deadline: Option<i64>) -> i64 {
+        let run = queued(conn, "c1", cwd, false, at);
+        if let Some(d) = deadline {
+            conn.execute("UPDATE automation_tasks SET wait_deadline=?2 WHERE id=(SELECT task_id FROM automation_runs WHERE id=?1)", params![run, d]).unwrap();
+        }
+        conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run, at]).unwrap();
+        let p = Progress { session_id: Some("s-1".into()), ..Default::default() };
+        finish(conn, run, &Outcome::Limit { resets_at: Some(at + 60_000), message: "usage limit".into() }, &p, at + 1).unwrap();
+        let r = load_run(conn, run).unwrap().unwrap();
+        assert_eq!((r.status.as_str(), r.resume_pending), ("waiting", true));
+        run
+    }
+
+    fn retry(conn: &Connection, run: i64, at: i64) {
+        let task = load_run(conn, run).unwrap().unwrap().task_id;
+        act(conn, task, "retry", at).unwrap();
+        let r = load_run(conn, run).unwrap().unwrap();
+        assert_eq!((r.status.as_str(), r.resume_pending), ("queued", true), "重新排队后仍按续跑执行");
+    }
+
+    #[test]
+    fn manual_requeue_after_attention_is_not_quota_resume() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+
+        let timeout = resume_waiting(&conn, r"D:\work\r1", now, Some(now + 1_000));
+        assert_eq!(due_checks(&conn, now + 2_000).unwrap().1, vec![timeout]);
+        retry(&conn, timeout, now + 3_000);
+        assert!(!take_resume_confirmed(&conn, timeout).unwrap(), "等待超时后手动重新排队：没有确认过额度，不发「任务已继续」");
+
+        let reauth = resume_waiting(&conn, r"D:\work\r2", now + 10, None);
+        apply_check(&conn, reauth, &QuotaVerdict::simple("reauth", "401"), now + 20).unwrap();
+        assert_eq!(load_run(&conn, reauth).unwrap().unwrap().status, "attention");
+        retry(&conn, reauth, now + 30);
+        assert!(!take_resume_confirmed(&conn, reauth).unwrap(), "需要重新登录后手动重新排队不发");
+
+        let unsupported = resume_waiting(&conn, r"D:\work\r3", now + 40, None);
+        conn.execute("UPDATE automation_runs SET resume_pending=0 WHERE id=?1", [unsupported]).unwrap();
+        apply_check(&conn, unsupported, &QuotaVerdict::simple("unsupported", "API Key"), now + 50).unwrap();
+        assert_eq!(load_run(&conn, unsupported).unwrap().unwrap().status, "attention");
+        conn.execute("UPDATE automation_runs SET resume_pending=1 WHERE id=?1", [unsupported]).unwrap();
+        retry(&conn, unsupported, now + 60);
+        assert!(!take_resume_confirmed(&conn, unsupported).unwrap(), "无法读取额度后手动重新排队不发");
+
+        // 额度确认可用、启动前又转为需要处理（如账号不匹配）：标记随之作废
+        let blocked = resume_waiting(&conn, r"D:\work\r4", now + 70, None);
+        assert!(apply_check(&conn, blocked, &ok, now + 80).unwrap());
+        set_attention(&conn, blocked, "account_mismatch", "不是当前登录的账号", now + 90).unwrap();
+        retry(&conn, blocked, now + 100);
+        assert!(!take_resume_confirmed(&conn, blocked).unwrap(), "转为需要处理后再手动重新排队不发");
+
+        // 续跑中被中断（Jolu 退出）转为需要处理，再手动重新排队
+        let interrupted = resume_waiting(&conn, r"D:\work\r5", now + 110, None);
+        assert!(apply_check(&conn, interrupted, &ok, now + 120).unwrap());
+        assert!(claim_run(&conn, interrupted).unwrap());
+        assert!(take_resume_confirmed(&conn, interrupted).unwrap(), "认领后取走标记");
+        recover(&conn, now + 130).unwrap();
+        retry(&conn, interrupted, now + 140);
+        assert!(!take_resume_confirmed(&conn, interrupted).unwrap(), "中断后手动重新排队不发");
+    }
+
+    #[test]
+    fn quota_confirmed_resume_notifies_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_000_000;
+        let ok = QuotaVerdict { state: "available".into(), reason: None, resets_at: None, windows: vec![] };
+        let run = resume_waiting(&conn, r"D:\work\q1", now, None);
+        assert!(!take_resume_confirmed(&conn, run).unwrap(), "还在等待额度");
+        assert!(apply_check(&conn, run, &ok, now + 100_000).unwrap());
+        assert!(take_resume_confirmed(&conn, run).unwrap(), "额度检查确认可用后续跑：发一次「任务已继续」");
+        assert!(!take_resume_confirmed(&conn, run).unwrap(), "标记只用一次");
+
+        // 不支持读额度：到达预计恢复时间直接尝试继续，同样算确认
+        let guess = resume_waiting(&conn, r"D:\work\q2", now + 10, None);
+        assert!(apply_check(&conn, guess, &QuotaVerdict::simple("unsupported", "API Key"), now + 200_000).unwrap());
+        assert!(take_resume_confirmed(&conn, guess).unwrap());
+        assert!(!take_resume_confirmed(&conn, guess).unwrap());
+    }
+
+    #[test]
+    fn resume_confirmed_column_migrates_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let run = queued(&conn, "c1", r"D:\work\m1", false, 1_000_000);
+        // 模拟旧库：运行表还没有这一列
+        conn.execute_batch("ALTER TABLE automation_runs DROP COLUMN resume_confirmed").unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+        let value: i64 = conn.query_row("SELECT resume_confirmed FROM automation_runs WHERE id = ?1", [run], |r| r.get(0)).unwrap();
+        assert_eq!(value, 0, "旧运行默认未确认");
+        assert!(!take_resume_confirmed(&conn, run).unwrap());
+    }
+    // 任务 2.5 结束
 }

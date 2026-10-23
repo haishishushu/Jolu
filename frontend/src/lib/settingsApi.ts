@@ -28,4 +28,6 @@ export const settingsApi = {
   setNetwork: (mode: NetworkMode, proxyUrl: string | null) => invoke<AppSettings>("set_network", { mode, proxyUrl }),
   /** 用草稿参数做连接诊断，不保存设置；不发模型请求、不带凭证 */
   diagnoseNetwork: (mode: NetworkMode, proxyUrl: string | null) => invoke<NetworkDiagnosisDto>("diagnose_network", { mode, proxyUrl }),
+  /** 设置 · 通知（画板 94）：任务提醒的两个开关，传 null 的保持不变 */
+  setTaskNotify: (resumed: boolean | null, finished: boolean | null) => invoke<AppSettings>("set_task_notify", { resumed, finished }),
 }

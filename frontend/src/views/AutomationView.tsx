@@ -23,6 +23,12 @@ export interface AutomationPrefill {
   nonce: number
 }
 
+/** 点击任务通知（任务 2.5）：打开该任务的详情。当前插件版本不支持 Windows 点击回调，暂由后续升级接上 */
+export interface AutomationTarget {
+  taskId: number
+  nonce: number
+}
+
 type Route = { kind: "list" } | { kind: "task"; id: number } | { kind: "run"; id: number; back: Route }
 
 const ACTION_DONE: Partial<Record<TaskAction, string>> = {
@@ -38,9 +44,12 @@ const ACTION_DONE: Partial<Record<TaskAction, string>> = {
  * 自动化（Jolu.pen 模块 E，画板 58–73）：任务列表、新建 / 编辑任务、等待额度详情、运行记录与运行详情。
  * 任务在本机用 Claude Code / Codex 的非交互模式执行；所选 Skills 在执行前检查并写入提示词前缀（D-08）。
  */
-export function AutomationView({ active, prefill, onOpenSession, onOpenProviders }: {
+export function AutomationView({ active, prefill, target, onTargetHandled, onOpenSession, onOpenProviders }: {
   active: boolean
   prefill: AutomationPrefill | null
+  target: AutomationTarget | null
+  /** 已按通知打开任务详情；页面切走再回来时不再重复打开 */
+  onTargetHandled: () => void
   onOpenSession: (platform: string, sessionId: string) => void
   onOpenProviders: () => void
 }) {
@@ -61,6 +70,13 @@ export function AutomationView({ active, prefill, onOpenSession, onOpenProviders
     setTab("tasks")
     setDialog({ mode: "create", session: prefill.session, nonce: prefill.nonce })
   }, [prefill])
+
+  useEffect(() => {
+    if (!target) return
+    setTab("tasks")
+    setRoute({ kind: "task", id: target.taskId })
+    onTargetHandled()
+  }, [target, onTargetHandled])
 
   const overview = useAutomationQuery("overview", automationApi.overview, () => demoOverview(Date.now()), active)
   const taskId = route.kind === "task" ? route.id : null

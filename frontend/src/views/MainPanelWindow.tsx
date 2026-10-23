@@ -1,5 +1,5 @@
 import { useContentMotion, useExitPresence } from "@/lib/motion"
-import { useEffect, useId, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useRef, useState } from "react"
 import { api, isTauri, listenEvent, openUrl, type MainIntentDto } from "@/lib/api"
 import { pageForIntent, pageLabel, readSidebarCollapsed, resolveOpenPage, writeSidebarCollapsed, type MainPage } from "@/lib/mainNavigation"
 import { settingsApi } from "@/lib/settingsApi"
@@ -17,7 +17,7 @@ import { UpdateDialog } from "@/components/panel/UpdateDialog"
 import { IslandView } from "./IslandView"
 import { ProvidersView } from "./ProvidersView"
 import { SessionsView, type SessionTarget } from "./SessionsView"
-import { AutomationView, type AutomationPrefill } from "./AutomationView"
+import { AutomationView, type AutomationPrefill, type AutomationTarget } from "./AutomationView"
 import { SkillsView } from "./SkillsView"
 import { UsageView, type UsageRequest } from "./UsageView"
 import { SettingsPage } from "./SettingsPage"
@@ -45,6 +45,8 @@ export function MainPanelWindow({
   const [sessionTarget, setSessionTarget] = useState<SessionTarget | null>(null)
   /** 会话线程「创建自动化」带入自动化新建页的会话（画板 72） */
   const [automationPrefill, setAutomationPrefill] = useState<AutomationPrefill | null>(null)
+  const [automationTarget, setAutomationTarget] = useState<AutomationTarget | null>(null)
+  const clearAutomationTarget = useCallback(() => setAutomationTarget(null), [])
   const [usageRequest, setUsageRequest] = useState<UsageRequest | null>(null)
   const [opening, setOpening] = useState(embedded && isTauri)
   const readySent = useRef(false)
@@ -134,6 +136,7 @@ export function MainPanelWindow({
         setPage(pageForIntent({ kind: "overview", settings: { default_page: intent.settings.default_page, last_page: lastPage } }))
       } else setPage(pageForIntent(intent))
       if (intent.kind === "settings") setSettingsSection(intent.section)
+      if (intent.kind === "automation") setAutomationTarget({ taskId: intent.task_id, nonce: Date.now() })
       if (intent.kind !== "overview") setNavigationRequest((value) => value + 1)
     }
     const consumeIntent = () => void api.takeMainIntent().then(applyIntent).catch(() => {})
@@ -251,6 +254,8 @@ export function MainPanelWindow({
                 <AutomationView
                   active={panelActive}
                   prefill={automationPrefill}
+                  target={automationTarget}
+                  onTargetHandled={clearAutomationTarget}
                   onOpenSession={(platform, sessionId) => {
                     setSessionTarget({ platform, sessionId, nonce: Date.now() })
                     navigate("sessions")

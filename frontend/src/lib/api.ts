@@ -153,6 +153,7 @@ export type MainIntentDto =
   | { kind: "overview"; settings: AppSettings }
   | { kind: "settings"; section: string }
   | { kind: "about"; version: string }
+  | { kind: "automation"; task_id: number }
 
 /** 在系统默认浏览器打开链接。桌面端走 opener 插件，浏览器预览用新标签 */
 export async function openUrl(url: string): Promise<void> {
@@ -301,6 +302,10 @@ export interface AppSettings {
   network_mode: string
   /** 手动代理地址；切到其他方式时保留 */
   network_proxy_url: string | null
+  /** 任务提醒：额度恢复后在原会话继续时通知 */
+  notify_task_resumed: boolean
+  /** 任务提醒：完成与失败（含需要处理、等待超时）时通知 */
+  notify_task_finished: boolean
 }
 
 export interface ProxyStatusDto {

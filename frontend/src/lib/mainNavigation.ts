@@ -56,9 +56,12 @@ export function resolveOpenPage(defaultPage: string, lastPage: string | null): M
 export type NavigationIntent =
   | { kind: "overview"; settings?: { default_page?: string; last_page?: string | null } }
   | { kind: "settings"; section: string }
+  /** 点击任务通知：打开自动化页并选中该任务的详情。当前插件版本不支持 Windows 点击回调，后端暂不发出，升级 Tauri 后接上 */
+  | { kind: "automation"; task_id: number }
 
 export function pageForIntent(intent: NavigationIntent): MainPage {
   if (intent.kind === "overview") return resolveOpenPage(intent.settings?.default_page ?? "last", intent.settings?.last_page ?? null)
+  if (intent.kind === "automation") return "automation"
   if (intent.section === "island") return "island"
   if (intent.section === "connections") return "providers"
   return "settings"
