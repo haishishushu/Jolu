@@ -1640,7 +1640,7 @@ async fn blocking<T: Send + 'static>(app: &AppHandle, work: impl FnOnce(&Connect
 }
 
 /// 本机 CLI 当前登录的连接；判断逻辑与 `current_connections` 一致，只比对、不返回凭证
-fn current_connection_ids(db: &Shared) -> Vec<String> {
+pub(crate) fn current_connection_ids(db: &Shared) -> Vec<String> {
     if crate::validation::isolated() { return vec![]; }
     let mut local = Vec::new();
     for platform in ["claude", "codex"] {

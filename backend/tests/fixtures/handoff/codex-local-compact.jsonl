@@ -1,0 +1,7 @@
+{"type":"session_meta","timestamp":"2026-10-20T01:00:00Z","payload":{"id":"s-codex","cwd":"D:/placeholder/project"}}
+{"type":"response_item","timestamp":"2026-10-20T01:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：用户要求"}]}}
+{"type":"compacted","timestamp":"2026-10-20T02:00:00Z","payload":{"message":"占位：本地压缩摘要一","replacement_history":[]}}
+{"type":"response_item","timestamp":"2026-10-20T02:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：第一次压缩后的要求"}]}}
+{"type":"compacted","timestamp":"2026-10-20T03:00:00Z","payload":{"message":"占位：本地压缩摘要二","replacement_history":[]}}
+{"type":"compacted","timestamp":"2026-10-20T04:00:00Z","payload":{"message":"","replacement_history":[{"type":"compaction","encrypted_content":"占位密文"}]}}
+{"type":"response_item","timestamp":"2026-10-20T04:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"占位：最后的要求"}]}}

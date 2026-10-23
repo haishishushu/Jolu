@@ -54,6 +54,13 @@ mod notify;
 // 任务 2.5 结束
 #[cfg(test)]
 mod perf_bench;
+// 任务 3.1 开始
+mod handoff_baseline;
+mod handoff_digest;
+mod handoff_facts;
+mod handoff_input;
+mod session_handoff;
+// 任务 3.1 结束
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -2790,6 +2797,17 @@ pub fn run() {
             // 任务 2.5 开始
             set_task_notify,
             // 任务 2.5 结束
+            // 任务 3.1 开始
+            session_handoff::handoff_state,
+            session_handoff::handoff_start,
+            session_handoff::handoff_refine,
+            session_handoff::handoff_estimate_refine,
+            session_handoff::handoff_finish,
+            session_handoff::handoff_cancel,
+            session_handoff::handoff_render,
+            session_handoff::handoff_save,
+            session_handoff::validate_file_name,
+            // 任务 3.1 结束
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -2893,6 +2911,9 @@ pub fn run() {
                 }
             }
             proxy::shutdown_and_restore(app);
+            // 任务 3.1 开始
+            session_handoff::shutdown();
+            // 任务 3.1 结束
         }
     });
 }
