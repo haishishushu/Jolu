@@ -42,6 +42,7 @@ mod validation;
 mod updater;
 mod cli_apply;
 mod auth_snapshot;
+mod claude_auth;
 mod current_connection;
 mod login_detect;
 mod usage_stats;
@@ -1587,7 +1588,7 @@ async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String)
         let secret=info.secret.clone().ok_or("该连接没有保存 API Key")?;
         tauri::async_runtime::spawn_blocking(move || quota::validate_connection(&info.platform,"api",&secret,info.base_url.as_deref(),info.model.as_deref())).await.map_err(|e|e.to_string())??;
         let key=id.clone();with_database(db.0.clone(),move|conn|connections::set_paused(conn,&key,false)).await?;
-        invalidate_network_cache(&id);let _=app.emit("connections-changed",());let _=app.emit("refresh-requested",());
+        invalidate_network_cache(&id);let _=app.emit("connections-changed",());let _=app.emit("refresh-requested",id);
         return Ok("已恢复连接查询，原工具配置保持原样".into());
     }
     if platforms::native(&info.platform) && info.kind=="auth" {
@@ -1600,6 +1601,10 @@ async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String)
         return Ok("已启用本机数据监控；外部应用账号与配置未更改".into());
     }
     let secret = info.secret.clone().ok_or("该连接没有保存凭证，无法写入 CLI 配置")?;
+    let claude_prepared = if info.platform == "claude" && info.kind == "auth" {
+        let saved = with_database(db.0.clone(), move |conn| auth_snapshot::claude_saved(conn)).await?;
+        Some(tauri::async_runtime::spawn_blocking(move || claude_auth::prepare_with_saved(saved)).await.map_err(|e| e.to_string())??)
+    } else { None };
     let backup_dir = data_paths(&app).map_err(|e| e.to_string())?.0.join("cli-backups");
     let pool = db.0.clone();
     let snapshot_id = id.clone();
@@ -1611,14 +1616,19 @@ async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String)
             return Err("连接在准备期间已变化，请重试".into());
         }
         auth_snapshot::preserve_current(&conn, &info.platform)?;
+        if let Some(prepared) = &claude_prepared { prepared.preserve(&conn)?; }
         // 保全时可能已安全同步同账号的新 token，必须使用最新的完整授权。
         let current = connections::creds_of(&conn, &snapshot_id).map_err(|e| e.to_string())?.ok_or("连接不存在")?;
         let secret = current.secret.as_deref().ok_or("该连接没有保存凭证")?;
-        let snapshot = if current.platform == "codex" && current.kind == "auth" {
-            auth_snapshot::capture(&conn, &snapshot_id, &current.platform, secret)?;
+        let snapshot = if matches!(current.platform.as_str(), "codex" | "claude") && current.kind == "auth" {
+            if current.platform == "codex" { auth_snapshot::capture(&conn, &snapshot_id, &current.platform, secret)?; }
             auth_snapshot::load(&conn, &snapshot_id, secret)?
         } else { None };
-        let note = cli_apply::apply_to_cli(&current.platform, &current.kind, secret, current.base_url.as_deref(), &backup_dir, snapshot.as_ref())?;
+        let note = if let Some(prepared) = &claude_prepared {
+            cli_apply::apply_claude_verified(secret, &backup_dir, snapshot.as_ref().ok_or("该 Claude 账号缺少完整身份快照，请切回原账号重新同步")?, prepared)?
+        } else {
+            cli_apply::apply_to_cli(&current.platform, &current.kind, secret, current.base_url.as_deref(), &backup_dir, snapshot.as_ref())?
+        };
         connections::set_paused(&conn, &snapshot_id, false)?;
         Ok(note)
     })).await.map_err(|e| e.to_string())??;
@@ -1734,11 +1744,23 @@ async fn add_connection(app: tauri::AppHandle, db: State<'_, Db>, input: connect
     let secret = input.secret.clone().ok_or("连接尚未准备好凭证")?;
     let base_url = input.base_url.clone();
     let model = input.model.clone();
+    let claude_prepared = if platform == "claude" && kind == "auth" {
+        let expected = secret.clone();
+        Some(tauri::async_runtime::spawn_blocking(move || {
+            let prepared = claude_auth::prepare_current()?;
+            prepared.require(Some(&expected))?;
+            Ok::<_, String>(prepared)
+        }).await.map_err(|e| e.to_string())??)
+    } else { None };
     tauri::async_runtime::spawn_blocking(move || {
         quota::validate_connection(&platform, &kind, &secret, base_url.as_deref(), model.as_deref())
     }).await.map_err(|e| e.to_string())??;
     let id = with_database(db.0.clone(), move |conn| {
-        connections::add(conn, input)
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let id = connections::add(&tx, input)?;
+        if let Some(prepared) = &claude_prepared { prepared.sync(&tx, &id)?; }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id)
     })
     .await?;
     invalidate_network_cache(&id);
@@ -1785,7 +1807,7 @@ async fn set_connection_paused(app: tauri::AppHandle, db: State<'_, Db>, id: Str
     // 重新连接后立刻取数，否则界面要停在「等待连接数据更新」直到下一轮轮询。
     // 断开则不必：此时界面本就该显示已断开，多发一次查询只是白跑。
     if !paused {
-        let _ = app.emit("refresh-requested", ());
+        let _ = app.emit("refresh-requested", id);
     }
     Ok(())
 }
@@ -1794,8 +1816,21 @@ async fn set_connection_paused(app: tauri::AppHandle, db: State<'_, Db>, id: Str
 #[tauri::command]
 async fn fetch_credentials(app: tauri::AppHandle, db: State<'_, Db>, id: String) -> Result<connections::FetchResult, String> {
     if validation::isolated() { return Err("隔离验收不读取本机凭证".into()); }
+    let lookup = id.clone();
+    let info = with_database(db.0.clone(), move |conn| connections::creds_of(conn, &lookup).map_err(|e| e.to_string())).await?.ok_or("连接不存在")?;
+    let claude_prepared = if info.platform == "claude" && info.kind == "auth" {
+        if info.paused { return Err("连接已断开，请先重新连接".into()); }
+        Some(tauri::async_runtime::spawn_blocking(claude_auth::prepare_current).await.map_err(|e| e.to_string())??)
+    } else { None };
     let fetch_id = id.clone();
     let result = with_database(db.0.clone(), move |conn| {
+        if let Some(prepared) = claude_prepared {
+            let current = connections::creds_of(conn, &fetch_id).map_err(|e| e.to_string())?.ok_or("连接不存在")?;
+            if current.secret != info.secret || current.paused { return Err("连接在准备期间已变化，请重试".into()); }
+            let changed = prepared.sync(conn, &fetch_id)?;
+            let token = prepared.require(None)?["claudeAiOauth"]["accessToken"].as_str().ok_or("Claude 授权不完整")?;
+            return Ok(connections::FetchResult { ok: true, masked: Some(connections::mask(token)), message: "已核实 Claude 身份并保存完整授权".into(), scanned: vec![], changed });
+        }
         if native_sources::monitor_id(&fetch_id).is_some() {
             let info=connections::creds_of(conn,&fetch_id).map_err(|e|e.to_string())?.ok_or("连接不存在")?;
             let source=native_sources::check(&fetch_id,&info.platform)?;
@@ -1921,14 +1956,24 @@ async fn read_local_connections(app: tauri::AppHandle, db: State<'_, Db>, platfo
         let _=app.emit("connections-changed",());
         return Ok(result);
     }
-    let inputs = tauri::async_runtime::spawn_blocking(move || creds::local_connections(&platform, &kind)).await.map_err(|e| e.to_string())??;
+    let (inputs, claude_prepared) = tauri::async_runtime::spawn_blocking(move || {
+        let inputs = creds::local_connections(&platform, &kind)?;
+        let prepared = if platform == "claude" && kind == "auth" {
+            let prepared = claude_auth::prepare_current()?;
+            for input in &inputs { prepared.require(input.secret.as_deref())?; }
+            Some(prepared)
+        } else { None };
+        Ok::<_, String>((inputs, prepared))
+    }).await.map_err(|e| e.to_string())??;
     let result = with_database(db.0.clone(), move |conn| {
         // 用户在添加时填了名称就覆盖自动生成名；校验失败在这里整体报错，不写库
         let inputs = connections::with_custom_name(inputs, name)?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut summary = LocalReadSummary { added: 0, existing: 0, warnings: vec![] };
         for input in inputs {
-            if connections::register_local(&tx, input)?.1 { summary.added += 1; } else { summary.existing += 1; }
+            let (id, added) = connections::register_local(&tx, input)?;
+            if let Some(prepared) = &claude_prepared { prepared.sync(&tx, &id)?; }
+            if added { summary.added += 1; } else { summary.existing += 1; }
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(summary)
