@@ -151,6 +151,7 @@ export function TrendChart({ points, bucket, mode, onDrill }: {
                 <span key={label as string} className="flex justify-between text-xs"><span className="text-jolu-muted">{label}</span><span className="tnum text-jolu-text">{formatTokens(value as number | null)}</span></span>
               ))}
               <span className="flex items-center justify-between text-xs"><span className="text-jolu-text">总 Token</span><span className="tnum text-base font-semibold text-jolu-on">{formatTokens(point.total)}</span></span>
+              {[point.fresh_input, point.output, point.cache_read, point.cache_write].some(value=>value===null) && <span className="text-[10px] text-jolu-muted">此时段部分数据未提供，折线跨过缺失点连接。</span>}
             </>
           ) : (
             <span className="flex items-center justify-between text-xs">

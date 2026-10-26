@@ -22,7 +22,11 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
   onOpenSession: (target?: { platform: string; sessionId: string }) => void
 }) {
   const [mode, setMode] = useState<TrendMode>("tokens")
-  const change = changeText(data.tokens.total, data.previous_total)
+  const total = data.tokens.total ?? data.token_coverage.known_total
+  const partial = data.tokens.total === null && total !== null
+  const cacheRate = data.cache_hit_rate ?? data.token_coverage.cache_hit_rate
+  const partialCache = cacheRate !== null && data.token_coverage.cache_requests < data.requests
+  const change = partial ? null : changeText(data.tokens.total, data.previous_total)
   const success = data.requests ? (data.requests - data.failed) / data.requests : null
   /** 画板 30：模型分布显示前 5 个，不足时有几个显示几个，不补「其他」行 */
   // 真实为 0 Token 的行（如 Claude Code 的 <synthetic> 报错消息）对 Token 分布没有意义；未知值保留
@@ -34,9 +38,9 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
       <div className="grid grid-cols-4 gap-3">
         <MetricCard
           icon={<Layers />}
-          label="总 Token"
-          value={formatTokens(data.tokens.total)}
-          note={`本机记录${change ? ` · ${isToday ? "较昨天同时段" : "较上一周期"} ${change}` : ""}`}
+          label={partial ? "已知 Token" : "总 Token"}
+          value={formatTokens(total)}
+          note={partial ? `${data.token_coverage.known_requests} / ${data.requests} 次有 Token · ${data.requests-data.token_coverage.known_requests} 次未提供` : `本机记录${change ? ` · ${isToday ? "较昨天同时段" : "较上一周期"} ${change}` : ""}`}
         />
         <MetricCard icon={<Repeat2 />} label="调用次数" value={String(data.requests)} note={`成功率 ${formatPercent(success)} · ${data.failed} 次失败`} />
         <MetricCard
@@ -45,7 +49,7 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
           value={formatUsd(data.cost.priced_requests ? data.cost.amount : null)}
           note={`已计价 ${data.cost.priced_requests} / ${data.cost.requests} 次 · 不含月费`}
         />
-        <MetricCard icon={<Target />} label="输入缓存命中率" value={formatPercent(data.cache_hit_rate)} note="缓存读取 / 全部输入 Token" />
+        <MetricCard icon={<Target />} label="输入缓存命中率" value={formatPercent(cacheRate)} note={partialCache ? `${data.token_coverage.cache_requests} / ${data.requests} 次可计算 · 基于已知输入` : "缓存读取 / 全部输入 Token"} />
       </div>
 
       <div className="grid h-[250px] grid-cols-[minmax(0,644fr)_minmax(0,348fr)] gap-4">
@@ -78,9 +82,9 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
         </Card>
 
         <Card className="flex flex-col gap-2.5 p-4">
-          <CardTitle title="模型分布" note="按 Token" />
+          <CardTitle title="模型分布" note={partial ? "按已知 Token" : "按 Token"} />
           {topModels.length ? topModels.map((m) => {
-            const ratio = share(m.tokens, data.tokens.total)
+            const ratio = share(m.tokens, total)
             return (
               <button
                 key={`${m.platform}-${m.model}`}
@@ -94,7 +98,7 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
                   <span className="tnum shrink-0 text-jolu-muted">{formatTokens(m.tokens)} · {formatPercent(ratio)}</span>
                 </span>
                 <span className="h-1.5 w-full rounded-[3px] bg-jolu-track">
-                  <span className="block h-full rounded-[3px] bg-jolu-accent" style={{ width: `${Math.max(2, (ratio ?? 0) * 100)}%` }} />
+                  <span className="block h-full rounded-[3px] bg-jolu-accent" style={{ width: `${ratio === null ? 0 : Math.max(2, ratio * 100)}%` }} />
                 </span>
               </button>
             )

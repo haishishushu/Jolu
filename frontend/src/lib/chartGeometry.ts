@@ -2,11 +2,11 @@
  * 面积图的几何计算。
  *
  * 全部是纯函数：输入数值、输出坐标与字符串，不碰 DOM、不读主题、不依赖 React。
- * 图表最容易出错的地方是刻度取整、空数据和"未知值"的断线处理，这些都在这里，
+ * 图表最容易出错的地方是刻度取整、空数据和未知点的跨点连接，这些都在这里，
  * 由 chartGeometry.test.mjs 覆盖；组件只负责把算好的 path 画出来。
  */
 
-/** 单条系列：`values` 与 X 轴刻度一一对应，null 表示该点未知（断线，不画成 0） */
+/** 单条系列：`values` 与 X 轴刻度一一对应，null 表示该点未知，连线跨过该点而不补零。 */
 export interface Series {
   key: string
   label: string
@@ -89,8 +89,8 @@ export function labelEvery(count: number, maxLabels = 8): number {
 }
 
 /**
- * 平滑折线（画板 30「平滑折线趋势」）：每个连续段按 Catmull-Rom 转三次贝塞尔。
- * 控制点纵向夹在相邻两点之间，曲线不会冲出数据范围（不会画出负值）；null 照样断线。
+ * 平滑折线（画板 30「平滑折线趋势」）：已知点按 Catmull-Rom 转三次贝塞尔。
+ * 保留原始时间坐标，跨过未知点连续连接；不为未知点生成数值。
  */
 export function smoothPath(values: Array<number | null>, top: number, plot: Plot): string {
   const parts: string[] = []
@@ -108,14 +108,15 @@ export function smoothPath(values: Array<number | null>, top: number, plot: Plot
       const lo = Math.min(p1.y, p2.y)
       const hi = Math.max(p1.y, p2.y)
       const clamp = (y: number) => Math.min(hi, Math.max(lo, y))
-      const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: clamp(p1.y + (p2.y - p0.y) / 6) }
-      const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: clamp(p2.y - (p3.y - p1.y) / 6) }
+      const clampX = (x: number) => Math.min(p2.x, Math.max(p1.x, x))
+      const c1 = { x: clampX(p1.x + (p2.x - p0.x) / 6), y: clamp(p1.y + (p2.y - p0.y) / 6) }
+      const c2 = { x: clampX(p2.x - (p3.x - p1.x) / 6), y: clamp(p2.y - (p3.y - p1.y) / 6) }
       parts.push(`C${f(c1.x)},${f(c1.y)} ${f(c2.x)},${f(c2.y)} ${f(p2.x)},${f(p2.y)}`)
     }
     segment = []
   }
   values.forEach((value, index) => {
-    if (value === null || !Number.isFinite(value)) return flush()
+    if (value === null || !Number.isFinite(value)) return
     segment.push({ x: xAt(index, values.length, plot.width), y: yAt(value, top, plot.height) })
   })
   flush()

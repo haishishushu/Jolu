@@ -81,11 +81,14 @@ test("标签数量超限时按间隔抽稀", () => {
   assert.equal(labelEvery(0), 1)
 })
 
-test("平滑折线：连续段用贝塞尔连接，未知值断线", async () => {
+test("平滑折线：跨过未知点连续连接，保留原始时间位置，不补零", async () => {
   const { smoothPath } = await import("./chartGeometry.ts")
   const path = smoothPath([0, 10, null, 5, 5], 10, { width: 40, height: 10 })
-  assert.equal((path.match(/M/g) ?? []).length, 2)
-  assert.equal((path.match(/C/g) ?? []).length, 2)
+  assert.equal((path.match(/M/g) ?? []).length, 1)
+  assert.equal((path.match(/C/g) ?? []).length, 3)
+  assert.ok(path.includes('30.00,5.00'), "缺失点后仍处于原始时间位置")
+  assert.equal(smoothPath([null, null], 10, {width:40,height:10}), "")
+  assert.equal(smoothPath([null, 0, null], 10, {width:40,height:10}), "M20.00,10.00", "真实零保留，前后未知不延伸曲线")
   // 控制点不低于基线（y 不超过画布高度）
   const ys = [...path.matchAll(/,(-?\d+\.\d+)/g)].map((m) => Number(m[1]))
   assert.equal(ys.every((y) => y >= 0 && y <= 10), true)

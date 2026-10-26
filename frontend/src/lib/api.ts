@@ -667,6 +667,7 @@ export interface StatsSessionRowDto {
 
 export interface StatsOverviewDto {
   tokens: TokenSplitDto
+  token_coverage: { known_total: number | null; known_requests: number; cache_hit_rate: number | null; cache_requests: number }
   requests: number
   failed: number
   cache_hit_rate: number | null

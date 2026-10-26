@@ -13,6 +13,7 @@ const series = [
 export function demoOverview(start: number): StatsOverviewDto {
   return {
     tokens: { fresh_input: 4_620_000, output: 2_240_000, cache_read: 4_940_000, cache_write: 680_000, total: 12_480_000 },
+    token_coverage: { known_total: 12_480_000, known_requests: 846, cache_hit_rate: 0.482, cache_requests: 846 },
     requests: 846,
     failed: 12,
     cache_hit_rate: 0.482,

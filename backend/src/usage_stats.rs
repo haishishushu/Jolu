@@ -312,8 +312,19 @@ pub struct SessionRow {
 }
 
 #[derive(Debug, Serialize)]
+pub struct TokenCoverage {
+    /// 仅汇总有真实 Token 总量的记录；全部未知时为 None，不将未知记为零。
+    pub known_total: Option<i64>,
+    pub known_requests: i64,
+    /// 命中率仅使用同时提供缓存读取与完整输入口径的请求。
+    pub cache_hit_rate: Option<f64>,
+    pub cache_requests: i64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Overview {
     pub tokens: TokenSplit,
+    pub token_coverage: TokenCoverage,
     pub requests: i64,
     pub failed: i64,
     pub cache_hit_rate: Option<f64>,
@@ -485,8 +496,15 @@ pub fn overview(conn: &Connection, f: &StatsFilter) -> rusqlite::Result<Overview
     let empty = empty_value(f);
     let span = f.end - f.start;
     let previous = load(conn, &f.with_range(f.start - span, f.start), false)?;
+    let cache_known: Vec<&Req> = reqs.iter().filter(|r| r.cache_read.is_some() && r.hit_denominator.is_some()).collect();
     Ok(Overview {
         tokens: split(reqs.iter(), empty),
+        token_coverage: TokenCoverage {
+            known_total: reqs.iter().filter_map(|r| r.total).reduce(|a, b| a + b),
+            known_requests: reqs.iter().filter(|r| r.total.is_some()).count() as i64,
+            cache_hit_rate: hit_rate(cache_known.iter().copied()),
+            cache_requests: cache_known.len() as i64,
+        },
         requests: reqs.len() as i64,
         failed: reqs.iter().filter(|r| r.failed).count() as i64,
         cache_hit_rate: hit_rate(reqs.iter()),
@@ -710,7 +728,10 @@ mod tests {
     }
 
     fn seeded(records: &[RequestRecord]) -> (Connection, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!("jolu-usage-stats-{}-{}.db", std::process::id(), records.len()));
+        // 并行测试的记录条数可能相同，按序号区分临时库，避免互相删除或写入
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("jolu-usage-stats-{}-{seq}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut conn = crate::db::open(&path).unwrap();
         insert_records(&mut conn, records).unwrap();
@@ -740,6 +761,31 @@ mod tests {
         assert_eq!(o.sessions[0].session_id, "s1");
         assert_eq!(o.trend.bucket, "2h");
         assert_eq!(o.trend.points.len(), 12);
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn overview_keeps_known_token_subtotal_when_native_requests_have_no_tokens() {
+        let base = local_ms(NaiveDate::from_ymd_opt(2026, 10, 21).unwrap());
+        let (conn, path) = seeded(&[
+            rec("codex", "coverage-c", base + 1_000, "gpt-5", [Some(100), Some(20), Some(60), Some(0), Some(120)], None),
+            rec("claude", "coverage-a", base + 2_000, "claude-sonnet-4-5", [Some(20), Some(10), Some(0), Some(0), Some(30)], None),
+            rec("qoder", "coverage-q", base + 3_000, "qfmodel", [None; 5], None),
+        ]);
+        let all = overview(&conn, &filter(base, base + 3_600_000)).unwrap();
+        assert_eq!(all.tokens.total, None, "未知请求不能伪装成完整总量");
+        let json = serde_json::to_value(&all).unwrap();
+        assert_eq!(json["token_coverage"]["known_total"], 150, "未知原生记录不能抹掉已知 Token 合计");
+        assert_eq!(json["token_coverage"]["known_requests"], 2);
+        assert_eq!(json["token_coverage"]["cache_hit_rate"], 0.5, "缓存分子与分母必须来自同一批可计算请求");
+        assert_eq!(json["token_coverage"]["cache_requests"], 2);
+        let qoder = overview(&conn, &StatsFilter { platform: Some("qoder".into()), ..filter(base, base + 3_600_000) }).unwrap();
+        let json = serde_json::to_value(qoder).unwrap();
+        assert!(json["token_coverage"]["known_total"].is_null(), "全部未知时不能显示零");
+        assert_eq!(json["token_coverage"]["known_requests"], 0);
+        assert!(json["token_coverage"]["cache_hit_rate"].is_null());
+        assert_eq!(json["token_coverage"]["cache_requests"], 0);
         drop(conn);
         let _ = std::fs::remove_file(path);
     }
