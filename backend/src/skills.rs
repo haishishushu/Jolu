@@ -1253,7 +1253,8 @@ fn backup_file(path: &Path, backup_dir: &Path) -> Result<Option<PathBuf>, String
 /// 递归复制，不跟随符号链接
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
-    for entry in fs::read_dir(from).map_err(|e| e.to_string())?.flatten() {
+    for entry in fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| format!("读取 {} 失败：{e}", from.display()))?;
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         let target = to.join(entry.file_name());
         if kind.is_symlink() {
@@ -1273,6 +1274,41 @@ fn backup_dir_tree(dir: &Path, platform: &str, backup_root: &Path) -> Result<Pat
     let target = backup_root.join(format!("{}-{platform}-{name}", stamp()));
     copy_dir(dir, &target).map_err(|e| format!("备份失败，未修改：{e}"))?;
     Ok(target)
+}
+
+/// 先完整复制来源，再交换安装目录；复制或交换失败时保留原安装项。
+fn overwrite_dir(source: &Path, dest: &Path, platform: &str, backup_root: &Path) -> Result<(), String> {
+    let source_c = fs::canonicalize(source).map_err(|e| e.to_string())?;
+    let dest_c = fs::canonicalize(dest).map_err(|e| e.to_string())?;
+    if source_c.starts_with(&dest_c) || dest_c.starts_with(&source_c) {
+        return Err("来源与目标目录相同或互相包含，不能覆盖导入".into());
+    }
+    // 放在目标同一目录，两个 rename 都不会跨磁盘；create_dir 避免复用已有暂存区。
+    let staging = dest.parent().ok_or("目标目录无效")?.join(format!(".jolu-import-{}", stamp()));
+    fs::create_dir(&staging).map_err(|e| format!("无法创建导入暂存目录：{e}"))?;
+    let incoming = staging.join("incoming");
+    let previous = staging.join("previous");
+    let prepared = copy_dir(source, &incoming)
+        .and_then(|_| backup_dir_tree(dest, platform, backup_root));
+    let backup = match prepared {
+        Ok(backup) => backup,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("导入准备失败，原目录保持不变：{error}"));
+        }
+    };
+    if let Err(error) = fs::rename(dest, &previous) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("无法替换目标，原目录保持不变：{error}"));
+    }
+    if let Err(error) = fs::rename(&incoming, dest) {
+        if let Err(rollback) = fs::rename(&previous, dest) {
+            return Err(format!("覆盖失败：{error}；恢复失败：{rollback}；原目录保留在 {}，备份在 {}", previous.display(), backup.display()));
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("覆盖失败，已恢复原目录：{error}"));
+    }
+    fs::remove_dir_all(&staging).map_err(|e| format!("已覆盖导入，但清理暂存目录 {} 失败：{e}；原内容备份在 {}", staging.display(), backup.display()))
 }
 
 /* ───────────────────────── 详情 ───────────────────────── */
@@ -1596,9 +1632,7 @@ pub fn import_with(h: &Homes, cfg: &mut Config, source: &str, platform: &str, sc
             ("overwrite", "conflict") => (|| {
                 let dest = if target.exists() { target.clone() } else { parked_copy(cfg, platform, &target).ok_or("目标已不存在，请重新扫描")? };
                 ensure_writable(&root, &dest)?;
-                backup_dir_tree(&dest, platform, &data.join("skill-backups").join("overwritten"))?;
-                fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
-                copy_dir(Path::new(&item.path), &dest)?;
+                overwrite_dir(Path::new(&item.path), &dest, platform, &data.join("skill-backups").join("overwritten"))?;
                 Ok((dest, false))
             })(),
             ("import", "conflict") => Err("目标已有同名 Skill，请选择跳过或覆盖".into()),
@@ -2995,6 +3029,91 @@ mod tests {
 
     fn overwrite(name: &str) -> Vec<ImportChoice> {
         vec![ImportChoice { name: name.into(), action: "overwrite".into() }]
+    }
+
+    #[test]
+    fn overwrite_rejects_its_own_source_without_removing_files() {
+        let base = temp("overwrite-self");
+        let h = homes_at(&base);
+        let mut cfg = Config::default();
+        let root = write_root(&h, &cfg, "claude", Scope::Global, None).unwrap();
+        let original = body("demo");
+        let dir = skill(&root.path, "demo", &original);
+        fs::write(dir.join("notes.txt"), "保留附件").unwrap();
+        let result = import_with(&h, &mut cfg, &dir.display().to_string(), "claude", Scope::Global, None, overwrite("demo"), true, &base.join("data")).unwrap();
+        assert_eq!(result.failed.len(), 1, "不能把安装项覆盖到自身");
+        assert!(result.imported.is_empty());
+        assert_eq!(fs::read_to_string(dir.join(SKILL_FILE)).unwrap(), original);
+        assert_eq!(fs::read_to_string(dir.join("notes.txt")).unwrap(), "保留附件");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn overwrite_rejects_nested_source_without_removing_files() {
+        let base = temp("overwrite-nested");
+        let h = homes_at(&base);
+        let mut cfg = Config::default();
+        let root = write_root(&h, &cfg, "claude", Scope::Global, None).unwrap();
+        let original = body("demo");
+        let dest = skill(&root.path, "demo", &original);
+        let replacement = format!("{original}\n新正文");
+        let source = skill(&dest.join("nested"), "demo", &replacement);
+        let result = import_with(&h, &mut cfg, &source.display().to_string(), "claude", Scope::Global, None, overwrite("demo"), true, &base.join("data")).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.imported.is_empty());
+        assert_eq!(fs::read_to_string(dest.join(SKILL_FILE)).unwrap(), original);
+        assert_eq!(fs::read_to_string(source.join(SKILL_FILE)).unwrap(), replacement);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn overwrite_replaces_tree_and_keeps_backup_and_source() {
+        let base = temp("overwrite-tree");
+        let h = homes_at(&base);
+        let mut cfg = Config::default();
+        let root = write_root(&h, &cfg, "claude", Scope::Global, None).unwrap();
+        let original = body("demo");
+        let dest = skill(&root.path, "demo", &original);
+        fs::write(dest.join("old.txt"), "旧附件").unwrap();
+        let replacement = format!("{original}\n新正文");
+        let source = skill(&base.join("source"), "demo", &replacement);
+        fs::write(source.join("new.txt"), "新附件").unwrap();
+        let data = base.join("data");
+        let result = import_with(&h, &mut cfg, &source.display().to_string(), "claude", Scope::Global, None, overwrite("demo"), true, &data).unwrap();
+        assert!(result.failed.is_empty());
+        assert_eq!(result.imported.len(), 1);
+        assert_eq!(fs::read_to_string(dest.join(SKILL_FILE)).unwrap(), replacement);
+        assert_eq!(fs::read_to_string(source.join(SKILL_FILE)).unwrap(), replacement);
+        assert_eq!(fs::read_to_string(dest.join("new.txt")).unwrap(), "新附件");
+        assert!(!dest.join("old.txt").exists());
+        let backup = fs::read_dir(data.join("skill-backups/overwritten")).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(fs::read_to_string(backup.join(SKILL_FILE)).unwrap(), original);
+        assert_eq!(fs::read_to_string(backup.join("old.txt")).unwrap(), "旧附件");
+        assert_eq!(fs::read_dir(&root.path).unwrap().count(), 1, "成功后不残留暂存目录");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overwrite_copy_failure_preserves_original_installation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = temp("overwrite-failed-copy");
+        let h = homes_at(&base);
+        let mut cfg = Config::default();
+        let root = write_root(&h, &cfg, "claude", Scope::Global, None).unwrap();
+        let original = format!("{}\n旧正文", body("demo"));
+        let dest = skill(&root.path, "demo", &original);
+        fs::write(dest.join("notes.txt"), "旧附件").unwrap();
+        let source = skill(&base.join("source"), "demo", &format!("{}\n新正文", body("demo")));
+        fs::write(source.join("locked.txt"), "读取失败").unwrap();
+        let locked = fs::OpenOptions::new().read(true).share_mode(0).open(source.join("locked.txt")).unwrap();
+        let result = import_with(&h, &mut cfg, &source.display().to_string(), "claude", Scope::Global, None, overwrite("demo"), true, &base.join("data")).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.imported.is_empty());
+        assert_eq!(fs::read_to_string(dest.join(SKILL_FILE)).unwrap(), original, "复制失败不改变现有正文");
+        assert_eq!(fs::read_to_string(dest.join("notes.txt")).unwrap(), "旧附件");
+        drop(locked);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
