@@ -55,3 +55,15 @@ test("更新清单不接受 HTTP 降级下载", () => {
   insecure.platforms["windows-x86_64"].url = insecure.platforms["windows-x86_64"].url.replace("https:", "http:")
   assert.throws(() => verifyRelease({ version, tag, manifest: insecure, assets }), /官方仓库/)
 })
+
+test("Windows 应用的清单缺少 Windows 平台时拒绝发布", () => {
+  const missing = structuredClone(manifest)
+  delete missing.platforms["windows-x86_64"]
+  assert.throws(() => verifyRelease({ version, tag, manifest: missing, assets }), /Windows 平台/)
+})
+
+test("Windows 更新条目不能指向同版 Linux 安装包", () => {
+  const mismatch = structuredClone(manifest)
+  mismatch.platforms["windows-x86_64"] = mismatch.platforms["linux-x86_64"]
+  assert.throws(() => verifyRelease({ version, tag, manifest: mismatch, assets }), /Windows 安装包/)
+})

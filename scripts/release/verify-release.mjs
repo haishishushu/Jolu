@@ -28,9 +28,10 @@ export function verifyRelease({ version, tag, manifest, assets }) {
   }
   if (!names.has("latest.json")) throw new Error("缺少 latest.json")
 
-  const platforms = Object.values(manifest.platforms ?? {})
+  const platforms = Object.entries(manifest.platforms ?? {})
   if (platforms.length === 0) throw new Error("更新清单缺少平台")
-  for (const platform of platforms) {
+  if (!manifest.platforms["windows-x86_64"]) throw new Error("更新清单缺少 Windows 平台：windows-x86_64")
+  for (const [target, platform] of platforms) {
     const url = platform?.url
     if (typeof url !== "string") throw new Error("更新清单缺少下载地址")
     const parsed = new URL(url)
@@ -43,6 +44,9 @@ export function verifyRelease({ version, tag, manifest, assets }) {
     const name = decodeURIComponent(parsed.pathname.slice(marker.length))
     if (!name.startsWith(prefix) || !names.has(name)) {
       throw new Error(`更新清单下载地址对应的安装包不存在：${url}`)
+    }
+    if (target === "windows-x86_64" && name !== `${prefix}Windows-x86_64-Setup.exe`) {
+      throw new Error(`Windows 安装包与更新平台不匹配：${name}`)
     }
     const signature = platform.signature
     if (typeof signature !== "string" || !signature.trim()) throw new Error(`更新清单缺少签名：${name}`)
