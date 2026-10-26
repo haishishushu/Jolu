@@ -12,7 +12,7 @@ Tauri 2 + Rust + **React 19 + TypeScript + Vite + Tailwind CSS 4 + shadcn/ui** +
 
 ```bash
 pnpm install
-pnpm dev        # http://localhost:5173
+pnpm dev        # http://localhost:5173，被占用时顺延到下一个端口
 pnpm build      # 输出到 dist/，供 Tauri 打包
 pnpm typecheck
 ```

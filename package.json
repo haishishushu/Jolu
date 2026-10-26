@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "pnpm --dir frontend dev",
     "build": "pnpm --dir frontend build",
-    "tauri": "tauri",
+    "tauri": "node scripts/dev/tauri.mjs",
     "installer-art": "node scripts/installer-art/build.mjs"
   },
   "devDependencies": {

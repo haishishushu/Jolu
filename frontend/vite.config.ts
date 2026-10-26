@@ -8,8 +8,8 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
   },
-  // Tauri 开发时固定端口，构建产物输出到 dist 供 Tauri 打包
-  server: { port: 5173, strictPort: true },
+  // 5173 被占用时顺延到下一个端口；pnpm tauri dev 由 scripts/dev/tauri.mjs 选好端口后以 --strictPort 启动。构建产物输出到 dist 供 Tauri 打包
+  server: { port: 5173 },
   build: {
     outDir: "dist",
     emptyOutDir: true,

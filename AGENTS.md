@@ -50,7 +50,7 @@ docs/
   logo/                     品牌人物与应用图标母版（scripts/icons 的输入）
   assets/                   README 截图与社交预览图
 scripts/
-  acceptance/  icons/  installer-art/  release/
+  acceptance/  dev/  icons/  installer-art/  release/
 ```
 
 - 目录名和文档文件名：小写 kebab-case，不使用中文或空格。`README`、`AGENTS`、`CLAUDE` 等约定俗成的文件除外。
@@ -64,8 +64,8 @@ scripts/
 
 ```bash
 pnpm install && pnpm --dir frontend install
-pnpm dev                                    # 只启动前端预览，http://localhost:5173
-pnpm tauri dev                              # 启动桌面应用（自动拉起前端）
+pnpm dev                                    # 只启动前端预览，http://localhost:5173（被占用时顺延）
+pnpm tauri dev                              # 启动桌面应用（自动拉起前端；5173 被占用时由 scripts/dev/tauri.mjs 顺延端口并同步 devUrl）
 pnpm --dir frontend typecheck
 node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs # 前端纯逻辑与共享状态测试
 node --test scripts/release/*.test.mjs      # 发布脚本测试
