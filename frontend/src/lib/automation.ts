@@ -9,12 +9,12 @@ import type {
 export const DASH = "—"
 
 export function toolName(platform: string): string {
-  return platform === "codex" ? "Codex" : "Claude Code"
+  return platform === "codex" ? "Codex" : platform === "claude" ? "Claude Code" : DASH
 }
 
 /** 运行记录里的短名：「Claude · Momo」 */
 export function shortTool(platform: string): string {
-  return platform === "codex" ? "Codex" : "Claude"
+  return platform === "codex" ? "Codex" : platform === "claude" ? "Claude" : DASH
 }
 
 /** 账号文案：「Momo · 订阅」/「Key 1 · API Key」 */
@@ -92,7 +92,7 @@ export function untilText(ts: number, now: number): string {
 }
 
 export function runningMs(run: RunDto, now: number): number {
-  return run.exec_ms + (run.exec_started_at ? Math.max(0, now - run.exec_started_at) : 0)
+  return run.exec_ms + (run.status === "running" && run.exec_started_at ? Math.max(0, now - run.exec_started_at) : 0)
 }
 
 export function waitingMs(run: RunDto, now: number): number {

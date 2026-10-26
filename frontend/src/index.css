@@ -20,6 +20,40 @@
 /* 深色主题通过根元素 .dark 切换（附录 A.2：两套主题共用同一组变量名） */
 @custom-variant dark (&:is(.dark *));
 
+/* 敏感字段的柔化像素遮罩：仅生成纹理，不在遮罩下渲染真实文字。 */
+.privacy-mosaic {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  height: 1em;
+  overflow: hidden;
+  border-radius: 3px;
+  vertical-align: middle;
+  user-select: none;
+  pointer-events: none;
+  background: var(--jolu-side);
+  mask-image: linear-gradient(90deg, transparent, #000 3%, #000 97%, transparent);
+}
+.privacy-mosaic::before {
+  content: "";
+  position: absolute;
+  inset: 1px -2px;
+  opacity: 0.55;
+  background-image: repeating-linear-gradient(90deg, var(--jolu-muted) 0 3px, transparent 3px 5px, var(--jolu-muted) 5px 10px, transparent 10px 13px, var(--jolu-muted) 13px 15px, transparent 15px 19px);
+  background-size: 31px 100%;
+  filter: blur(1.2px);
+}
+.privacy-mosaic::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.55;
+  background-image: repeating-conic-gradient(var(--jolu-side) 0% 25%, transparent 0% 50%);
+  background-size: 6px 6px;
+}
+
 .settings-section { scroll-margin-top: var(--settings-scroll-offset, 77px); }
 #settings-data { min-height: calc(100dvh - 180px); }
 .unified-settings .setting-row .setting-control > div { flex-wrap: wrap; }

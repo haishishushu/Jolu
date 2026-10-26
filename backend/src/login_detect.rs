@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
-#[derive(Debug, Default, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct LoginDetection {
     pub found: bool,
     /// 凭证脱敏标识；本机来源平台没有凭证时为 None
@@ -26,6 +26,14 @@ pub fn detect(platform: &str) -> LoginDetection {
         "codex" => detect_codex(),
         other if crate::platforms::native(other) => detect_native(other),
         _ => LoginDetection { message: Some("该平台暂不支持订阅连接".into()), ..Default::default() },
+    }
+}
+
+pub(crate) fn detect_for_edition(platform: &str, edition: Option<&str>) -> LoginDetection {
+    if !matches!(platform,"qoder"|"workbuddy"|"trae") { return detect(platform); }
+    match native_accounts_for(platform,edition) {
+        Ok(accounts) => LoginDetection {found:true, account:if accounts.len()==1 {accounts[0].account.clone()} else {None}, sources:accounts.into_iter().map(|a|a.name.to_string()).collect(),..Default::default()},
+        Err(message) => LoginDetection {message:Some(message),..Default::default()},
     }
 }
 
@@ -140,6 +148,9 @@ fn parse_codex(auth: Option<&Value>) -> LoginDetection {
 }
 
 fn detect_native(platform: &str) -> LoginDetection {
+    if matches!(platform, "qoder" | "workbuddy" | "trae") {
+        return detect_for_edition(platform,None);
+    }
     let sources = crate::native_sources::sources(platform);
     let available: Vec<String> = sources.iter().filter(|s| s.available).map(|s| s.name.clone()).collect();
     if available.is_empty() {
@@ -147,6 +158,48 @@ fn detect_native(platform: &str) -> LoginDetection {
         return LoginDetection { message: Some(reason), ..Default::default() };
     }
     LoginDetection { found: true, sources: available, ..Default::default() }
+}
+
+pub(crate) struct NativeAccount {
+    pub source_id: &'static str,
+    pub name: &'static str,
+    pub account: Option<String>,
+}
+pub(crate) fn native_accounts_for(platform: &str, edition: Option<&str>) -> Result<Vec<NativeAccount>,String> {
+    let expected=match (platform,edition) {
+        (_,None) => None,
+        ("qoder",Some("cn")) => Some("native:qoder:cn"),
+        ("qoder",Some("global")) => Some("native:qoder:global"),
+        ("workbuddy",Some("cn")) => Some("native:workbuddy:main"),
+        ("workbuddy",Some("ai")) => Some("native:workbuddy:ai"),
+        ("trae",Some("cn")) => Some("native:trae:cn"),
+        ("trae",Some("global")) => Some("native:trae:ide"),
+        _ => return Err("未知的供应商账号区域".into()),
+    };
+    if crate::validation::isolated() { return Err("隔离环境不读取本机登录".into()); }
+    let mut result = Vec::new();
+    match platform {
+        "qoder" => for (edition,id,name) in [("cn","native:qoder:cn","Qoder 国内版"),("global","native:qoder:global","Qoder 国际版")] {
+            if expected.is_some_and(|expected|expected!=id) {continue;}
+            if let Ok(session) = crate::qoder_desktop::local_session(edition) { result.push(NativeAccount {source_id:id,name,account:session.account}); }
+            else if edition=="global" && crate::qoder_desktop::local_auth_missing(edition) {
+                // 仅 CLI 登录仍可被发现；没有桌面文件时才核实原 CLI 的只读账号接口。
+                if let crate::quota::QuotaState::Ok {account,..}=crate::qoder_quota::local_qoder_quota() {
+                    result.push(NativeAccount {source_id:id,name,account:account.and_then(|a|a.email)});
+                }
+            }
+        },
+        "workbuddy" => for (id,name) in [("native:workbuddy:main","WorkBuddy 国内版"),("native:workbuddy:ai","WorkBuddy 国际版")] {
+            if expected.is_some_and(|expected|expected!=id) {continue;}
+            if let Ok(account) = crate::workbuddy_quota::source_account(id) { result.push(NativeAccount {source_id:id,name,account}); }
+        },
+        "trae" => for (id,name) in [("native:trae:cn","Trae CN"),("native:trae:ide","Trae")] {
+            if expected.is_some_and(|expected|expected!=id) {continue;}
+            if let Ok(account)=crate::trae_quota::source_account(id) {result.push(NativeAccount{source_id:id,name,account});}
+        },
+        _ => return Err("该平台不使用此登录来源".into()),
+    }
+    if result.is_empty() { Err("未读取到有效的本地登录，请在对应官方客户端登录，或选择浏览器授权".into()) } else { Ok(result) }
 }
 
 pub(crate) fn jwt_payload(jwt: &str) -> Option<Value> {

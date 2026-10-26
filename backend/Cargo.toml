@@ -59,6 +59,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 # 本地代理（proxy.rs）的密钥摘要
 sha2 = "0.10"
+# 只读解码原工具已保存的本机登录（Trae / ZCode），不写回授权。
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+base64 = "0.22"
 # 本地代理（proxy.rs）：HTTP server 与异步流式转发。
 # hyper / tokio / http 已是 tauri 传递依赖，这里只显式声明需要的特性；
 # 运行时复用 tauri::async_runtime（内部即 tokio），不另起 runtime。

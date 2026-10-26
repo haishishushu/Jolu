@@ -33,46 +33,26 @@ pub(crate) enum PlanProvider {
     Volcengine,
 }
 
-impl PlanProvider {
-    /// 用户可读的套餐名（探测命中后的提示文案用）
-    pub(crate) fn display_name(&self) -> &'static str {
-        match self {
-            PlanProvider::ZhipuCn => "智谱 GLM（国内站）",
-            PlanProvider::ZhipuEn => "智谱 GLM（国际站）",
-            PlanProvider::Kimi => "Kimi",
-            PlanProvider::MiniMaxCn => "MiniMax（国内站）",
-            PlanProvider::MiniMaxEn => "MiniMax（国际站）",
-            PlanProvider::ZenMux => "ZenMux",
-            PlanProvider::OpencodeGo => "OpenCode Go",
-            PlanProvider::Volcengine => "火山方舟",
-        }
-    }
-}
-
 /// 按数据面 base_url 域名识别套餐供应商；不命中返回 None（维持 sub2api 路由）。
 /// 智谱团队版 base_url 与个人版相同，靠 extras 显式区分，不在此识别。
 pub(crate) fn detect_provider(base_url: &str) -> Option<PlanProvider> {
-    let url = base_url.to_lowercase();
-    if url.contains("api.kimi.com/coding") {
-        Some(PlanProvider::Kimi)
-    } else if url.contains("bigmodel.cn") {
-        Some(PlanProvider::ZhipuCn)
-    } else if url.contains("api.z.ai") {
-        Some(PlanProvider::ZhipuEn)
-    } else if url.contains("api.minimaxi.com") {
-        Some(PlanProvider::MiniMaxCn)
-    } else if url.contains("api.minimax.io") {
-        Some(PlanProvider::MiniMaxEn)
-    } else if url.contains("zenmux") {
-        Some(PlanProvider::ZenMux)
-    } else if url.contains("opencode.ai/zen/go") {
-        // 覆盖 /zen/go 与 /zen/go/v1；Zen 按量版（/zen/v1）无用量 API，刻意不命中
-        Some(PlanProvider::OpencodeGo)
-    } else if url.contains("volces.com/api/plan") || url.contains("volces.com/api/coding") {
-        // 仅套餐入口；/api/v3 与 /api/compatible 按量付费不命中
-        Some(PlanProvider::Volcengine)
-    } else {
-        None
+    let url = reqwest::Url::parse(base_url).ok()?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let host = url.host_str()?;
+    let path = url.path();
+    let under = |prefix: &str| path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'));
+    match host {
+        "api.kimi.com" if under("/coding") => Some(PlanProvider::Kimi),
+        "open.bigmodel.cn" | "bigmodel.cn" => Some(PlanProvider::ZhipuCn),
+        "api.z.ai" => Some(PlanProvider::ZhipuEn),
+        "api.minimaxi.com" => Some(PlanProvider::MiniMaxCn),
+        "api.minimax.io" => Some(PlanProvider::MiniMaxEn),
+        "zenmux.ai" | "api.zenmux.ai" => Some(PlanProvider::ZenMux),
+        "opencode.ai" if under("/zen/go") => Some(PlanProvider::OpencodeGo),
+        host if host.ends_with(".volces.com") && (under("/api/plan") || under("/api/coding")) => Some(PlanProvider::Volcengine),
+        _ => None,
     }
 }
 
@@ -94,31 +74,7 @@ pub(crate) fn coding_plan_quota(base_url: &str, api_key: &str) -> QuotaState {
     }
 }
 
-/* ─────────────── 套餐自动探测（中转/反代 base 的兜底识别） ─────────────── */
-
-/// 参与自动探测的套餐与探测优先级。火山需要独立 AK/SK、ZenMux 的用量地址就是
-/// 用户填写的 base_url 本身，都无法盲探，不参与。
-const PROBE_ORDER: [PlanProvider; 6] = [
-    PlanProvider::ZhipuCn,
-    PlanProvider::ZhipuEn,
-    PlanProvider::Kimi,
-    PlanProvider::MiniMaxCn,
-    PlanProvider::MiniMaxEn,
-    PlanProvider::OpencodeGo,
-];
-
-/// 按探测优先级挑第一个查询成功的套餐；全不中返回 None。
-/// 探测请求并行发出，完成顺序不定，必须按 PROBE_ORDER 取优先级最高的命中。
-fn pick_probe_hit(results: &[(PlanProvider, QuotaState)]) -> Option<PlanProvider> {
-    PROBE_ORDER.iter().find_map(|p| {
-        results
-            .iter()
-            .any(|(hit, s)| hit == p && matches!(s, QuotaState::Ok { .. }))
-            .then_some(*p)
-    })
-}
-
-/// 按已识别的套餐直接查询（跳过探测）。查询端点全部是固定官方域名，与用户的
+/// 按原工具配置已明确识别的套餐直接查询。查询端点全部是固定官方域名，与用户的
 /// base_url 无关——中转/反代 base 不影响套餐查询。
 pub(crate) fn query_plan_direct(provider: PlanProvider, api_key: &str) -> QuotaState {
     match provider {
@@ -128,48 +84,11 @@ pub(crate) fn query_plan_direct(provider: PlanProvider, api_key: &str) -> QuotaS
         PlanProvider::MiniMaxCn => query_minimax(api_key, true),
         PlanProvider::MiniMaxEn => query_minimax(api_key, false),
         PlanProvider::OpencodeGo => query_opencode_go(api_key),
-        // 不参与探测的两种：调用方不会传入，防御性返回
+        // 需要地址或独立凭证的平台：调用方不会传入，防御性返回
         PlanProvider::ZenMux | PlanProvider::Volcengine => QuotaState::Unsupported {
             reason: "该套餐无法自动识别，请将 base_url 填写为套餐官方地址".into(),
         },
     }
-}
-
-fn probe_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, PlanProvider>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PlanProvider>>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// 逐家用官方端点并行试查，识别 key 所属的编程套餐，命中结果进程内缓存。
-/// 仅在 sub2api 账单端点 404（中转/反代 base 按域名认不出套餐）时调用：
-/// 这类网关的 key 往往就是某家套餐的官方 key（实测智谱套餐经本地中转即如此）。
-/// 探测只发各家的正常用量查询（只读 GET），401/404 视为「不是这家」。
-pub(crate) fn probe_plan_cached(api_key: &str) -> Option<PlanProvider> {
-    if let Ok(cache) = probe_cache().lock() {
-        if let Some(hit) = cache.get(api_key) {
-            return Some(*hit);
-        }
-    }
-    let mut handles = Vec::new();
-    for provider in PROBE_ORDER {
-        let key = api_key.to_string();
-        handles.push(std::thread::spawn(move || {
-            let state = query_plan_direct(provider, &key);
-            (provider, state)
-        }));
-    }
-    let mut results = Vec::new();
-    for handle in handles {
-        if let Ok(pair) = handle.join() {
-            results.push(pair);
-        }
-    }
-    let hit = pick_probe_hit(&results)?;
-    if let Ok(mut cache) = probe_cache().lock() {
-        cache.insert(api_key.to_string(), hit);
-    }
-    Some(hit)
 }
 
 /* ─────────────────────── 智谱 GLM ─────────────────────── */
@@ -178,7 +97,7 @@ pub(crate) fn probe_plan_cached(api_key: &str) -> Option<PlanProvider> {
 const ZHIPU_QUOTA_PATH: &str = "/api/monitor/usage/quota/limit";
 
 fn zhipu_quota_base(base_url: &str) -> &'static str {
-    if base_url.to_lowercase().contains("bigmodel.cn") { "https://open.bigmodel.cn" } else { "https://api.z.ai" }
+    if matches!(detect_provider(base_url), Some(PlanProvider::ZhipuCn)) { "https://open.bigmodel.cn" } else { "https://api.z.ai" }
 }
 
 fn millis_to_iso(ms: i64) -> Option<String> {
@@ -206,7 +125,7 @@ struct ZhipuEntry {
 
 /// 智谱条目按 `unit` 显式分类：3=5 小时滚动窗，6=周窗（number 有 5/7/1 多种实测，
 /// 只锚定 unit）。缺失或不识别时走兜底：无 reset 优先归 5h，其余按 reset 升序补位。
-fn parse_zhipu_windows(data: &serde_json::Value) -> (Vec<QuotaWindow>, Option<String>) {
+pub(crate) fn parse_zhipu_windows(data: &serde_json::Value) -> (Vec<QuotaWindow>, Option<String>) {
     let classify = |item: &serde_json::Value| match item.get("unit").and_then(|v| v.as_i64()) {
         Some(3) => Some(0usize), // 0 = 5h 槽位
         Some(6) => Some(1usize), // 1 = 周槽位
@@ -270,11 +189,28 @@ fn parse_zhipu_windows(data: &serde_json::Value) -> (Vec<QuotaWindow>, Option<St
     (windows, level)
 }
 
-/// query 的解析半区（业务错误 → Failed），供查询与单测共用。
+fn business_code(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|value| value.as_i64().or_else(|| value.as_str()?.trim().parse().ok()))
+}
+
+/// 上游错误文本可能回显凭证，只向界面返回固定文案和安全的数字业务码。
+fn business_failure(provider: &str, code: Option<&serde_json::Value>) -> QuotaState {
+    let reason = match business_code(code) {
+        Some(code) => format!("{provider} 套餐接口错误（业务码 {code}）"),
+        None => format!("{provider} 套餐接口返回业务错误"),
+    };
+    QuotaState::Failed { reason }
+}
+
+/// query 的解析半区：仅已核实的无套餐响应归为不支持，其余业务错误保持 Failed。
 fn zhipu_state_from_body(body: &serde_json::Value) -> QuotaState {
     if body.get("success").and_then(|v| v.as_bool()) == Some(false) {
-        let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-        return QuotaState::Failed { reason: format!("智谱套餐接口错误: {msg}") };
+        if business_code(body.get("code")) == Some(500)
+            && body.get("msg").and_then(|value| value.as_str()) == Some("当前用户不存在coding plan")
+        {
+            return QuotaState::Unsupported { reason: "当前凭证未关联 Coding Plan，无法查询套餐额度".into() };
+        }
+        return business_failure("智谱", body.get("code"));
     }
     let Some(data) = body.get("data") else {
         return QuotaState::Failed { reason: "智谱套餐响应缺少 data 字段".into() };
@@ -414,6 +350,17 @@ fn parse_minimax_windows(body: &serde_json::Value) -> Vec<QuotaWindow> {
     windows
 }
 
+fn minimax_state_from_body(body: &serde_json::Value) -> QuotaState {
+    if let Some(base_resp) = body.get("base_resp") {
+        if business_code(base_resp.get("status_code")) != Some(0) {
+            return business_failure("MiniMax", base_resp.get("status_code"));
+        }
+    }
+    let windows = parse_minimax_windows(body);
+    if windows.is_empty() { QuotaState::Failed { reason: "MiniMax 未返回可识别的额度窗口".into() } }
+    else { QuotaState::Ok { windows, plan: None, account: None } }
+}
+
 fn query_minimax(api_key: &str, cn: bool) -> QuotaState {
     let host = if cn { "api.minimaxi.com" } else { "api.minimax.io" };
     let c = match quota::client() { Ok(c) => c, Err(e) => return QuotaState::Failed { reason: e } };
@@ -424,18 +371,7 @@ fn query_minimax(api_key: &str, cn: bool) -> QuotaState {
     {
         Ok(r) => match quota::read(r) {
             quota::HttpOutcome::Body(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                Ok(v) => {
-                    if let Some(base_resp) = v.get("base_resp") {
-                        let code = base_resp.get("status_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-                        if code != 0 {
-                            let msg = base_resp.get("status_msg").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-                            return QuotaState::Failed { reason: format!("MiniMax 套餐接口错误（code {code}）: {msg}") };
-                        }
-                    }
-                    let windows = parse_minimax_windows(&v);
-                    if windows.is_empty() { QuotaState::Failed { reason: "MiniMax 未返回可识别的额度窗口".into() } }
-                    else { QuotaState::Ok { windows, plan: None, account: None } }
-                }
+                Ok(v) => minimax_state_from_body(&v),
                 Err(e) => QuotaState::Failed { reason: format!("MiniMax 用量响应格式无法解析: {e}") },
             },
             quota::HttpOutcome::Unauthorized(reason) => QuotaState::Unauthorized { reason },
@@ -481,6 +417,20 @@ fn parse_zenmux_windows(data: &serde_json::Value) -> (Vec<QuotaWindow>, Option<S
     (windows, plan)
 }
 
+fn zenmux_state_from_body(body: &serde_json::Value) -> QuotaState {
+    if body.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        return business_failure("ZenMux", body.get("code"));
+    }
+    match body.get("data") {
+        Some(data) => {
+            let (windows, plan) = parse_zenmux_windows(data);
+            if windows.is_empty() { QuotaState::Failed { reason: "ZenMux 未返回可识别的额度窗口".into() } }
+            else { QuotaState::Ok { windows, plan, account: None } }
+        }
+        None => QuotaState::Failed { reason: "ZenMux 响应缺少 data 字段".into() },
+    }
+}
+
 fn query_zenmux(base_url: &str, api_key: &str) -> QuotaState {
     let c = match quota::client() { Ok(c) => c, Err(e) => return QuotaState::Failed { reason: e } };
     match c.get(base_url)
@@ -490,20 +440,7 @@ fn query_zenmux(base_url: &str, api_key: &str) -> QuotaState {
     {
         Ok(r) => match quota::read(r) {
             quota::HttpOutcome::Body(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                Ok(v) => {
-                    if v.get("success").and_then(|v| v.as_bool()) != Some(true) {
-                        let msg = v.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown error");
-                        return QuotaState::Failed { reason: format!("ZenMux 套餐接口错误: {msg}") };
-                    }
-                    match v.get("data") {
-                        Some(data) => {
-                            let (windows, plan) = parse_zenmux_windows(data);
-                            if windows.is_empty() { QuotaState::Failed { reason: "ZenMux 未返回可识别的额度窗口".into() } }
-                            else { QuotaState::Ok { windows, plan, account: None } }
-                        }
-                        None => QuotaState::Failed { reason: "ZenMux 响应缺少 data 字段".into() },
-                    }
-                }
+                Ok(v) => zenmux_state_from_body(&v),
                 Err(e) => QuotaState::Failed { reason: format!("ZenMux 用量响应格式无法解析: {e}") },
             },
             quota::HttpOutcome::Unauthorized(reason) => QuotaState::Unauthorized { reason },
@@ -586,31 +523,73 @@ fn query_opencode_go(api_key: &str) -> QuotaState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota::QuotaWindow;
 
     #[test]
-    fn pick_probe_hit_prefers_priority_order_over_completion_order() {
-        let ok = |key: &str| QuotaState::Ok { windows: vec![QuotaWindow {
-            key: key.into(), window_name: "w".into(), used_percent: Some(1.0), amount_text: None, remaining_text: None, resets_at: None,
-        }], plan: None, account: None };
-        let failed = |reason: &str| QuotaState::Failed { reason: reason.into() };
-        // 完成顺序打乱：低优先级先完成也必须按 PROBE_ORDER 优先级取智谱
-        let results = vec![
-            (PlanProvider::OpencodeGo, ok("go")),
-            (PlanProvider::ZhipuEn, ok("zai")),
-            (PlanProvider::ZhipuCn, ok("bigmodel")),
-        ];
-        assert!(matches!(pick_probe_hit(&results), Some(PlanProvider::ZhipuCn)));
-        // 首选全部失败时取优先级最高的成功项
-        let results = vec![
-            (PlanProvider::ZhipuCn, failed("401")),
-            (PlanProvider::MiniMaxCn, ok("minimax")),
-        ];
-        assert!(matches!(pick_probe_hit(&results), Some(PlanProvider::MiniMaxCn)));
-        // 全不中
-        let results = vec![(PlanProvider::Kimi, failed("401"))];
-        assert!(pick_probe_hit(&results).is_none());
-        assert!(pick_probe_hit(&[]).is_none());
+    fn verified_no_plan_is_unsupported_but_other_business_failures_stay_failed() {
+        let no_plan = zhipu_state_from_body(&serde_json::json!({"code":500,"success":false,"msg":"当前用户不存在coding plan"}));
+        assert!(matches!(no_plan, QuotaState::Unsupported { .. }));
+        for message in ["other failure", "当前用户不存在coding plan synthetic-secret"] {
+            assert!(matches!(zhipu_state_from_body(&serde_json::json!({"code":500,"success":false,"msg":message})), QuotaState::Failed { .. }));
+        }
+    }
+
+    #[test]
+    fn business_error_messages_never_echo_credentials_and_only_keep_numeric_codes() {
+        for code in [serde_json::json!(500), serde_json::json!("500"), serde_json::json!("synthetic-secret")] {
+            let states = [
+                zhipu_state_from_body(&serde_json::json!({"success":false,"code":code,"msg":"synthetic-secret"})),
+                minimax_state_from_body(&serde_json::json!({"base_resp":{"status_code":code,"status_msg":"synthetic-secret"}})),
+                zenmux_state_from_body(&serde_json::json!({"success":false,"code":code,"message":"synthetic-secret"})),
+            ];
+            for state in states {
+                let QuotaState::Failed { reason } = state else { panic!("unknown business failure must remain failed") };
+                assert!(!reason.contains("synthetic-secret"));
+                if code != serde_json::json!("synthetic-secret") { assert!(reason.contains("500")); }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "需要鼠鼠授权：只读查询本机已配置的智谱套餐，只输出 HTTP 状态、数字业务码及字段是否存在"]
+    fn local_zhipu_response_classification() {
+        let key = crate::creds::read_secret("claude", "api").expect("缺少本机 API 凭证");
+        let base = crate::creds::local_base_url("claude", "api").expect("缺少本机 API 地址");
+        assert!(matches!(detect_provider(&base), Some(PlanProvider::ZhipuCn | PlanProvider::ZhipuEn)), "当前配置不是此测试支持的套餐");
+        let client = quota::client().unwrap_or_else(|_| panic!("client_initialization_failed"));
+        let response = client.get(format!("{}{ZHIPU_QUOTA_PATH}", zhipu_quota_base(&base)))
+            .header("Authorization", &key)
+            .header("Content-Type", "application/json")
+            .header("Accept-Language", "en-US,en")
+            .send().unwrap_or_else(|_| panic!("network_request_failed"));
+        println!("Coding plan diagnostic: http_status={}", response.status().as_u16());
+        let body: serde_json::Value = response.json().unwrap_or_else(|_| panic!("json_parse_failed"));
+        let business_code = body.get("code").and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse::<i64>().ok()));
+        let success = body.get("success").and_then(serde_json::Value::as_bool);
+        println!("Coding plan diagnostic: business_code={business_code:?} success={success:?} data_present={}", body.get("data").is_some_and(|value| !value.is_null()));
+        let message_class = match body.get("msg").and_then(serde_json::Value::as_str) {
+            Some("当前用户不存在coding plan") => "no_coding_plan",
+            Some("系统异常" | "系统错误" | "系统繁忙，请稍后重试") => "server_error",
+            _ => "unclassified",
+        };
+        println!("Coding plan diagnostic: message_class={message_class}");
+        assert_eq!(success, Some(true), "business_response_not_successful");
+    }
+
+    #[test]
+    fn provider_detection_requires_an_exact_official_https_host_and_path() {
+        for base in [
+            "https://open.bigmodel.cn.evil.test/api/anthropic",
+            "https://gateway.test/api.z.ai/v1",
+            "https://gateway.test/?upstream=api.minimaxi.com",
+            "https://api.z.ai@gateway.test/v1",
+            "https://notzenmux.test/v1",
+            "http://open.bigmodel.cn/api/anthropic",
+            "https://api.kimi.com/coding-other/v1",
+            "https://opencode.ai/zen/gopher/v1",
+            "https://ark.cn-beijing.volces.com/api/planless/v3",
+        ] {
+            assert!(detect_provider(base).is_none(), "误识别地址：{base}");
+        }
     }
 
     #[test]
@@ -639,6 +618,12 @@ mod tests {
         // DouBaoSeed 按量付费路径不命中
         assert!(detect_provider("https://ark.cn-beijing.volces.com/api/v3").is_none());
         assert!(detect_provider("").is_none());
+    }
+
+    #[test]
+    fn zhipu_quota_region_ignores_domain_names_in_query_parameters() {
+        assert_eq!(zhipu_quota_base("https://api.z.ai/api/anthropic?hint=bigmodel.cn"), "https://api.z.ai");
+        assert_eq!(zhipu_quota_base("https://open.bigmodel.cn/api/anthropic?hint=api.z.ai"), "https://open.bigmodel.cn");
     }
 
     #[test]

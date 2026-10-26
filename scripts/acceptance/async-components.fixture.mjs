@@ -61,6 +61,7 @@ window.fixture = {
     const detail = demoTaskDetail(24, now)
     detail.item = { ...detail.item, connection_id: connectionId,
       active: { ...detail.item.active, connection_id: connectionId, last_check_at: check } }
+    detail.execution = { ...detail.execution, connection_id: connectionId }
     render(TaskDetail, {
       detail, now, account: { name: `合成账号 ${connectionId}`, kind: "auth" },
       onBack: noop, onAction: async () => {}, onEdit: noop, onCancel: noop, onDelete: noop,

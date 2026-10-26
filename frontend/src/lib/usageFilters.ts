@@ -2,15 +2,15 @@
  * 用量统计的账号筛选（画板 38「账号筛选」）：多选；切换供应商后清除不适用的账号。
  * 「未归属账号」与后端 `usage_stats::UNATTRIBUTED` 对应，指没有归账到任何连接的本机记录。
  */
-import { providerEntry } from "./providerCatalog.ts"
+import { connectionProviderEntry } from "./providerCatalog.ts"
 import type { Connection, PlatformId } from "../types"
 
 export const UNATTRIBUTED_ACCOUNT = "__unattributed__"
 
-type Account = Pick<Connection, "id" | "platformId" | "baseName">
+type Account = Pick<Connection, "id" | "platformId" | "baseName"> & { edition?: string | null }
 
 export function accountLabel(account: Account): string {
-  return `${account.baseName} · ${providerEntry(account.platformId).name}`
+  return `${account.baseName} · ${connectionProviderEntry(account).name}`
 }
 
 export function accountsTriggerLabel(value: readonly string[], accounts: readonly Account[]): string {

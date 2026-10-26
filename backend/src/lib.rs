@@ -35,6 +35,19 @@ mod quota;
 mod coding_plan;
 mod grok_quota;
 mod zcode_quota;
+mod gemini_quota;
+mod gateway_balance;
+mod service_balance;
+mod trae_quota;
+mod workbuddy_quota;
+mod qoder_quota;
+mod qoder_desktop;
+mod provider_browser_auth;
+mod workbuddy_browser_auth;
+mod trae_browser_auth;
+mod grok_browser_auth;
+mod zcode_browser_auth;
+mod cli_browser_auth;
 mod settings;
 mod session_titles;
 mod watcher;
@@ -333,6 +346,37 @@ mod responsiveness_tests {
     }
 
     #[test]
+    fn native_quota_cache_tracks_login_changes_and_logout() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let login = Mutex::new(Some("account-a".to_string()));
+        let calls = AtomicUsize::new(0);
+        let identity = || login.lock().unwrap().clone().ok_or(quota::QuotaState::Unauthorized {reason:"已退出登录".into()});
+        let query = || { calls.fetch_add(1, Ordering::SeqCst); quota::QuotaState::Ok { windows:vec![],plan:login.lock().unwrap().clone(),account:None } };
+        for expected in ["account-a", "account-a", "account-b"] {
+            *login.lock().unwrap() = Some(expected.into());
+            let state = cached_native_quota(&cache,"native-test".into(),Refresh::Cached,identity,query);
+            assert!(matches!(state, quota::QuotaState::Ok{plan:Some(ref plan),..} if plan == expected));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "同一登录去重，换登录重新查询");
+        *login.lock().unwrap() = None;
+        assert!(matches!(cached_native_quota(&cache,"native-test".into(),Refresh::Cached,identity,query), quota::QuotaState::Unauthorized{..}));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn native_quota_cache_discards_login_switch_during_request() {
+        let cache = QueryCache::default();
+        let login = Mutex::new("before".to_string());
+        let state = cached_native_quota(&cache,"native-test".into(),Refresh::Cached,||Ok(login.lock().unwrap().clone()),|| {
+            *login.lock().unwrap() = "after".into();
+            quota::QuotaState::Ok {windows:vec![],plan:Some("before".into()),account:None}
+        });
+        assert!(matches!(state,quota::QuotaState::Failed{..}), "迟到数据不能交给新登录");
+        assert!(!cache.state.lock().unwrap().entries.contains_key("native-test"));
+    }
+
+    #[test]
     fn single_scan_failure_does_not_mark_collection_broken_but_persistent_does() {
         let errors = vec!["rollout-x.jsonl: boom".to_string()];
         // 首次失败：可能是写入竞争的瞬时错误，不置异常
@@ -400,6 +444,8 @@ struct QueryCacheState<T> {
     in_flight: HashSet<String>,
     failures: HashMap<String, u32>,
     generations: HashMap<String, u64>,
+    /// 原工具登录的单向摘要，仅内存使用；不包含或输出令牌。
+    identities: HashMap<String, String>,
 }
 
 impl<T> Default for QueryCacheState<T> {
@@ -409,6 +455,7 @@ impl<T> Default for QueryCacheState<T> {
             in_flight: HashSet::new(),
             failures: HashMap::new(),
             generations: HashMap::new(),
+            identities: HashMap::new(),
         }
     }
 }
@@ -525,6 +572,40 @@ fn retry_after_seconds(reason: &str) -> u64 {
         .unwrap_or(60)
 }
 
+fn cached_native_quota(
+    cache: &QueryCache<quota::QuotaState>, key: String, refresh: Refresh,
+    identity: impl Fn() -> Result<String, quota::QuotaState>, query: impl FnOnce() -> quota::QuotaState,
+) -> quota::QuotaState {
+    let before = match identity() {
+        Ok(identity) => identity,
+        Err(state) => { bind_native_identity(cache, &key, None); return state; }
+    };
+    bind_native_identity(cache, &key, Some(&before));
+    let state = cached_query(cache, key.clone(), refresh, quota_cache_outcome, query);
+    match identity() {
+        Ok(after) if after == before => state,
+        Ok(after) => {
+            bind_native_identity(cache, &key, Some(&after));
+            quota::QuotaState::Failed { reason: "原工具登录在查询期间发生变化，请刷新账号数据".into() }
+        }
+        Err(state) => { bind_native_identity(cache, &key, None); state }
+    }
+}
+
+fn bind_native_identity(cache: &QueryCache<quota::QuotaState>, key: &str, identity: Option<&str>) {
+    if let Ok(mut state) = cache.state.lock() {
+        if identity.is_some() && state.identities.get(key).map(String::as_str) == identity { return; }
+        match identity {
+            Some(identity) => { state.identities.insert(key.into(), identity.into()); }
+            None => { state.identities.remove(key); }
+        }
+        state.entries.remove(key);
+        state.failures.remove(key);
+        let next = state.generations.get(key).copied().unwrap_or(0).wrapping_add(1);
+        state.generations.insert(key.into(), next);
+    }
+}
+
 fn quota_cache_outcome(value: &quota::QuotaState) -> CacheOutcome {
     match value {
         quota::QuotaState::Ok { .. } => CacheOutcome::Success,
@@ -561,6 +642,7 @@ fn invalidate_network_cache(id: &str) {
         if let Ok(mut state) = cache.state.lock() {
             state.entries.remove(id);
             state.failures.remove(id);
+            state.identities.remove(id);
             let next = state.generations.get(id).copied().unwrap_or(0).wrapping_add(1);
             state.generations.insert(id.to_string(), next);
         }
@@ -1193,10 +1275,65 @@ async fn connection_quota(app: tauri::AppHandle, db: State<'_, Db>, id: String, 
     }).await? else {
         return Ok(quota::QuotaState::Failed { reason: "连接不存在".into() });
     };
-    // 自定义供应商（任务 3.4）不查额度，与本机来源平台一样返回「不支持」
-    if platforms::uses_native_quota(&c.platform,&c.kind) || c.platform == "custom" {
-        if c.platform == "grok" && c.kind == "auth" {
-            return tauri::async_runtime::spawn_blocking(move || cached_query(&QUOTA_CACHE,id,force,quota_cache_outcome,grok_quota::local_grok_quota)).await.map_err(|e|e.to_string());
+    let expected = c.clone();
+    if c.kind == "auth" && provider_browser_auth::is_browser(c.secret.as_deref()) {
+        if validation::isolated() {
+            return Ok(quota::QuotaState::Unauthorized { reason: "隔离验收不读取浏览器真实授权".into() });
+        }
+        let cache_id = id.clone();
+        let state = tauri::async_runtime::spawn_blocking(move || {
+            match provider_browser_auth::load(&cache_id, &c.platform, c.secret.as_deref().unwrap_or_default()) {
+                Ok(credential) => cached_query(&QUOTA_CACHE, cache_id, force, quota_cache_outcome, || credential.query()),
+                Err(reason) => quota::QuotaState::Unauthorized { reason },
+            }
+        }).await.map_err(|_| "浏览器账号查询异常")?;
+        return finish_quota_query(app, pool, id, expected, state).await;
+    }
+    // 只有原工具登录走本机来源；自定义及各平台 API 连接按其实际地址查询。
+    if platforms::uses_native_quota(&c.platform,&c.kind) {
+        if validation::isolated() {
+            return Ok(quota::QuotaState::Unauthorized { reason: "隔离验收不读取原工具的真实登录".into() });
+        }
+        if c.kind == "auth" && (matches!(c.platform.as_str(), "trae" | "workbuddy" | "qoder") || id == "monitor:native:zcode:account") {
+            let cache_id = id.clone();
+            let source_id = native_sources::monitor_id(&id).unwrap_or_default().to_string();
+            let platform = c.platform.clone();
+            let state = tauri::async_runtime::spawn_blocking(move || {
+                // CLI 的登录由原工具管理，无法可靠取得身份摘要时不复用跨请求结果。
+                if platform == "qoder" {
+                    if source_id == "native:qoder:cn" {
+                        return cached_native_quota(&QUOTA_CACHE,cache_id,force,
+                            || qoder_desktop::source_identity(&source_id),
+                            || qoder_quota::source_quota(&source_id));
+                    }
+                    return qoder_quota::source_quota(&source_id);
+                }
+                cached_native_quota(&QUOTA_CACHE, cache_id, force,
+                    || match platform.as_str() {
+                        "trae" => trae_quota::source_identity(&source_id),
+                        "workbuddy" => workbuddy_quota::source_identity(&source_id),
+                        _ => zcode_quota::account_identity(),
+                    },
+                    || match platform.as_str() {
+                        "trae" => trae_quota::source_quota(&source_id),
+                        "workbuddy" => workbuddy_quota::source_quota(&source_id),
+                        _ => zcode_quota::local_zcode_account_quota(),
+                    })
+            }).await.map_err(|e| e.to_string())?;
+            return finish_quota_query(app, pool, id, expected, state).await;
+        }
+        // 本机登录的订阅账号：直接读原工具的登录状态查询（各模块只读、不写回凭证）
+        let local: Option<fn() -> quota::QuotaState> = match (c.platform.as_str(), c.kind.as_str()) {
+            ("grok", "auth") => Some(grok_quota::local_grok_quota),
+            ("gemini", "auth") => Some(gemini_quota::local_gemini_quota),
+            ("opencode", "auth") => Some(opencode::local_openai_quota),
+            ("zcode", "auth") => Some(zcode_quota::local_zcode_quota),
+            _ => None,
+        };
+        if let Some(local) = local {
+            // 这些来源没有保存到连接表的凭据快照，不能仅凭固定连接id缓存另一个本机登录。
+            let state = tauri::async_runtime::spawn_blocking(local).await.map_err(|e|e.to_string())?;
+            return finish_quota_query(app, pool, id, expected, state).await;
         }
         return Ok(quota::QuotaState::Unsupported {reason:platforms::limitation(&c.platform)});
     }
@@ -1223,20 +1360,8 @@ async fn connection_quota(app: tauri::AppHandle, db: State<'_, Db>, id: String, 
                 if coding_plan::detect_provider(base).is_some() {
                     coding_plan::coding_plan_quota(base, &secret)
                 } else {
-                    let state = quota::sub2api_quota(base, &secret);
-                    // 404 = 网关没有 sub2api 账单端点（Claude 式反代、本地中转）：
-                    // key 往往就是某家编程套餐的官方 key，探测识别后直接走套餐查询
-                    match &state {
-                        quota::QuotaState::Unsupported { reason }
-                            if reason == quota::S2_ENDPOINT_MISSING =>
-                        {
-                            match coding_plan::probe_plan_cached(&secret) {
-                                Some(provider) => coding_plan::query_plan_direct(provider, &secret),
-                                None => state,
-                            }
-                        }
-                        _ => state,
-                    }
+                    // 未知网关只向用户配置的服务查询，不将它的密钥发送给其他供应商试探。
+                    quota::sub2api_quota(base, &secret)
                 }
             }
             _ => match (c.platform.as_str(), c.kind.as_str()) {
@@ -1252,15 +1377,20 @@ async fn connection_quota(app: tauri::AppHandle, db: State<'_, Db>, id: String, 
         },
     )).await.map_err(|e| e.to_string())?;
 
-    let check_id = id.clone();
-    with_database(pool.clone(), move |conn| connections::query_creds(conn, &check_id).map(|_| ())).await?;
+    finish_quota_query(app, pool, id, expected, state).await
+}
+
+/// 原生平台与保存凭证的查询共用收尾，在同一数据库锁中核对查询归属并记录状态。
+async fn finish_quota_query(
+    app: tauri::AppHandle, pool: Arc<Mutex<rusqlite::Connection>>, id: String,
+    expected: connections::Creds, state: quota::QuotaState,
+) -> Result<quota::QuotaState, String> {
     let update_id = id.clone();
     let success = matches!(state, quota::QuotaState::Ok { .. });
     let unauthorized = matches!(state, quota::QuotaState::Unauthorized { .. });
-    if success || unauthorized {
-        let changed = with_database(pool, move |conn| connections::record_query_status(conn, &update_id, success)).await?;
-        if changed { let _ = app.emit("connections-changed", ()); }
-    }
+    let outcome = (success || unauthorized).then_some(success);
+    let changed = with_database(pool, move |conn| connections::record_query_result(conn, &update_id, &expected, outcome)).await?;
+    if changed { let _ = app.emit("connections-changed", ()); }
     if app.state::<Cfg>().0.get().island_connection_id.as_deref() == Some(id.as_str()) {
         update_tray_icon(&app);
     }
@@ -1301,6 +1431,7 @@ async fn connection_api_usage(app: tauri::AppHandle, db: State<'_, Db>, id: Stri
     }).await? else {
         return Ok(quota::ApiUsageState::Failed { reason: "连接不存在".into() });
     };
+    let expected = c.clone();
     if c.kind != "api" {
         return Ok(quota::ApiUsageState::Unsupported {
             reason: "Auth 连接使用订阅额度与本机会话统计，不查询组织 API 用量".into(),
@@ -1335,15 +1466,11 @@ async fn connection_api_usage(app: tauri::AppHandle, db: State<'_, Db>, id: Stri
             },
         },
     )).await.map_err(|e| e.to_string())?;
-    let check_id = id.clone();
-    with_database(pool.clone(), move |conn| connections::query_creds(conn, &check_id).map(|_| ())).await?;
     let valid = matches!(state, quota::ApiUsageState::Ok { .. });
     let unauthorized = matches!(state, quota::ApiUsageState::Unauthorized { .. });
-    if valid || unauthorized {
-        let update_id = id;
-        let changed = with_database(pool, move |conn| connections::record_query_status(conn, &update_id, valid)).await?;
-        if changed { let _ = app.emit("connections-changed", ()); }
-    }
+    let outcome = (valid || unauthorized).then_some(valid);
+    let changed = with_database(pool, move |conn| connections::record_query_result(conn, &id, &expected, outcome)).await?;
+    if changed { let _ = app.emit("connections-changed", ()); }
     Ok(state)
 }
 
@@ -1359,8 +1486,9 @@ async fn connection_balance(app: tauri::AppHandle, db: State<'_, Db>, id: String
     }).await? else {
         return Ok(quota::BalanceState::Failed { reason: "连接不存在".into() });
     };
-    // 自定义供应商（任务 3.4）不查余额：显示「不支持查询」
-    if platforms::uses_native_quota(&c.platform,&c.kind) || c.platform == "custom" {
+    let expected = c.clone();
+    // 自定义供应商复用同源余额适配器；本机订阅平台没有通用钱包余额。
+    if platforms::uses_native_quota(&c.platform,&c.kind) {
         return Ok(quota::BalanceState::Unsupported {reason:platforms::limitation(&c.platform)});
     }
     let Some(secret) = c.secret.filter(|s| !s.trim().is_empty()) else {
@@ -1382,40 +1510,23 @@ async fn connection_balance(app: tauri::AppHandle, db: State<'_, Db>, id: String
     }
     let cache_id = id.clone();
     let state = tauri::async_runtime::spawn_blocking(move || {
-        let state = cached_query(
+        cached_query(
             &BALANCE_CACHE,
             cache_id,
             force,
             balance_cache_outcome,
-            || quota::sub2api_balance(&base, &secret),
-        );
-        // 404 = 网关没有 sub2api 账单端点：识别 key 所属套餐，指明「不支持」而非「失败」
-        match &state {
-            quota::BalanceState::Unsupported { reason } if reason == quota::S2_ENDPOINT_MISSING => {
-                match coding_plan::probe_plan_cached(&secret) {
-                    Some(provider) => quota::BalanceState::Unsupported {
-                        reason: format!(
-                            "{}套餐未提供钱包余额接口，请看订阅额度窗口",
-                            provider.display_name()
-                        ),
-                    },
-                    None => state,
-                }
-            }
-            _ => state,
-        }
+            || service_balance::query(&base, &secret),
+        )
     })
         .await.map_err(|e| e.to_string())?;
-    let check_id = id.clone();
-    with_database(pool.clone(), move |conn| connections::query_creds(conn, &check_id).map(|_| ())).await?;
-    // 任务 2.5：余额跌破提醒阈值时通知一次
-    if let quota::BalanceState::Ok { balance, currency, .. } = &state { notify::check_balance(&app, &id, &c.name, *balance, currency); }
     let success = matches!(state, quota::BalanceState::Ok { .. });
     let unauthorized = matches!(state, quota::BalanceState::Unauthorized { .. });
-    if success || unauthorized {
-        let changed = with_database(pool, move |conn| connections::record_query_status(conn, &id, success)).await?;
-        if changed { let _ = app.emit("connections-changed", ()); }
-    }
+    let outcome = (success || unauthorized).then_some(success);
+    let update_id = id.clone();
+    let changed = with_database(pool, move |conn| connections::record_query_result(conn, &update_id, &expected, outcome)).await?;
+    if changed { let _ = app.emit("connections-changed", ()); }
+    // 仅仍属于当前凭证的余额可以触发提醒。
+    if let quota::BalanceState::Ok { balance, currency, .. } = &state { notify::check_balance(&app, &id, &c.name, *balance, currency); }
     Ok(state)
 }
 
@@ -1566,6 +1677,20 @@ async fn verify_custom_model(base_url: String, secret: String, protocol: String,
 /// 对应 CLI 的配置文件（Claude settings.json / .credentials.json、Codex auth.json
 /// / config.toml），写前自动备份；同时在本应用内恢复该连接的额度查询。
 /// 返回写入说明文案（供 Toast 展示），不含任何凭证内容。
+async fn validate_restored_connection(id:&str,current:&connections::Creds) -> Result<(),String> {
+    let (id,current)=(id.to_string(),current.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        if current.kind=="auth" && provider_browser_auth::is_browser(current.secret.as_deref()) {
+            return provider_browser_auth::validate(&id,&current.platform,current.secret.as_deref().unwrap_or_default());
+        }
+        if platforms::native(&current.platform) && current.kind=="auth" {
+            return native_sources::check(&id,&current.platform).map(|_|());
+        }
+        let secret=current.secret.ok_or("该连接没有保存凭证，请重新授权或读取本地登录")?;
+        quota::validate_connection(&current.platform,&current.kind,&secret,current.base_url.as_deref(),current.model.as_deref())
+    }).await.map_err(|_|"连接验证异常")?
+}
+
 #[tauri::command]
 async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String) -> Result<String, String> {
     let info = with_database(db.0.clone(), {
@@ -1591,14 +1716,14 @@ async fn enable_connection(app: tauri::AppHandle, db: State<'_, Db>, id: String)
         invalidate_network_cache(&id);let _=app.emit("connections-changed",());let _=app.emit("refresh-requested",id);
         return Ok("已恢复连接查询，原工具配置保持原样".into());
     }
-    if platforms::native(&info.platform) && info.kind=="auth" {
-        native_sources::check(&id,&info.platform)?;
+    if info.kind=="auth" && (platforms::native(&info.platform)||provider_browser_auth::is_browser(info.secret.as_deref())) {
+        validate_restored_connection(&id,&info).await?;
         let key=id.clone();
         with_database(db.0.clone(),move |conn|connections::set_paused(conn,&key,false)).await?;
         invalidate_network_cache(&id);
         let _=app.emit("connections-changed",());
         let _=app.emit("refresh-requested",id);
-        return Ok("已启用本机数据监控；外部应用账号与配置未更改".into());
+        return Ok("已验证并恢复账号查询".into());
     }
     let secret = info.secret.clone().ok_or("该连接没有保存凭证，无法写入 CLI 配置")?;
     let claude_prepared = if info.platform == "claude" && info.kind == "auth" {
@@ -1788,14 +1913,7 @@ async fn set_connection_paused(app: tauri::AppHandle, db: State<'_, Db>, id: Str
         let current = with_database(db.0.clone(), move |conn| {
             connections::creds_of(conn, &lookup_id).map_err(|e| e.to_string())
         }).await?.ok_or("连接不存在")?;
-        if platforms::native(&current.platform) && current.kind == "auth" {
-            native_sources::check(&id,&current.platform)?;
-        } else {
-        let secret = current.secret.ok_or("该连接没有保存凭证，请在 CC Switch 中配置后重新读取")?;
-        tauri::async_runtime::spawn_blocking(move || {
-            quota::validate_connection(&current.platform, &current.kind, &secret, current.base_url.as_deref(), current.model.as_deref())
-        }).await.map_err(|e| e.to_string())??;
-        }
+        validate_restored_connection(&id,&current).await?;
     }
     let update_id = id.clone();
     with_database(db.0.clone(), move |conn| connections::set_paused(conn, &update_id, paused)).await?;
@@ -1818,6 +1936,20 @@ async fn fetch_credentials(app: tauri::AppHandle, db: State<'_, Db>, id: String)
     if validation::isolated() { return Err("隔离验收不读取本机凭证".into()); }
     let lookup = id.clone();
     let info = with_database(db.0.clone(), move |conn| connections::creds_of(conn, &lookup).map_err(|e| e.to_string())).await?.ok_or("连接不存在")?;
+    // 本机/浏览器来源验证可能涉及外部进程与网络；不得持数据库锁等待。
+    if native_sources::monitor_id(&id).is_some() || provider_browser_auth::is_browser(info.secret.as_deref()) {
+        if info.paused { return Err("连接已断开，请先恢复查询".into()); }
+        validate_restored_connection(&id,&info).await?;
+        let key=id.clone();
+        with_database(db.0.clone(),move |conn| {
+            if connections::creds_of(conn,&key).map_err(|e|e.to_string())?.as_ref()!=Some(&info) { return Err("连接在验证期间发生变化，请重新查询".into()); }
+            Ok(())
+        }).await?;
+        invalidate_network_cache(&id);
+        let _=app.emit("connections-changed",());
+        let _=app.emit("refresh-requested",id);
+        return Ok(connections::FetchResult {ok:true,masked:None,message:"已核实所选账号的查询授权".into(),scanned:vec![],changed:false});
+    }
     let claude_prepared = if info.platform == "claude" && info.kind == "auth" {
         if info.paused { return Err("连接已断开，请先重新连接".into()); }
         Some(tauri::async_runtime::spawn_blocking(claude_auth::prepare_current).await.map_err(|e| e.to_string())??)
@@ -1830,11 +1962,6 @@ async fn fetch_credentials(app: tauri::AppHandle, db: State<'_, Db>, id: String)
             let changed = prepared.sync(conn, &fetch_id)?;
             let token = prepared.require(None)?["claudeAiOauth"]["accessToken"].as_str().ok_or("Claude 授权不完整")?;
             return Ok(connections::FetchResult { ok: true, masked: Some(connections::mask(token)), message: "已核实 Claude 身份并保存完整授权".into(), scanned: vec![], changed });
-        }
-        if native_sources::monitor_id(&fetch_id).is_some() {
-            let info=connections::creds_of(conn,&fetch_id).map_err(|e|e.to_string())?.ok_or("连接不存在")?;
-            let source=native_sources::check(&fetch_id,&info.platform)?;
-            return Ok(connections::FetchResult {ok:true,masked:None,message:"本机来源已重新检测；未读取或改写外部登录凭证".into(),scanned:vec![source.path.display().to_string()],changed:false});
         }
         let result = connections::fetch_local(conn, &fetch_id).map_err(|e| e.to_string())?;
         if result.ok {
@@ -1906,9 +2033,9 @@ async fn current_connections(db: State<'_, Db>) -> Result<Vec<String>, String> {
 
 /// 「检测本机登录」：只读检测，不入库；保存仍走 read_local_connections。
 #[tauri::command]
-async fn detect_local_login(platform: String) -> Result<login_detect::LoginDetection, String> {
+async fn detect_local_login(platform: String, edition: Option<String>) -> Result<login_detect::LoginDetection, String> {
     if validation::isolated() { return Err("隔离验收环境禁止读取真实凭证".into()); }
-    tauri::async_runtime::spawn_blocking(move || login_detect::detect(&platform)).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || login_detect::detect_for_edition(&platform,edition.as_deref())).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1946,12 +2073,20 @@ async fn rename_connection(
 struct LocalReadSummary { added: usize, existing: usize, warnings: Vec<String> }
 
 #[tauri::command]
-async fn read_local_connections(app: tauri::AppHandle, db: State<'_, Db>, platform: String, kind: String, name: Option<String>) -> Result<LocalReadSummary, String> {
+async fn read_local_connections(app: tauri::AppHandle, db: State<'_, Db>, platform: String, kind: String, name: Option<String>, edition: Option<String>) -> Result<LocalReadSummary, String> {
     if validation::isolated() { return Err("隔离验收环境禁止读取真实凭证".into()); }
     if platforms::native(&platform) {
         if kind != "auth" { return Err("该平台请使用本机来源获取".into()); }
+        let accounts=if matches!(platform.as_str(),"qoder"|"workbuddy"|"trae") {
+            let (selected,region)=(platform.clone(),edition.clone());
+            Some(tauri::async_runtime::spawn_blocking(move || login_detect::native_accounts_for(&selected,region.as_deref())).await.map_err(|_|"本地登录检测异常")??)
+        } else {None};
         let result=with_database(db.0.clone(), move |conn| {
-            native_sources::register(conn,&platform,name.as_deref()).map(|(added,existing,warnings)|LocalReadSummary {added,existing,warnings})
+            let result=match accounts {
+                Some(accounts)=>native_sources::register_accounts(conn,&platform,name.as_deref(),accounts),
+                None=>native_sources::register(conn,&platform,name.as_deref()),
+            };
+            result.map(|(added,existing,warnings)|LocalReadSummary {added,existing,warnings})
         }).await?;
         let _=app.emit("connections-changed",());
         return Ok(result);
@@ -2732,7 +2867,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init()) // 任务 2.5：只在 Rust 端发通知
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let handler: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![
             tray_summary::tray_summary_get, tray_summary::tray_summary_fit,
             scan_local_sessions,
             collection_status,
@@ -2797,6 +2933,10 @@ pub fn run() {
             dock_undock,
             cost_estimate,
             connection_quota,
+            provider_browser_auth::start_browser_authorization,
+            provider_browser_auth::browser_authorization_status,
+            provider_browser_auth::cancel_browser_authorization,
+            provider_browser_auth::save_browser_connection,
             connection_api_usage,
             local_codex_quota,
             local_grok_quota,
@@ -2876,7 +3016,14 @@ pub fn run() {
             session_handoff::handoff_save,
             session_handoff::validate_file_name,
             // 任务 3.1 结束
-        ])
+            ];
+            move |invoke: tauri::ipc::Invoke| {
+                if invoke.message.webview().label().starts_with("provider-auth-") {
+                    invoke.resolver.reject("官方授权页面不能访问 Jolu 应用命令");
+                    true
+                } else { handler(invoke) }
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             notify::register_click_handler(&handle)?;

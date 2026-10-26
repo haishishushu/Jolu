@@ -39,10 +39,11 @@
       "auth_connection",
       "api_connection",
       "local_sessions",
+      "subscription_quota",
       "realtime_delta",
       "cost_estimate"
     ],
-    "limitation": "本机 Gemini CLI 留存会话；在线剩余额度未接入"
+    "limitation": "读取本机 Google 登录，或使用官方 Gemini CLI 在系统默认浏览器独立授权查询各模型额度；API Key 不提供额度与余额"
   },
   {
     "id": "grok",
@@ -53,7 +54,7 @@
       "api_connection",
       "subscription_quota"
     ],
-    "limitation": "本机 OAuth 可查 SuperGrok 订阅剩余百分比；API 预付余额需独立管理授权"
+    "limitation": "读取本机 OAuth 或通过系统默认浏览器完成官方设备授权，查询服务提供的订阅与积分；API 预付余额需独立管理授权"
   },
   {
     "id": "opencode",
@@ -62,10 +63,11 @@
     "capabilities": [
       "auth_connection",
       "api_connection",
+      "subscription_quota",
       "local_sessions",
       "realtime_delta"
     ],
-    "limitation": "OpenCode 用量支持 JSON / SQLite 消息表；待真机核对。订阅只读检测 OpenAI 登录，不托管 OAuth。"
+    "limitation": "OpenCode 用量支持 JSON / SQLite；OpenAI 订阅可读取原工具登录，或使用 Codex CLI 在系统默认浏览器独立授权；不改写原工具登录。"
   },
   {
     "id": "zcode",
@@ -78,7 +80,7 @@
       "realtime_delta",
       "api_connection"
     ],
-    "limitation": "本机 ZCode BigModel Coding Plan API Key 可查套餐剩余；账号 OAuth 额度未接入"
+    "limitation": "支持本机 BigModel Coding Plan Key 与账号查询，也可在系统默认浏览器独立授权 BigModel 账号；团队及 Start Plan 依服务权限"
   },
   {
     "id": "qoder",
@@ -87,9 +89,10 @@
     "capabilities": [
       "auth_connection",
       "local_sessions",
+      "subscription_quota",
       "credits"
     ],
-    "limitation": "国内／国际版本分别采集本机消耗；在线剩余积分需 Qoder Agent SDK"
+      "limitation": "国内／国际版分别读取桌面登录查询额度，也可使用系统默认浏览器独立授权；国际版仅在无桌面登录文件时读取 Qoder CLI；不发送模型请求"
   },
   {
     "id": "workbuddy",
@@ -98,27 +101,30 @@
     "capabilities": [
       "auth_connection",
       "local_sessions",
+      "subscription_quota",
       "realtime_delta",
       "credits"
     ],
-    "limitation": "本机用量、缓存与已上报积分；在线个人剩余积分需开放平台授权"
+      "limitation": "国内／国际版分别读取桌面登录，也可使用系统默认浏览器独立授权查询积分；凭证仅后端处理；服务端拒绝本地授权时需在原工具重新登录"
   },
   {
     "id": "trae",
     "name": "Trae",
     "availability": "available",
     "capabilities": [
-      "auth_connection"
+      "auth_connection",
+      "subscription_quota"
     ],
-    "limitation": "只提供本机来源检测；企业成员额度需管理员授权，个人额度未验证"
+    "limitation": "国内版与国际版分别读取原工具登录，或通过系统默认浏览器独立授权查询；不跨账号回退，企业私有域名和未知认证格式明确不支持"
   },
   {
     "id": "custom",
     "name": "自定义供应商",
     "availability": "available",
     "capabilities": [
-      "api_connection"
+      "api_connection",
+      "gateway_balance"
     ],
-    "limitation": "自定义供应商只验证模型接口，不支持查询额度与余额"
+    "limitation": "按配置的服务地址独立查询额度、套餐与余额；支持已接入的编程套餐、官方余额和 sub2api / new-api / one-api 网关接口，缺失字段明确显示未提供"
   }
 ]

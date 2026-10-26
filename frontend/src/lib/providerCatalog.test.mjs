@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import * as catalog from "./providerCatalog.ts"
+import { accountLabel, accountsFor } from "./usageFilters.ts"
 import {
   PROVIDERS,
   canConnect,
@@ -21,8 +23,43 @@ import {
   validateConnectionName,
 } from "./providerCatalog.ts"
 
-test("供应商顺序与 Jolu.pen 画板 05 一致：自定义供应商在最前，Trae 补在最后", () => {
-  assert.deepEqual(PROVIDERS.map((p) => p.name), ["自定义供应商", "Claude Code", "Codex", "Gemini", "Grok", "OpenCode", "ZCode", "Qoder", "WorkBuddy", "Trae"])
+test("供应商目录保留自定义与现有平台，六个地区版本独立展示", () => {
+  assert.deepEqual(PROVIDERS.map((p) => p.name), ["自定义供应商", "Claude Code", "Codex", "Gemini", "Grok", "OpenCode", "ZCode", "Qoder CN", "Qoder", "WorkBuddy", "WorkBuddy AI", "Trae CN", "Trae"])
+  assert.deepEqual(PROVIDERS.filter(p => p.edition).map(p => [p.id, p.platformId, p.edition]), [
+    ["qoder-cn", "qoder", "cn"], ["qoder", "qoder", "global"],
+    ["workbuddy", "workbuddy", "cn"], ["workbuddy-ai", "workbuddy", "ai"],
+    ["trae-cn", "trae", "cn"], ["trae", "trae", "global"],
+  ])
+})
+
+test("连接供应商优先使用后端区域，本机来源可回退，未知区域不猜", () => {
+  const variants = [
+    ["qoder", "cn", "qoder-cn", "cn"], ["qoder", "global", "qoder", "global"],
+    ["workbuddy", "cn", "workbuddy", "main"], ["workbuddy", "ai", "workbuddy-ai", "ai"],
+    ["trae", "cn", "trae-cn", "cn"], ["trae", "global", "trae", "ide"],
+  ]
+  for (const [platformId, edition, expected, source] of variants) {
+    assert.equal(catalog.connectionProviderId({ id: "browser:opaque", platformId, edition }), expected)
+    assert.equal(catalog.connectionProviderId({ id: `monitor:native:${platformId}:${source}`, platformId }), expected)
+  }
+  assert.equal(catalog.connectionProviderId({ id: "monitor:native:qoder:cn", platformId: "qoder", edition: "global" }), "qoder")
+  for (const platformId of ["qoder", "workbuddy", "trae"]) {
+    assert.equal(catalog.connectionProviderId({ id: "browser:opaque", platformId }), null)
+    assert.equal(catalog.connectionProviderId({ id: "monitor:native:qoder:cn", platformId, edition: "invalid" }), null)
+    assert.equal(catalog.connectionProviderEntry({ platformId }).name, `${providerEntry(platformId).name} · 区域未知`)
+  }
+  assert.equal(catalog.connectionProviderId({ platformId: "codex" }), "codex")
+  assert.equal(catalog.connectionProviderId({ id: "monitor:native:trae:cn", platformId: "qoder" }), null)
+})
+
+test("统计账号标签显示版本名称，统计供应商筛选仍按平台家族", () => {
+  const accounts = [
+    { id: "browser:cn", platformId: "qoder", edition: "cn", baseName: "国内" },
+    { id: "browser:global", platformId: "qoder", edition: "global", baseName: "海外" },
+  ]
+  assert.equal(accountLabel(accounts[0]), "国内 · Qoder CN")
+  assert.equal(accountLabel(accounts[1]), "海外 · Qoder")
+  assert.equal(accountsFor(accounts, "qoder").length, 2)
 })
 
 test("连接方式：两种都实现才显示页签，待接入不能连接", () => {
@@ -48,6 +85,12 @@ test("连接名称去空白、同平台同方式不得重名", () => {
   assert.match(validateConnectionName(" 工作 API ", existing, "codex", "api"), /同名/)
   assert.equal(validateConnectionName("工作 API", existing, "codex", "auth"), null)
   assert.equal(validateConnectionName("工作 API", existing, "claude", "api"), null)
+})
+
+test("连接重名仅限制同一供应商版本与方式", () => {
+  const existing = [{ id: "browser:cn", platformId: "qoder", edition: "cn", kind: "auth", baseName: "工作账号" }]
+  assert.match(validateConnectionName("工作账号", existing, "qoder-cn", "auth"), /同名/)
+  assert.equal(validateConnectionName("工作账号", existing, "qoder", "auth"), null)
 })
 
 test("模型搜索不区分大小写并保留顺序", () => {

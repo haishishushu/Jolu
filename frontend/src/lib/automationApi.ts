@@ -67,7 +67,8 @@ export interface RunDto {
   id: number
   task_id: number
   task_name: string
-  platform: AutomationPlatform
+  /** 旧运行未保存执行快照时无法可靠还原工具。 */
+  platform: AutomationPlatform | "unknown"
   connection_id: string
   source: RunSource
   status: RunStatus
@@ -130,6 +131,7 @@ export interface AutomationEventDto {
 
 export interface TaskDetailDto {
   item: TaskItemDto
+  execution: TaskDto | null
   queue: QueueItemDto[]
   events: AutomationEventDto[]
 }

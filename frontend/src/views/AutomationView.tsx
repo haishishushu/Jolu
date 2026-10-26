@@ -152,7 +152,7 @@ export function AutomationView({ active, prefill, target, onTargetHandled, onOpe
         <TaskDetail
           detail={task.data}
           now={now}
-          account={accounts.get(task.data.item.connection_id)}
+          account={task.data.execution ? accounts.get(task.data.execution.connection_id) : undefined}
           onBack={() => setRoute({ kind: "list" })}
           onAction={(action) => doAction(task.data!.item.id, action)}
           onEdit={() => editTask(task.data!.item)}

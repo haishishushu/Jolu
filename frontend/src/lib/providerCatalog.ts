@@ -9,9 +9,12 @@ import type { PlatformId } from "@/types"
  *   none    平台不提供该方式，不展示入口
  */
 export type ModeState = "ready" | "pending" | "none"
+export type ProviderId = PlatformId | "workbuddy-ai" | "trae-cn" | "qoder-cn"
 
 export interface ProviderEntry {
-  id: PlatformId
+  id: ProviderId
+  platformId: PlatformId
+  edition?: string
   name: string
   access: string
   subscription: ModeState
@@ -23,26 +26,58 @@ export interface ProviderEntry {
 
 export const PROVIDERS: readonly ProviderEntry[] = [
   // 自定义供应商（D-11）：只有 API Key 方式，协议与地址由用户填写，不预填 Base URL
-  { id: "custom", name: "自定义供应商", access: "名称 / Base URL / API Key", subscription: "none", apiKey: "ready" },
-  { id: "claude", name: "Claude Code", access: "订阅账号 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.anthropic.com", locked: false } },
-  { id: "codex", name: "Codex", access: "订阅账号 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.openai.com/v1", locked: false } },
-  { id: "gemini", name: "Gemini", access: "账号授权 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://generativelanguage.googleapis.com/v1beta/openai", locked: true } },
-  { id: "grok", name: "Grok", access: "按可用接入方式连接", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.x.ai/v1", locked: true } },
-  { id: "opencode", name: "OpenCode", access: "先选择模型服务", subscription: "ready", apiKey: "ready", baseUrl:{value:"https://opencode.ai/zen/go/v1",locked:true} },
-  { id: "zcode", name: "ZCode", access: "订阅套餐 / API Key", subscription: "ready", apiKey: "ready", baseUrl:{value:"https://open.bigmodel.cn/api/anthropic",locked:true}, baseUrlChoices:[
+  { id: "custom", platformId: "custom", name: "自定义供应商", access: "名称 / Base URL / API Key", subscription: "none", apiKey: "ready" },
+  { id: "claude", platformId: "claude", name: "Claude Code", access: "订阅账号 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.anthropic.com", locked: false } },
+  { id: "codex", platformId: "codex", name: "Codex", access: "订阅账号 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.openai.com/v1", locked: false } },
+  { id: "gemini", platformId: "gemini", name: "Gemini", access: "账号授权 / API Key", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://generativelanguage.googleapis.com/v1beta/openai", locked: true } },
+  { id: "grok", platformId: "grok", name: "Grok", access: "按可用接入方式连接", subscription: "ready", apiKey: "ready", baseUrl: { value: "https://api.x.ai/v1", locked: true } },
+  { id: "opencode", platformId: "opencode", name: "OpenCode", access: "先选择模型服务", subscription: "ready", apiKey: "ready", baseUrl:{value:"https://opencode.ai/zen/go/v1",locked:true} },
+  { id: "zcode", platformId: "zcode", name: "ZCode", access: "订阅套餐 / API Key", subscription: "ready", apiKey: "ready", baseUrl:{value:"https://open.bigmodel.cn/api/anthropic",locked:true}, baseUrlChoices:[
     {label:"国内 · Anthropic",value:"https://open.bigmodel.cn/api/anthropic",protocol:"anthropic"},
     {label:"国内 · OpenAI",value:"https://open.bigmodel.cn/api/coding/paas/v4",protocol:"openai"},
     {label:"国际 · Anthropic",value:"https://api.z.ai/api/anthropic",protocol:"anthropic"},
     {label:"国际 · OpenAI",value:"https://api.z.ai/api/coding/paas/v4",protocol:"openai"},
   ] },
-  { id: "qoder", name: "Qoder", access: "账号登录 / 可用模型服务", subscription: "ready", apiKey: "none" },
-  { id: "workbuddy", name: "WorkBuddy", access: "账号登录 / 原工具配置模型", subscription: "ready", apiKey: "none" },
+  { id: "qoder-cn", platformId: "qoder", edition: "cn", name: "Qoder CN", access: "账号登录 / 可用模型服务", subscription: "ready", apiKey: "none" },
+  { id: "qoder", platformId: "qoder", edition: "global", name: "Qoder", access: "账号登录 / 可用模型服务", subscription: "ready", apiKey: "none" },
+  { id: "workbuddy", platformId: "workbuddy", edition: "cn", name: "WorkBuddy", access: "账号登录 / 原工具配置模型", subscription: "ready", apiKey: "none" },
+  { id: "workbuddy-ai", platformId: "workbuddy", edition: "ai", name: "WorkBuddy AI", access: "账号登录 / 原工具配置模型", subscription: "ready", apiKey: "none" },
   // Trae 不在原画板里，按鼠鼠要求保留并已补进 Jolu.pen 画板 05 / 06 / 29
-  { id: "trae", name: "Trae", access: "本机登录检测", subscription: "ready", apiKey: "none" },
+  { id: "trae-cn", platformId: "trae", edition: "cn", name: "Trae CN", access: "账号登录 / 本机登录", subscription: "ready", apiKey: "none" },
+  { id: "trae", platformId: "trae", edition: "global", name: "Trae", access: "账号登录 / 本机登录", subscription: "ready", apiKey: "none" },
 ]
 
-export function providerEntry(id: PlatformId): ProviderEntry {
+export function providerEntry(id: ProviderId): ProviderEntry {
   return PROVIDERS.find((entry) => entry.id === id) ?? PROVIDERS[0]
+}
+
+interface ProviderConnection {
+  id?: string
+  platformId: string
+  edition?: string | null
+}
+
+const NATIVE_EDITIONS: Readonly<Record<string, string>> = {
+  "monitor:native:qoder:cn": "cn", "monitor:native:qoder:global": "global",
+  "monitor:native:workbuddy:main": "cn", "monitor:native:workbuddy:ai": "ai",
+  "monitor:native:trae:cn": "cn", "monitor:native:trae:ide": "global",
+}
+
+/** 平台族用于统计，供应商版本仅用于连接展示；未知区域不能默认归到任一版本。 */
+export function connectionProviderId(connection: ProviderConnection): ProviderId | null {
+  const { platformId, id } = connection
+  if (!["qoder", "workbuddy", "trae"].includes(platformId)) {
+    return PROVIDERS.find(entry => entry.platformId === platformId)?.id ?? null
+  }
+  const edition = connection.edition ?? (id?.startsWith(`monitor:native:${platformId}:`) ? NATIVE_EDITIONS[id] : undefined)
+  return PROVIDERS.find(entry => entry.platformId === platformId && entry.edition === edition)?.id ?? null
+}
+
+export function connectionProviderEntry(connection: ProviderConnection): ProviderEntry {
+  const id = connectionProviderId(connection)
+  if (id) return providerEntry(id)
+  const entry = providerEntry(connection.platformId as PlatformId)
+  return { ...entry, name: `${entry.name} · 区域未知` }
 }
 
 /** 至少一种方式已实现，卡片上的「连接」按钮才可用 */
@@ -63,7 +98,7 @@ export function defaultMode(entry: ProviderEntry): ConnectMode {
 
 /** 只提供一种方式时，向用户解释另一种为什么不在（画板 13「条件说明」） */
 export function singleModeReason(entry: ProviderEntry): string | null {
-  if (entry.id === "qoder" || entry.id === "workbuddy") return `${entry.name} 的自定义模型在 ${entry.name} 客户端内配置，Jolu 不代管密钥。`
+  if (entry.platformId === "qoder" || entry.platformId === "workbuddy") return `${entry.name} 的自定义模型在 ${entry.name} 客户端内配置，Jolu 不代管密钥。`
   if (showsModeTabs(entry)) return null
   if (entry.apiKey === "pending") return "API Key 连接待接入；当前只提供订阅连接。"
   if (entry.apiKey === "none") return `${entry.name} 暂不支持 API Key；当前只提供订阅连接。`
@@ -174,14 +209,14 @@ export function connectionBadge(count: number): string {
 /** 名称去首尾空白；同平台同方式重名时提示修改（画板 29「输入与模型」） */
 export function validateConnectionName(
   name: string,
-  existing: readonly { platformId: string; kind: string; baseName: string }[],
+  existing: readonly (ProviderConnection & { kind: string; baseName: string })[],
   platform: string,
   kind: "auth" | "api",
 ): string | null {
   const trimmed = name.trim()
   if (!trimmed) return "请填写连接名称"
   if (trimmed.length > 80) return "连接名称最多 80 个字符"
-  if (existing.some((c) => c.platformId === platform && c.kind === kind && c.baseName.trim() === trimmed)) {
+  if (existing.some((c) => connectionProviderId(c) === platform && c.kind === kind && c.baseName.trim() === trimmed)) {
     return "同一平台已有同名连接，请修改名称"
   }
   return null

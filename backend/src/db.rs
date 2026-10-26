@@ -818,8 +818,18 @@ pub fn preview_backup(conn: &Connection, json: &str) -> Result<(ImportPreview, P
     // 来源指标无效或同一请求出现多份时，对应请求整条按无效跳过，不导入残缺数据
     let mut bad_metrics = std::collections::HashSet::new();
     for (index, value) in backup.metrics.into_iter().enumerate() {
+        // 即使某个指标字段类型损坏，仍可凭完整标识拒绝其关联请求，避免导入残缺数据。
+        let raw_key = value.get("source").and_then(serde_json::Value::as_str)
+            .zip(value.get("dedup_key").and_then(serde_json::Value::as_str))
+            .map(|(source, key)| (source.to_owned(), key.to_owned()));
         match serde_json::from_value::<BackupMetric>(value) {
-            Err(error) => invalid.push("来源指标", index, shape_problem(&error)),
+            Err(error) => {
+                if let Some(key) = raw_key {
+                    parsed.metrics.remove(&key);
+                    bad_metrics.insert(key);
+                }
+                invalid.push("来源指标", index, shape_problem(&error));
+            }
             Ok(metric) => {
                 let key = (metric.source.clone(), metric.dedup_key.clone());
                 if !metric_valid(&metric) || bad_metrics.contains(&key) || parsed.metrics.contains_key(&key) {
@@ -2756,6 +2766,27 @@ mod tests {
         // 重复项跳过：库里原来那 2 条的 Token 值不变
         assert_eq!((total_of(&conn, "dup-1"), total_of(&conn, "dup-2")), (100, 200));
         assert_eq!((total_of(&conn, "new-1"), total_of(&conn, "new-2")), (30, 40));
+    }
+
+    #[test]
+    fn preview_rejects_requests_with_malformed_metrics() {
+        for valid_first in [false, true] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            init(&conn).unwrap();
+            let native = |key: &str| RequestRecord { platform: "workbuddy".into(), source: "native:workbuddy:main".into(), ..import_record(key, 4_000, 7) };
+            let good = serde_json::json!({"source":"native:workbuddy:main", "dedup_key":"broken", "input_semantics":"includes_cache", "credits":1.5});
+            let mut malformed = good.clone();
+            malformed["credits"] = serde_json::json!("damaged");
+            let metrics = if valid_first { vec![good, malformed] } else { vec![malformed, good] };
+            let json = serde_json::json!({"schema_version":2, "requests":[native("broken"), native("good")], "sessions":[], "metrics":metrics}).to_string();
+            let (preview, parsed) = preview_backup(&conn, &json).unwrap();
+            assert_eq!(preview.valid, 1, "损坏指标关联的请求不得导入，顺序={valid_first}");
+            assert!(!parsed.metrics.contains_key(&("native:workbuddy:main".into(), "broken".into())));
+            let result = import_parsed(&mut conn, &parsed).unwrap();
+            assert_eq!(result.requests_changed, 1);
+            assert!(!request_exists(&conn, "native:workbuddy:main", "broken").unwrap());
+            assert!(request_exists(&conn, "native:workbuddy:main", "good").unwrap());
+        }
     }
 
     #[test]

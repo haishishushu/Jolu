@@ -73,6 +73,7 @@ export interface ConnectionInfo {
 
 /** 连接（§6.3）。**后端刻意不返回凭证原值**，只有 masked */
 export interface ConnectionDto {
+  edition?: string | null
   account_email?: string | null
 
   service?: "opencode-go" | "openai" | "openai-compatible" | null
@@ -191,11 +192,13 @@ export type QuotaStateDto =
   | { state: "failed"; reason: string }
 
 export interface AccountQuotaMetadata {
-  subscription_status: "active" | "expired" | "unknown"
+  subscription_status: "active" | "expired" | "inactive" | "unknown"
   expires_at: string | null
   subscription_source: "live" | "local_snapshot" | "unavailable"
   observed_at: string | null
   reset_credits: { available_count: number | null; applicable_available_count: number | null } | null
+  /** 来源返回或本机客户端记录的账号邮箱 / 用户名；连接本身没有邮箱时用于展示 */
+  email?: string | null
 }
 
 /** 余额查询状态。真实余额为零显示 0.00，查不到才显示「—」 */
@@ -419,7 +422,7 @@ export const api = {
   setRetentionDays: (days: number | null) => invoke<AppSettings>("set_retention_days", { days }),
   cleanupPreview: (days: number) => invoke<CleanupPreviewDto>("cleanup_preview", { days }),
   cleanupHistory: (days: number) => invoke<CleanupPreviewDto>("cleanup_history", { days }),
-  readLocalConnections: (platform: string, kind: "auth" | "api", name?: string | null) => invoke<{ added: number; existing: number; warnings?: string[] }>("read_local_connections", { platform, kind, name: name ?? null }),
+  readLocalConnections: (platform: string, kind: "auth" | "api", name?: string | null, edition?: string) => invoke<{ added: number; existing: number; warnings?: string[] }>("read_local_connections", { platform, kind, name: name ?? null, edition:edition ?? null }),
   /** 选择备份文件并预览；用户取消选择时为 null */
   previewImportFile: () => invoke<ImportPreviewDto | null>("preview_import_file"),
   confirmImport: (token: string) => invoke<ImportSummaryDto>("confirm_import", { token }),
@@ -515,7 +518,11 @@ export const api = {
   renameConnection: (id: string, name: string) => invoke<void>("rename_connection", { id, name }),
   discoverConnections: () => invoke<Candidate[]>("discover_connections"),
   /** 只读检测本机官方客户端登录，不入库；保存走 readLocalConnections */
-  detectLocalLogin: (platform: string) => invoke<LoginDetectionDto>("detect_local_login", { platform }),
+  detectLocalLogin: (platform: string, edition?: string) => invoke<LoginDetectionDto>("detect_local_login", { platform, edition:edition ?? null }),
+  startBrowserAuthorization: (platform: string, edition: string) => invoke<string>("start_browser_authorization", { platform, edition }),
+  browserAuthorizationStatus: (id: string) => invoke<{state: "waiting" | "ready" | "failed" | "saved"; detection: LoginDetectionDto | null; message: string | null}>("browser_authorization_status", { id }),
+  cancelBrowserAuthorization: (id: string) => invoke<void>("cancel_browser_authorization", { id }),
+  saveBrowserConnection: (id: string, name: string) => invoke<string>("save_browser_connection", { id, name }),
   /** 本机 CLI 当前在用的连接 id（每个平台至多一条） */
   currentConnections: () => invoke<string[]>("current_connections"),
   connectionKind: (platform: string) =>

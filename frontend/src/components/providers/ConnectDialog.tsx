@@ -1,12 +1,12 @@
 import { SelectField } from "@/components/ui/SelectField"
 import { useDialogClose } from "@/hooks/useDialogClose"
+import { useBrowserAuthorization } from "@/hooks/useBrowserAuthorization"
 import { OPENCODE_SERVICES } from "@/lib/providerCatalog"
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { ArrowUpRight, BadgeCheck, Check, ChevronDown, CircleAlert, CircleCheck, Eye, EyeOff, LoaderCircle, LogIn, RefreshCw, Search, X } from "lucide-react"
-import { api, isTauri, openUrl, type LoginDetectionDto } from "@/lib/api"
-import { linkFor, type ProviderLinkKind } from "@/lib/providerLinks"
+import { BadgeCheck, Check, ChevronDown, CircleAlert, CircleCheck, Eye, EyeOff, LoaderCircle, LogIn, RefreshCw, Search, X } from "lucide-react"
+import { api, isTauri, type LoginDetectionDto } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import {
   API_PROTOCOLS,
@@ -24,16 +24,16 @@ import {
   validateConnectionName,
   type ApiProtocol,
   type ConnectMode,
+  type ProviderId,
 } from "@/lib/providerCatalog"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { JoluButton } from "@/components/ui/JoluButton"
-import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
 import type { Connection, PlatformId } from "@/types"
 
 export interface ConnectActions {
   connections: readonly Connection[]
-  readLocal: (platform: string, kind: "auth" | "api", name?: string) => Promise<{ added: number; existing: number; warnings?: string[] }>
+  readLocal: (platform: string, kind: "auth" | "api", name?: string, edition?: string) => Promise<{ added: number; existing: number; warnings?: string[] }>
   add: (input: { platform: string; kind: "auth" | "api"; name: string; secret?: string | null; base_url?: string | null; model?: string | null; service?: string | null; protocol?: ApiProtocol | null }) => Promise<void>
 }
 
@@ -44,14 +44,15 @@ export interface ConnectActions {
  * 后端以「获取模型成功」或「手填模型」作为接口可达的依据，不查余额。
  */
 export function ConnectDialog({ platform: initialPlatform, actions, onClose: onDismiss }: {
-  platform: PlatformId
+  platform: ProviderId
   actions: ConnectActions
   onClose: () => void
 }) {
   const { open: dialogOpen, close: onClose } = useDialogClose(onDismiss)
   const toast = useToast()
-  const [platform, setPlatform] = useState(initialPlatform)
-  const entry = providerEntry(platform)
+  const [provider, setProvider] = useState(initialPlatform)
+  const entry = providerEntry(provider)
+  const platform = entry.platformId
   const [service,setService]=useState<string>("opencode-go")
   const [mode, setMode] = useState<ConnectMode>(initialPlatform==="opencode"?"apiKey":defaultMode(entry))
   const [name, setName] = useState("")
@@ -60,6 +61,10 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   // 订阅
   const [detecting, setDetecting] = useState(false)
   const [detection, setDetection] = useState<LoginDetectionDto | null>(null)
+  const edition = entry.edition ?? "default"
+  const loginRequest = useRef(0)
+  const browser = useBrowserAuthorization(platform, edition, dialogOpen && mode === "subscription")
+  const actualDetection = browser.detection ?? detection
   // API Key
   const [baseUrl, setBaseUrl] = useState(entry.baseUrl?.value ?? "")
   const [secret, setSecret] = useState("")
@@ -70,7 +75,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const [fetching, setFetching] = useState(false)
   /** 每次地址 / 密钥变化或重新获取都递增；旧请求回来时直接丢弃，防止串到新地址 */
   const modelRequest = useRef(0)
-  const [pendingPlatform, setPendingPlatform] = useState<PlatformId | null>(null)
+  const [pendingPlatform, setPendingPlatform] = useState<ProviderId | null>(null)
   /** 模型列表为空或接口不支持枚举时，改为手动填写模型 ID（画板 27） */
   const [manualModel, setManualModel] = useState(false)
   const [modelError, setModelError] = useState<string | null>(null)
@@ -97,15 +102,18 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const tabs = platform!=="opencode" && showsModeTabs(entry)
   const reason = singleModeReason(entry)
   const kind = mode === "subscription" ? "auth" : "api"
-  const hasDraft = Boolean(name.trim() || secret.trim() || detection)
+  const hasDraft = Boolean(name.trim() || secret.trim() || actualDetection || browser.pending)
 
-  const switchPlatform = (next: PlatformId) => {
+  const switchPlatform = (next: ProviderId) => {
     const nextEntry = providerEntry(next)
     // 更换平台不携带原平台的密钥与检测结果（画板 29）
     modelRequest.current++
     setFetching(false)
     resetVerification()
-    setPlatform(next)
+    setProvider(next)
+    ++loginRequest.current
+    setDetecting(false)
+    browser.cancel()
     setMode(next==="opencode"?"apiKey":defaultMode(nextEntry))
     setService("opencode-go")
     setName("")
@@ -123,16 +131,18 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   }
 
   const detect = async () => {
+    if (detecting) return
+    const request = ++loginRequest.current
+    browser.cancel()
     setDetecting(true)
     setError(null)
     try {
-      const result = await api.detectLocalLogin(platform)
-      setDetection(result)
+      const result = await api.detectLocalLogin(platform, entry.edition)
+      if (request === loginRequest.current) setDetection(result)
     } catch (reason) {
-      setDetection(null)
-      setError(`检测失败：${String(reason)}`)
+      if (request === loginRequest.current) { setDetection(null); setError(`检测失败：${String(reason)}`) }
     } finally {
-      setDetecting(false)
+      if (request === loginRequest.current) setDetecting(false)
     }
   }
 
@@ -200,10 +210,10 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     }
   }
 
-  const nameError = validateConnectionName(name, actions.connections, platform, kind)
+  const nameError = validateConnectionName(name, actions.connections, provider, kind)
   const urlError = baseUrl.trim() && !/^https?:\/\/[^\s/]+/i.test(baseUrl.trim()) ? "请输入完整地址，例如 https://api.example.com/v1" : null
   const canSave = !saving && !nameError && (mode === "subscription"
-    ? Boolean(detection?.found)
+    ? Boolean(actualDetection?.found) && !browser.pending && !detecting
     : Boolean(baseUrl.trim() && !urlError && secret.trim() && model.trim())
       && (platform !== "zcode" || (!fetching && !verifying && (!manualModel || verifyResult?.ok === true))))
 
@@ -213,13 +223,19 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     setError(null)
     try {
       if (mode === "subscription") {
-        const summary = await actions.readLocal(platform, "auth", name.trim())
+        if (browser.detection?.found) {
+          await browser.save(name.trim())
+          toast.success(`已连接 ${entry.name}`, "浏览器账号已通过真实额度查询，凭证加密保存在本机")
+          onClose()
+          return
+        }
+        const summary = await actions.readLocal(platform, "auth", name.trim(), entry.edition)
         if (!summary.added && !summary.existing) throw new Error("未读取到可保存的登录，请重新检测")
         toast.success(summary.added ? `已连接 ${entry.name}` : "该账号已连接，无需重复添加", summary.warnings?.join("；"))
       } else {
         await actions.add({ platform, service:platform==="opencode"?service:null, kind: "api", name: name.trim(), secret: secret.trim(), base_url: baseUrl.trim(), model: model.trim(), protocol: custom || platform === "zcode" ? protocol : null })
         toast.success(`已连接 ${entry.name}`, custom
-          ? (manualModel ? "模型 ID 为手动填写，未经模型接口验证；自定义供应商不查询余额" : "已通过模型接口验证；自定义供应商不查询余额")
+          ? (manualModel ? "模型 ID 为手动填写，未经模型接口验证；余额将在账号管理中独立查询" : "已通过模型接口验证；余额将在账号管理中独立查询")
           : "接口可达已验证；模型调用权限与额度分别展示")
       }
       onClose()
@@ -262,9 +278,9 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
               <span className="flex-1" />
               {!tabs && !custom && <span className="rounded-[5px] bg-jolu-stage px-2 py-1 text-[11px] text-jolu-muted">{mode === "subscription" ? "当前仅订阅" : "当前仅 API Key"}</span>}
               <PlatformSwitcher
-                current={platform}
+                current={provider}
                 onPick={(next) => {
-                  if (next === platform) return
+                  if (next === provider) return
                   if (hasDraft) setPendingPlatform(next)
                   else switchPlatform(next)
                 }}
@@ -298,7 +314,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
               </div>
             ) : reason && <p className="text-xs text-jolu-muted">{reason}</p>}
 
-            <Field label={custom ? "名称 *" : "连接名称 *"} hint={mode === "apiKey" ? "用于区分多个账号或服务，不影响供应商配置。" : undefined} error={name && nameError ? nameError : null}>
+            <Field label={custom ? "名称 *" : "连接名称 *"} hint={mode === "apiKey" ? "用于区分多个账号或服务，不影响供应商配置。" : actualDetection?.found && !name.trim() ? "请填写连接名称后保存。" : undefined} error={name && nameError ? nameError : null}>
               {(id) => (
                 <TextInput id={id} value={name} onChange={setName} placeholder={mode === "subscription" ? "例如：个人订阅" : custom ? "例如：公司内部网关" : "例如：工作 API"} />
               )}
@@ -306,14 +322,21 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
 
             {platform==="opencode" && <label className="text-xs text-jolu-text">模型服务<SelectField label="模型服务" className="mt-2 h-10 w-full" value={service} options={OPENCODE_SERVICES.map(s=>({value:s.id,label:s.label}))} onValueChange={value=>{const selected=OPENCODE_SERVICES.find(s=>s.id===value)!;setService(selected.id);setMode(selected.mode);setBaseUrl(selected.baseUrl);setSecret("");setDetection(null);invalidateModels()}} /></label>}
             {mode === "subscription" ? (
+              <>
               <SubscriptionSection
                 platform={platform}
                 providerName={entry.name}
-                detecting={detecting}
-                detection={detection}
+                detecting={detecting || browser.pending}
+                detection={actualDetection}
                 onDetect={() => void detect()}
+                browserPending={browser.pending}
+                browserMessage={browser.message}
+                browserSupported={browser.supported}
+                browserReady={!!browser.detection?.found}
+                onBrowser={() => { ++loginRequest.current; setDetection(null); setError(null); void browser.start() }}
                 tabs={tabs}
               />
+              </>
             ) : (
               <>
                 {custom && (
@@ -439,7 +462,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                 </div>
               </>
             )}
-            {error && <p role="alert" className="text-xs text-jolu-danger">{error}</p>}
+          {(error || browser.error) && <p role="alert" className="text-xs text-jolu-danger">{error || browser.error}</p>}
           </div>
           {confirmDiscard && (
             <div role="alertdialog" aria-label="放弃未保存的更改？" className="flex items-center gap-3 rounded-[10px] border border-jolu-border bg-jolu-side px-4 py-3 text-xs text-jolu-text">
@@ -462,38 +485,26 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   )
 }
 
-function SubscriptionSection({ platform, providerName, detecting, detection, onDetect, tabs }: {
+function SubscriptionSection({ providerName, detecting, detection, onDetect, tabs, browserPending, browserMessage, browserSupported, browserReady, onBrowser }: {
   platform: PlatformId
   providerName: string
   detecting: boolean
   detection: LoginDetectionDto | null
   onDetect: () => void
   tabs: boolean
+  browserPending: boolean
+  browserMessage: string | null
+  browserSupported: boolean
+  browserReady: boolean
+  onBrowser: () => void
 }) {
   const detectButton = (
     <JoluButton variant="primary" disabled={detecting || !isTauri} onClick={onDetect}>
       {detecting ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden className="!text-[#071B10]" />}
-      检测本机登录
+      读取本地登录信息
     </JoluButton>
   )
-  // 登录指引与切换账号的外部链接（D-15）：只用 providerLinks 里核实过的官方地址，未收录就禁用
-  const guide = (label: string, kind: ProviderLinkKind) => {
-    const url = linkFor(platform, kind)
-    const content = (
-      <>
-        {label}
-        <ArrowUpRight aria-hidden className="!size-3.5" />
-      </>
-    )
-    if (url) return <JoluButton variant="soft" onClick={() => void openUrl(url)}>{content}</JoluButton>
-    return (
-      <Tip label="暂无官方指引链接">
-        <span className="inline-flex">
-          <JoluButton variant="soft" disabled>{content}</JoluButton>
-        </span>
-      </Tip>
-    )
-  }
+  const browserButton = <JoluButton aria-label="浏览器授权" variant="soft" disabled={detecting || browserPending || !browserSupported || !isTauri} onClick={onBrowser}>{browserPending && <LoaderCircle aria-hidden className="animate-spin" />}浏览器授权</JoluButton>
 
   if (detection?.found) {
     const account = detection.account ?? (detection.sources.length ? detection.sources.join("、") : "未获取账号")
@@ -502,7 +513,7 @@ function SubscriptionSection({ platform, providerName, detecting, detection, onD
         <div className="flex flex-col gap-3 rounded-[10px] bg-jolu-selected p-5">
           <span className="flex items-center gap-2 text-[13px] font-semibold text-jolu-on">
             <CircleCheck aria-hidden className="size-[18px]" />
-            {detection.sources.length && !detection.account ? "已检测到本机来源" : "已检测到账号"}
+            {browserReady ? "浏览器账号已验证" : detection.sources.length && !detection.account ? "已检测到本机来源" : "已检测到账号"}
           </span>
           <div className="flex flex-wrap items-center gap-4">
             <span className="break-all text-base font-semibold text-jolu-text">{account}</span>
@@ -517,14 +528,11 @@ function SubscriptionSection({ platform, providerName, detecting, detection, onD
             <Info label="凭证标识" value={detection.masked ?? "未获取"} />
             <Info label="套餐" value={detection.plan ?? "未获取"} />
           </div>
-          <span className="text-[11px] text-jolu-muted">账号与套餐以本机客户端记录为准，未记录时显示「未获取」。</span>
+          <span className="text-[11px] text-jolu-muted">{browserReady ? "账号已通过真实额度查询；保存后凭证加密保存在本机。" : "账号与套餐以本机客户端记录为准，未记录时显示「未获取」。"}</span>
         </div>
         <div className="flex gap-2.5">
-          <JoluButton variant="neutral" disabled={detecting} onClick={onDetect}>
-            {detecting ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}
-            重新检测
-          </JoluButton>
-          {guide("切换账号", "switchAccount")}
+          {detectButton}
+          {browserButton}
         </div>
         {!tabs && <p className="text-xs text-jolu-muted">此状态只提供订阅连接。平台和账号支持 API Key 时才显示第二种方式。</p>}
       </>
@@ -536,17 +544,17 @@ function SubscriptionSection({ platform, providerName, detecting, detection, onD
       <div className="flex flex-col gap-3.5 rounded-[10px] bg-jolu-side p-5">
         <LogIn aria-hidden className="size-6 text-jolu-text" />
         <span className="text-base font-semibold text-jolu-text">使用 {providerName} 账号连接</span>
-        <span className="text-xs text-jolu-muted">在官方客户端完成登录，再回到 Jolu 检测登录状态。</span>
+        <span className="text-xs text-jolu-muted">{browserSupported ? "读取官方客户端的本地登录，或使用系统默认浏览器完成官方授权。" : "读取官方客户端的本地登录；此供应商的浏览器授权待接入。"}</span>
         <div className="flex gap-2.5">
-          {guide("打开登录指引", "loginGuide")}
           {detectButton}
+          {browserButton}
         </div>
       </div>
       <div className="flex items-center gap-3 rounded-[10px] border border-jolu-border p-4">
         <LoaderCircle aria-hidden className={cn("size-5 shrink-0 text-jolu-muted", detecting && "animate-spin")} />
         <div className="flex min-w-0 flex-col gap-[7px]">
-          <span className="text-[13px] text-jolu-text">{detecting ? "正在检测本机登录" : "尚未检测到有效登录"}</span>
-          <span className="text-xs text-jolu-muted">{detection?.message ?? "完成登录后点击检测；成功后才能保存连接。"}</span>
+          <span className="text-[13px] text-jolu-text">{browserPending ? "等待浏览器授权与额度验证" : detecting ? "正在读取本地登录" : "尚未获取有效登录"}</span>
+          <span role="status" className="text-xs text-jolu-muted">{browserPending ? browserMessage ?? "请在系统默认浏览器完成官方登录，验证成功后会自动返回。" : detection?.message ?? "读取或授权成功后才能保存连接。"}</span>
         </div>
       </div>
       <p className="text-[11px] text-jolu-muted">Jolu 不要求输入账号密码。账号与套餐信息以检测结果为准。</p>
@@ -592,14 +600,14 @@ function Info({ label, value }: { label: string; value: string }) {
 }
 
 /** 「更换平台」：列出全部供应商，待接入的不可选 */
-function PlatformSwitcher({ current, onPick }: { current: PlatformId; onPick: (platform: PlatformId) => void }) {
+function PlatformSwitcher({ current, onPick }: { current: ProviderId; onPick: (platform: ProviderId) => void }) {
   return (
     <Menu.Root modal={false}>
       <Menu.Trigger asChild>
         <JoluButton variant="neutral">更换平台</JoluButton>
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="end" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] w-[220px] rounded-lg border border-jolu-border bg-jolu-bg p-[5px] shadow-popover">
+        <Menu.Content align="end" sideOffset={6} collisionPadding={12} style={{maxHeight:"var(--radix-dropdown-menu-content-available-height)"}} className="motion-popover z-[100] w-[220px] overflow-y-auto rounded-lg border border-jolu-border bg-jolu-bg p-[5px] shadow-popover">
           {PROVIDERS.map((item) => {
             const pending = item.subscription !== "ready" && item.apiKey !== "ready"
             return (
@@ -609,7 +617,7 @@ function PlatformSwitcher({ current, onPick }: { current: PlatformId; onPick: (p
                 onSelect={() => onPick(item.id)}
                 className="flex h-8 cursor-default select-none items-center gap-2 rounded-[5px] px-2 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side data-[disabled]:opacity-45"
               >
-                <PlatformLogo platform={item.id} />
+                <PlatformLogo platform={item.platformId} />
                 <span className="min-w-0 flex-1">{item.name}</span>
                 {pending ? <span className="text-[11px] text-jolu-muted">待接入</span> : item.id === current && <Check aria-hidden className="size-3.5 text-jolu-on" />}
               </Menu.Item>

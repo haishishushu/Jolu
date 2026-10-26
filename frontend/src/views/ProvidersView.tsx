@@ -3,14 +3,14 @@ import { useState } from "react"
 import { Blocks, Code, Hexagon, Info, Plus, UsersRound } from "lucide-react"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { PROVIDERS, canConnect, connectionBadge, type ProviderEntry } from "@/lib/providerCatalog"
+import { PROVIDERS, canConnect, connectionBadge, connectionProviderId, type ProviderId, type ProviderEntry } from "@/lib/providerCatalog"
 import { useConnections } from "@/hooks/useConnections"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { Tip } from "@/components/ui/Tip"
 import { ConnectDialog } from "@/components/providers/ConnectDialog"
 import { AccountsPanel } from "@/components/providers/AccountsPanel"
-import type { PlatformId } from "@/types"
+import type { Connection } from "@/types"
 
 export type ProvidersTab = "connect" | "accounts"
 
@@ -20,30 +20,30 @@ export type ProvidersTab = "connect" | "accounts"
 export function ProvidersView({ initialTab = "connect" }: { initialTab?: ProvidersTab }) {
   const [tab, setTab] = useState<ProvidersTab>(initialTab)
   const conn = useConnections()
-  const [connecting, setConnecting] = useState<PlatformId | null>(null)
+  const [connecting, setConnecting] = useState<ProviderId | null>(null)
 
   /**
    * 订阅连接保存：本机读取入库的连接默认暂停查询（旧界面需手动启用）。新稿里点「保存连接」即表示同意接入，
    * 所以只恢复这次新增的连接；已存在的连接保持原状态。
    */
-  const saveLocal = async (platform: string, kind: "auth" | "api", name?: string) => {
+  const saveLocal = async (platform: string, kind: "auth" | "api", name?: string, edition?: string) => {
     const before = new Set((await api.listConnections()).map((c) => c.id))
-    const summary = await conn.readLocal(platform, kind, name)
-    const added = (await api.listConnections()).filter((c) => !before.has(c.id) && c.platform === platform && c.kind === kind)
+    const summary = await conn.readLocal(platform, kind, name, edition)
+    const added = (await api.listConnections()).filter((c) => !before.has(c.id) && c.platform === platform && c.kind === kind && (!edition || c.edition === edition))
     await Promise.all(added.map((c) => api.setConnectionPaused(c.id, false)))
     if (added.length) await conn.reload()
     return summary
   }
 
   return (
-    <div className="flex w-full flex-col gap-4">
-      <div role="tablist" aria-label="供应商" className="flex h-11 gap-6 border-b border-jolu-border">
+    <div className={cn("flex w-full flex-col gap-3", tab === "accounts" && "h-full min-h-0")}>
+      <div role="tablist" aria-label="供应商" className="flex h-11 shrink-0 gap-6 border-b border-jolu-border">
         <TabButton active={tab === "connect"} icon={<Blocks aria-hidden className="size-[17px]" />} onClick={() => setTab("connect")}>供应商连接</TabButton>
         <TabButton active={tab === "accounts"} icon={<UsersRound aria-hidden className="size-[17px]" />} onClick={() => setTab("accounts")}>账号管理</TabButton>
       </div>
 
-      <ContentTransition identity={`${tab}-${conn.loading && !conn.connections.length}`} className="flex flex-col gap-4">
-      {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface layout={tab === "connect" ? "providers" : "accounts"} label="正在读取供应商连接" /> : tab === "connect" ? (
+      <ContentTransition identity={`${tab}-${conn.loading && !conn.connections.length}`} className={cn("flex flex-col gap-3",tab === "accounts" && "min-h-0 flex-1")}>
+      {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface className={tab === "accounts" ? "min-h-0 flex-1" : undefined} layout={tab === "connect" ? "providers" : "accounts"} label="正在读取供应商连接" /> : tab === "connect" ? (
         <ConnectGrid counts={countByPlatform(conn.connections)} loading={conn.loading} error={conn.error} onConnect={setConnecting} onRetry={() => void conn.reload()} />
       ) : (
         <AccountsPanel conn={conn} onConnect={setConnecting} onBrowseProviders={() => setTab("connect")} />
@@ -61,9 +61,12 @@ export function ProvidersView({ initialTab = "connect" }: { initialTab?: Provide
   )
 }
 
-function countByPlatform(connections: readonly { platformId: PlatformId }[]): Map<PlatformId, number> {
-  const counts = new Map<PlatformId, number>()
-  for (const c of connections) counts.set(c.platformId, (counts.get(c.platformId) ?? 0) + 1)
+function countByPlatform(connections: readonly Connection[]): Map<ProviderId, number> {
+  const counts = new Map<ProviderId, number>()
+  for (const c of connections) {
+    const provider=connectionProviderId(c)
+    if(provider) counts.set(provider, (counts.get(provider) ?? 0) + 1)
+  }
   return counts
 }
 
@@ -87,10 +90,10 @@ function TabButton({ active, icon, onClick, children }: { active: boolean; icon:
 
 /** 画板 05「连接你的 AI 工具」：自定义供应商 + 九个平台，每行四张 */
 function ConnectGrid({ counts, loading, error, onConnect, onRetry }: {
-  counts: Map<PlatformId, number>
+  counts: Map<ProviderId, number>
   loading: boolean
   error: string | null
-  onConnect: (platform: PlatformId) => void
+  onConnect: (platform: ProviderId) => void
   onRetry: () => void
 }) {
   return (
@@ -153,7 +156,7 @@ function ProviderCard({ entry, count, onConnect }: { entry: ProviderEntry; count
   )
   return (
     <Card
-      logo={<span className="grid size-7 place-items-center"><PlatformLogo platform={entry.id} size={22} /></span>}
+      logo={<span className="grid size-7 place-items-center"><PlatformLogo platform={entry.platformId} size={22} /></span>}
       // 待接入的平台不显示账号数量，改为说明状态（待确认：Jolu.pen 未画此状态）
       badge={!ready ? "待接入" : count === null ? "读取中" : connectionBadge(count)}
       badgeTone={ready && count ? "on" : "muted"}

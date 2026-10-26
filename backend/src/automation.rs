@@ -35,6 +35,7 @@ const LOG_LIMIT: i64 = 200;
 /// 额度恢复后在原会话里继续时追加的指令
 const RESUME_PROMPT: &str = "额度已恢复。请从中断处继续完成上一条任务，不要重复已经完成的修改；完成后汇总改动与验证结果。";
 const ACTIVE: &str = "('queued','waiting','running','attention')";
+const MISSING_SNAPSHOT: &str = "此运行没有原始执行配置快照，无法确认工具、账号、目录与指令；已保留历史和会话，请取消旧运行并核对任务配置后重新创建任务，不会按当前配置自动续跑。";
 
 fn now_ms() -> i64 {
     Local::now().timestamp_millis()
@@ -55,7 +56,7 @@ pub fn tool_name(platform: &str) -> Option<&'static str> {
 }
 
 fn display_name(platform: &str) -> &'static str {
-    if platform == "codex" { "Codex" } else { "Claude Code" }
+    match platform { "codex" => "Codex", "claude" => "Claude Code", _ => "未知工具" }
 }
 
 /* ─────────────────────────── 数据表 ─────────────────────────── */
@@ -138,6 +139,11 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_confirmed {
         conn.execute("ALTER TABLE automation_runs ADD COLUMN resume_confirmed INTEGER NOT NULL DEFAULT 0", [])?;
     }
+    // 只加可空列，不用当前任务猜填旧运行的历史参数。
+    let has_snapshot = conn.prepare("SELECT 1 FROM pragma_table_info('automation_runs') WHERE name = 'task_snapshot'")?.exists([])?;
+    if !has_snapshot {
+        conn.execute("ALTER TABLE automation_runs ADD COLUMN task_snapshot TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -180,7 +186,7 @@ pub struct TaskInput {
 
 fn yes() -> bool { true }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: i64,
     pub name: String,
@@ -241,6 +247,9 @@ pub struct Run {
     pub result: Option<String>,
     pub files: Vec<String>,
     pub error: Option<String>,
+    /// 运行创建时的执行参数；旧版本未保存的历史明确为未知。
+    #[serde(skip)]
+    config: Option<Task>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -279,7 +288,7 @@ fn task_from(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     })
 }
 
-const RUN_COLS: &str = "r.id, r.task_id, t.name, t.platform, t.connection_id, r.source, r.status, r.block_kind, r.reason, r.resets_at, r.last_check_at, r.next_check_at, r.check_failures, r.resume_pending, r.session_id, r.account, r.model, r.created_at, r.started_at, r.ended_at, r.exec_ms, r.wait_ms, r.exec_started_at, r.wait_started_at, r.waits, r.input_tokens, r.cache_read_tokens, r.output_tokens, r.result, r.files, r.error";
+const RUN_COLS: &str = "r.id, r.task_id, COALESCE(json_extract(r.task_snapshot, '$.name'), '未知任务'), COALESCE(json_extract(r.task_snapshot, '$.platform'), 'unknown'), COALESCE(json_extract(r.task_snapshot, '$.connection_id'), ''), r.source, r.status, r.block_kind, r.reason, r.resets_at, r.last_check_at, r.next_check_at, r.check_failures, r.resume_pending, r.session_id, r.account, r.model, r.created_at, r.started_at, r.ended_at, r.exec_ms, r.wait_ms, r.exec_started_at, r.wait_started_at, r.waits, r.input_tokens, r.cache_read_tokens, r.output_tokens, r.result, r.files, r.error, r.task_snapshot";
 
 fn run_from(r: &rusqlite::Row) -> rusqlite::Result<Run> {
     let files: String = r.get(29)?;
@@ -315,6 +324,7 @@ fn run_from(r: &rusqlite::Row) -> rusqlite::Result<Run> {
         result: r.get(28)?,
         files: serde_json::from_str(&files).unwrap_or_default(),
         error: r.get(30)?,
+        config: r.get::<_, Option<String>>(31)?.map(|text| serde_json::from_str(&text).map_err(|error| rusqlite::Error::FromSqlConversionFailure(31, rusqlite::types::Type::Text, Box::new(error)))).transpose()?,
     })
 }
 
@@ -444,16 +454,17 @@ pub fn validate(input: &TaskInput, now: i64) -> Result<(), String> {
 fn insert_run(conn: &Connection, task: &Task, source: &str, status: &str, now: i64) -> rusqlite::Result<i64> {
     let account = connection_name(conn, &task.connection_id);
     let waiting = status == "waiting";
+    let snapshot = serde_json::to_string(task).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     conn.execute(
-        "INSERT INTO automation_runs (task_id, source, status, block_kind, reason, next_check_at, wait_started_at, session_id, account, model, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO automation_runs (task_id, source, status, block_kind, reason, next_check_at, wait_started_at, session_id, account, model, created_at, task_snapshot)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             task.id, source, status,
             waiting.then_some("quota"),
             waiting.then_some("等待检查额度"),
             waiting.then_some(now),
             waiting.then_some(now),
-            task.session_id, account, task.model, now
+            task.session_id, account, task.model, now, snapshot
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -557,7 +568,7 @@ fn day_start(now: i64) -> i64 {
 fn queue_ahead(conn: &Connection, run: &Run) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE t.connection_id = ?1 AND (t.state = 'active' OR r.status = 'running') AND t.serial_queue = 1 AND r.id != ?2
+         WHERE json_extract(r.task_snapshot, '$.connection_id') = ?1 AND (t.state = 'active' OR r.status = 'running') AND json_extract(r.task_snapshot, '$.serial_queue') = 1 AND r.id != ?2
            AND r.status IN ('queued','waiting','running')
            AND (r.status = 'running' OR r.created_at < ?3 OR (r.created_at = ?3 AND r.id < ?2))",
         params![run.connection_id, run.id, run.created_at],
@@ -570,7 +581,7 @@ fn task_item(conn: &Connection, task: Task) -> rusqlite::Result<TaskItem> {
     let last = last_run(conn, task.id)?;
     // 关闭排队的任务没有队列位置（只受工作目录、并行上限与额度等待限制），不给出前方任务数；显示方式待确认
     let queue_ahead = match &active {
-        Some(run) if run.status == "queued" && task.serial_queue => Some(queue_ahead(conn, run)?),
+        Some(run) if run.status == "queued" && run.config.as_ref().is_some_and(|c| c.serial_queue) => Some(queue_ahead(conn, run)?),
         _ => None,
     };
     Ok(TaskItem { task, active, last, queue_ahead })
@@ -584,11 +595,10 @@ pub fn overview(conn: &Connection, now: i64) -> rusqlite::Result<Overview> {
     let enabled = tasks.iter().filter(|i| i.task.state == "active" && (i.task.launch == "schedule" || i.active.is_some())).count() as i64;
     let running: Vec<&TaskItem> = tasks.iter().filter(|i| status_of(i).as_deref() == Some("running")).collect();
     let waiting: Vec<&TaskItem> = tasks.iter().filter(|i| status_of(i).as_deref() == Some("waiting")).collect();
-    let running_note = running.first().map(|i| {
-        let account = i.active.as_ref().and_then(|r| r.account.clone());
-        match account {
-            Some(a) => format!("{} · {a}", display_name(&i.task.platform)),
-            None => display_name(&i.task.platform).to_string(),
+    let running_note = running.first().and_then(|i| i.active.as_ref()).map(|run| {
+        match &run.account {
+            Some(a) => format!("{} · {a}", display_name(&run.platform)),
+            None => display_name(&run.platform).to_string(),
         }
     });
     let next_reset = waiting.iter().filter_map(|i| i.active.as_ref().and_then(|r| r.resets_at)).filter(|t| *t > now).min();
@@ -618,6 +628,8 @@ pub struct QueueItem {
 #[derive(Debug, Serialize)]
 pub struct TaskDetail {
     pub item: TaskItem,
+    /// 当前活动运行（或最近运行）的原始配置；还没有运行时为任务配置，旧运行缺失快照时为 None。
+    pub execution: Option<Task>,
     /// 同账号的队列（执行中 / 等待额度 / 排队中），按先后顺序；只列开启排队的任务（D-09）
     pub queue: Vec<QueueItem>,
     /// 当前（或最近一次）运行的时间线
@@ -629,15 +641,19 @@ pub fn task_detail(conn: &Connection, id: i64) -> Result<TaskDetail, String> {
     let task = load_task(conn, id).map_err(e)?.ok_or("任务不存在")?;
     let item = task_item(conn, task).map_err(e)?;
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.name, r.status FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE t.connection_id = ?1 AND (t.state = 'active' OR r.status = 'running') AND t.serial_queue = 1 AND r.status IN ('queued','waiting','running')
+        "SELECT t.id, COALESCE(json_extract(r.task_snapshot, '$.name'), '未知任务'), r.status FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
+         WHERE json_extract(r.task_snapshot, '$.connection_id') = ?1 AND (t.state = 'active' OR r.status = 'running') AND json_extract(r.task_snapshot, '$.serial_queue') = 1 AND r.status IN ('queued','waiting','running')
          ORDER BY CASE r.status WHEN 'running' THEN 0 ELSE 1 END, r.created_at, r.id",
     ).map_err(e)?;
-    let queue = stmt.query_map([&item.task.connection_id], |r| Ok(QueueItem { task_id: r.get(0)?, name: r.get(1)?, status: r.get(2)? }))
+    let queue = stmt.query_map([item.active.as_ref().map(|r| r.connection_id.as_str()).unwrap_or(&item.task.connection_id)], |r| Ok(QueueItem { task_id: r.get(0)?, name: r.get(1)?, status: r.get(2)? }))
         .map_err(e)?.collect::<Result<_, _>>().map_err(e)?;
     let run_id = item.active.as_ref().or(item.last.as_ref()).map(|r| r.id);
     let events = match run_id { Some(id) => events_of(conn, id, false).map_err(e)?, None => vec![] };
-    Ok(TaskDetail { item, queue, events })
+    let execution = match item.active.as_ref().or(item.last.as_ref()) {
+        Some(run) => run.config.clone(),
+        None => Some(item.task.clone()),
+    };
+    Ok(TaskDetail { item, execution, queue, events })
 }
 
 #[derive(Debug, Deserialize)]
@@ -678,7 +694,7 @@ fn range_start(range: &str, now: i64) -> Option<i64> {
 
 pub fn runs(conn: &Connection, f: &RunFilter, page: u32, now: i64) -> rusqlite::Result<RunPage> {
     let since = range_start(&f.range, now).unwrap_or(i64::MIN);
-    let base = "FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id WHERE r.created_at >= ?1 AND (?2 IS NULL OR t.connection_id = ?2) AND (?3 IS NULL OR r.task_id = ?3)";
+    let base = "FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id WHERE r.created_at >= ?1 AND (?2 IS NULL OR json_extract(r.task_snapshot, '$.connection_id') = ?2) AND (?3 IS NULL OR r.task_id = ?3)";
     let status_clause = "AND (?4 IS NULL OR r.status = ?4)";
     let p = params![since, f.connection, f.task, f.status];
     let total: i64 = conn.query_row(&format!("SELECT COUNT(*) {base} {status_clause}"), p, |r| r.get(0))?;
@@ -718,7 +734,7 @@ pub struct RunDetail {
 pub fn run_detail(conn: &Connection, id: i64) -> Result<RunDetail, String> {
     let e = |e: rusqlite::Error| e.to_string();
     let run = load_run(conn, id).map_err(e)?.ok_or("运行记录不存在")?;
-    let task = load_task(conn, run.task_id).map_err(e)?;
+    let task = run.config.clone();
     Ok(RunDetail { events: events_of(conn, id, false).map_err(e)?, logs: events_of(conn, id, true).map_err(e)?, run, task })
 }
 
@@ -1196,7 +1212,7 @@ pub fn finish(conn: &Connection, run_id: i64, outcome: &Outcome, p: &Progress, n
         "UPDATE automation_runs SET exec_ms=exec_ms+?2, exec_started_at=NULL, input_tokens=?3, cache_read_tokens=?4, output_tokens=?5, files=?6, session_id=?7, result=COALESCE(?8, result) WHERE id=?1",
         params![run_id, exec_add, input, cache, output, serde_json::to_string(&files).unwrap_or_else(|_| "[]".into()), session, p.result.as_deref().map(|r| clip(r, 4000))],
     )?;
-    let auto_resume = task.as_ref().is_some_and(|t| t.auto_resume);
+    let auto_resume = run.config.as_ref().is_some_and(|t| t.auto_resume);
     // 任务已不是启用状态（执行中被取消）：会让运行继续挂着的结果（等待额度、需要处理）一律按已取消收尾，
     // 不留下等待 / 排队的孤儿运行；完成与失败是真实结果，照常记录
     let inactive = task.as_ref().is_none_or(|t| t.state != "active");
@@ -1319,7 +1335,7 @@ pub fn take_resume_confirmed(conn: &Connection, run_id: i64) -> rusqlite::Result
 /// 该账号下等待额度的运行：额度检查前记下，检查后转为「需要处理」的发失败通知
 fn waiting_runs(conn: &Connection, connection_id: &str) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = conn.prepare(
-        "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id WHERE r.status = 'waiting' AND t.connection_id = ?1",
+        "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id WHERE r.status = 'waiting' AND json_extract(r.task_snapshot, '$.connection_id') = ?1",
     )?;
     let ids = stmt.query_map([connection_id], |r| r.get(0))?.collect::<Result<_, _>>()?;
     Ok(ids)
@@ -1352,8 +1368,8 @@ fn cwd_key(path: &str) -> String {
 pub fn startable(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
     struct Row { id: i64, status: String, cwd: String, serial: bool }
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.status, t.connection_id, t.cwd, t.serial_queue FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status IN ('queued','waiting','running') AND (t.state = 'active' OR r.status = 'running')
+        "SELECT r.id, r.status, json_extract(r.task_snapshot, '$.connection_id'), json_extract(r.task_snapshot, '$.cwd'), json_extract(r.task_snapshot, '$.serial_queue') FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
+         WHERE r.task_snapshot IS NOT NULL AND r.status IN ('queued','waiting','running') AND (t.state = 'active' OR r.status = 'running')
          ORDER BY r.created_at, r.id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1413,7 +1429,7 @@ pub fn fire_schedules<Tz: TimeZone>(conn: &Connection, tz: &Tz, now: i64) -> rus
 pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>, Vec<i64>)> {
     let mut stmt = conn.prepare(
         "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status = 'waiting' AND t.wait_deadline IS NOT NULL AND t.wait_deadline < ?1",
+         WHERE r.status = 'waiting' AND json_extract(r.task_snapshot, '$.wait_deadline') IS NOT NULL AND json_extract(r.task_snapshot, '$.wait_deadline') < ?1",
     )?;
     let expired: Vec<i64> = stmt.query_map([now], |r| r.get(0))?.collect::<Result<_, _>>()?;
     for id in &expired {
@@ -1424,9 +1440,9 @@ pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>,
         add_event(conn, *id, now, "attention", "等待超时", None)?;
     }
     let mut stmt = conn.prepare(
-        "SELECT t.connection_id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status = 'waiting' AND t.state = 'active' AND (r.next_check_at IS NULL OR r.next_check_at <= ?1)
-         GROUP BY t.connection_id ORDER BY MIN(r.created_at), MIN(r.id)",
+        "SELECT json_extract(r.task_snapshot, '$.connection_id') FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
+         WHERE r.task_snapshot IS NOT NULL AND r.status = 'waiting' AND t.state = 'active' AND (r.next_check_at IS NULL OR r.next_check_at <= ?1)
+         GROUP BY json_extract(r.task_snapshot, '$.connection_id') ORDER BY MIN(r.created_at), MIN(r.id)",
     )?;
     let due = stmt.query_map([now], |r| r.get(0))?.collect::<Result<_, _>>()?;
     Ok((due, expired))
@@ -1439,7 +1455,7 @@ pub fn due_checks(conn: &Connection, now: i64) -> rusqlite::Result<(Vec<String>,
 pub fn apply_account_check(conn: &Connection, connection_id: &str, extra: Option<i64>, checked_from: i64, v: &QuotaVerdict, now: i64) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare(
         "SELECT r.id FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id
-         WHERE r.status = 'waiting' AND t.connection_id = ?1 AND (t.state != 'paused' OR r.id = ?2)
+         WHERE r.status = 'waiting' AND json_extract(r.task_snapshot, '$.connection_id') = ?1 AND (t.state != 'paused' OR r.id = ?2)
            AND COALESCE(r.wait_started_at, 0) <= ?3
          ORDER BY r.created_at, r.id",
     )?;
@@ -1451,6 +1467,12 @@ pub fn apply_account_check(conn: &Connection, connection_id: &str, extra: Option
 
 /// 启动时：上次退出时还在执行的运行标为需要处理（不自动重跑）；等待中的立即重新检查额度
 pub fn recover(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    let mut missing = conn.prepare("SELECT id, status, block_kind, reason FROM automation_runs WHERE task_snapshot IS NULL AND status IN ('queued','waiting','running','attention') AND COALESCE(block_kind, '') != 'snapshot_missing'")?;
+    let unknown: Vec<(i64, String, Option<String>, Option<String>)> = missing.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?;
+    for (id, status, kind, reason) in unknown {
+        conn.execute("UPDATE automation_runs SET status='attention', block_kind='snapshot_missing', reason=?2, next_check_at=NULL, exec_started_at=NULL WHERE id=?1", params![id, MISSING_SNAPSHOT])?;
+        add_event(conn, id, now, "attention", "原始执行配置未知", Some(&format!("迁移前状态：{status}；原因类型：{}；说明：{}。{MISSING_SNAPSHOT}", kind.as_deref().unwrap_or("无"), reason.as_deref().unwrap_or("无"))))?;
+    }
     let mut stmt = conn.prepare("SELECT id FROM automation_runs WHERE status = 'running'")?;
     let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     for id in ids {
@@ -1511,6 +1533,7 @@ pub fn act(conn: &Connection, id: i64, action: &str, now: i64) -> Result<Option<
             if task.state == "paused" { return Err("请先恢复任务".into()); }
             match &active {
                 Some(r) if r.status == "attention" => {
+                    if r.config.is_none() { return Err(MISSING_SNAPSHOT.into()); }
                     // 手动重新排队没有确认过额度：续跑时不发「任务已继续」（任务 2.5）
                     conn.execute("UPDATE automation_runs SET status='queued', block_kind=NULL, reason=NULL, resume_confirmed=0 WHERE id=?1", [r.id]).map_err(e)?;
                     add_event(conn, r.id, now, "queue", "重新排队", None).map_err(e)?;
@@ -1553,7 +1576,7 @@ pub fn delete_task(conn: &mut Connection, task_id: i64) -> Result<(), String> {
 pub fn claim_run(conn: &Connection, run_id: i64) -> rusqlite::Result<bool> {
     let n = conn.execute(
         "UPDATE automation_runs SET status='running', block_kind=NULL, reason=NULL
-         WHERE id=?1 AND status='queued'
+         WHERE id=?1 AND status='queued' AND task_snapshot IS NOT NULL
            AND EXISTS(SELECT 1 FROM automation_tasks t WHERE t.id = automation_runs.task_id AND t.state = 'active')",
         [run_id],
     )?;
@@ -1730,10 +1753,9 @@ fn start_run(app: &AppHandle, run_id: i64) {
     let now = now_ms();
     let loaded = with_conn(&db, |conn| {
         let run = load_run(conn, run_id).map_err(|e| e.to_string())?.ok_or("运行记录不存在")?;
-        let task = load_task(conn, run.task_id).map_err(|e| e.to_string())?.ok_or("任务不存在")?;
-        Ok((run, task))
+        Ok(run)
     });
-    let Ok((run, task)) = loaded else { return };
+    let Ok(run) = loaded else { return };
     if run.status != "queued" { return; }
     let attention = |kind: &str, reason: String| {
         let notices = with_conn(&db, |conn| {
@@ -1743,6 +1765,7 @@ fn start_run(app: &AppHandle, run_id: i64) {
         emit(app);
         send_notices(app, notices.unwrap_or_default());
     };
+    let Some(task) = run.config.as_ref() else { return attention("snapshot_missing", MISSING_SNAPSHOT.into()) };
     let Some(tool) = tool_name(&task.platform) else { return attention("tool_missing", "该工具尚未接入执行器".into()) };
     let Some(exe) = crate::session_threads::find_executable(tool) else {
         return attention("tool_missing", format!("未检测到 {}，请安装或配置后重试；已保留进度。", display_name(&task.platform)));
@@ -2095,6 +2118,136 @@ mod tests {
     }
 
     #[test]
+    fn editing_task_preserves_existing_run_identity_and_execution() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_700_000_000_000;
+        let mut original = input("quota");
+        original.model = Some("original-model".into());
+        original.skills = vec!["original-skill".into()];
+        original.wait_deadline = Some(now + 100_000);
+        let task_id = create_task(&conn, &original, now).unwrap();
+        let run_id = active_run(&conn, task_id).unwrap().unwrap().id;
+        let mut edited = original.clone();
+        edited.name = "修改后的任务".into();
+        edited.platform = if original.platform == "claude" { "codex".into() } else { "claude".into() };
+        edited.connection_id = "different-account".into();
+        edited.cwd = std::env::current_dir().unwrap().display().to_string();
+        edited.prompt = "新指令只用于新运行".into();
+        edited.skills = vec!["new-skill".into()];
+        edited.model = Some("new-model".into());
+        edited.auto_resume = false;
+        edited.wait_deadline = Some(now + 10);
+        update_task(&conn, task_id, &edited, now + 1).unwrap();
+        let detail = run_detail(&conn, run_id).unwrap();
+        assert_eq!(detail.run.platform, original.platform);
+        assert_eq!(detail.run.connection_id, original.connection_id);
+        assert_eq!(detail.run.task_name, original.name);
+        let config = detail.task.unwrap();
+        let task_view = task_detail(&conn, task_id).unwrap();
+        assert_eq!(task_view.item.task.prompt, edited.prompt, "编辑继续读取当前任务");
+        assert_eq!(task_view.execution.unwrap().prompt, original.prompt, "执行详情读取运行快照");
+        assert_eq!(config.cwd, original.cwd);
+        assert_eq!(config.prompt, original.prompt);
+        assert_eq!(config.skills, original.skills);
+        assert_eq!(config.model, original.model);
+        assert!(config.auto_resume);
+        assert_eq!(due_checks(&conn, now + 20).unwrap(), (vec![original.connection_id], vec![]));
+        assert!(apply_account_check(&conn, &config.connection_id, None, now + 20, &QuotaVerdict::simple("available", "可用"), now + 21).unwrap());
+        assert!(claim_run(&conn, run_id).unwrap());
+        let progress = Progress { session_id: Some("old-session".into()), ..Progress::default() };
+        finish(&conn, run_id, &Outcome::Limit { resets_at: Some(now + 1000), message: "usage limit".into() }, &progress, now + 22).unwrap();
+        let resumed = load_run(&conn, run_id).unwrap().unwrap();
+        assert_eq!(resumed.status, "waiting", "编辑不改变已有运行的自动续跑选项");
+        assert_eq!(resumed.session_id.as_deref(), Some("old-session"));
+    }
+
+    #[test]
+    fn editing_task_keeps_history_and_next_run_uses_new_configuration() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_700_000_000_000;
+        let original = input("now");
+        let task_id = create_task(&conn, &original, now).unwrap();
+        let old_run = active_run(&conn, task_id).unwrap().unwrap().id;
+        finish(&conn, old_run, &Outcome::Completed, &Progress::default(), now + 1).unwrap();
+        let mut edited = original.clone();
+        edited.connection_id = "new-account".into();
+        edited.prompt = "新运行指令".into();
+        update_task(&conn, task_id, &edited, now + 2).unwrap();
+        act(&conn, task_id, "run", now + 3).unwrap();
+        let new_run = active_run(&conn, task_id).unwrap().unwrap().id;
+        assert_eq!(run_detail(&conn, old_run).unwrap().task.unwrap().prompt, original.prompt);
+        assert_eq!(run_detail(&conn, new_run).unwrap().task.unwrap().prompt, edited.prompt);
+        let filter = RunFilter { range: "all".into(), status: None, connection: Some(original.connection_id), task: None };
+        let history = runs(&conn, &filter, 1, now + 4).unwrap();
+        assert_eq!(history.rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![old_run]);
+    }
+
+    #[test]
+    fn editing_running_task_keeps_original_account_queue_and_cwd_lock() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_700_000_000_000;
+        let running = queued(&conn, "c1", r"D:\original", true, now);
+        set_status(&conn, running, "running");
+        let same_account = queued(&conn, "c1", r"D:\other", true, now + 1);
+        let same_cwd = queued(&conn, "c2", r"D:\original", false, now + 2);
+        let task_id = load_run(&conn, running).unwrap().unwrap().task_id;
+        let mut edited = input("now");
+        edited.connection_id = "c2".into();
+        edited.serial_queue = false;
+        update_task(&conn, task_id, &edited, now + 3).unwrap();
+        assert!(startable(&conn).unwrap().is_empty(), "执行中的原账号串行位置和原目录锁不能被编辑释放");
+        let waiting = load_run(&conn, same_account).unwrap().unwrap();
+        assert_eq!(queue_ahead(&conn, &waiting).unwrap(), 1);
+        let queue = task_detail(&conn, task_id).unwrap().queue;
+        assert_eq!(queue.len(), 2, "任务详情按当前运行的原账号列队列");
+        finish(&conn, running, &Outcome::Completed, &Progress::default(), now + 4).unwrap();
+        assert_eq!(startable(&conn).unwrap(), vec![same_account, same_cwd]);
+    }
+
+    #[test]
+    fn legacy_runs_keep_raw_history_without_guessing_execution_config() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let now = 1_700_000_000_000;
+        let task_id = create_task(&conn, &input("now"), now).unwrap();
+        let old_run = active_run(&conn, task_id).unwrap().unwrap().id;
+        conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2, exec_ms=500, account='原账号', session_id='original-session', result='原结果' WHERE id=?1", params![old_run, now - 1000]).unwrap();
+        // 模拟发布前的真实表：没有快照列；重复迁移不补猜测参数、不改结果和会话。
+        conn.execute_batch("ALTER TABLE automation_runs DROP COLUMN task_snapshot").unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+        assert!(startable(&conn).unwrap().is_empty());
+        assert!(!claim_run(&conn, old_run).unwrap());
+        recover(&conn, now + 1).unwrap();
+        recover(&conn, now + 2).unwrap();
+        let detail = run_detail(&conn, old_run).unwrap();
+        assert!(detail.task.is_none());
+        assert_eq!(detail.run.platform, "unknown");
+        assert_eq!(detail.run.connection_id, "");
+        assert_eq!(detail.run.account.as_deref(), Some("原账号"));
+        assert_eq!(detail.run.session_id.as_deref(), Some("original-session"));
+        assert_eq!(detail.run.result.as_deref(), Some("原结果"));
+        assert_eq!(detail.run.status, "attention");
+        assert_eq!(detail.run.exec_started_at, None, "迁移后不能继续累计运行时间");
+        assert_eq!(detail.run.exec_ms, 500);
+        assert_eq!(detail.run.block_kind.as_deref(), Some("snapshot_missing"));
+        assert_eq!(detail.events.iter().filter(|e| e.title == "原始执行配置未知").count(), 1);
+        assert!(act(&conn, task_id, "retry", now + 3).unwrap_err().contains("没有原始执行配置"));
+        assert!(due_checks(&conn, now + 4).unwrap().0.is_empty());
+        act(&conn, task_id, "cancel", now + 4).unwrap();
+        let cancelled = load_run(&conn, old_run).unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.exec_started_at, None);
+        assert_eq!(cancelled.exec_ms, 500);
+        conn.execute("UPDATE automation_runs SET status='completed' WHERE id=?1", [old_run]).unwrap();
+        recover(&conn, now + 5).unwrap();
+        assert_eq!(load_run(&conn, old_run).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
     fn quota_verdict_separates_blocked_unknown_and_reauth() {
         let w = |key: &str, used: Option<f64>, resets: Option<&str>| crate::quota::QuotaWindow {
             key: key.into(), window_name: format!("{key} 窗口"), used_percent: used, amount_text: None, remaining_text: None, resets_at: resets.map(str::to_string),
@@ -2209,7 +2362,8 @@ mod tests {
         i.connection_id = connection.into();
         i.serial_queue = serial;
         let task = create_task(conn, &i, now).unwrap();
-        conn.execute("UPDATE automation_tasks SET cwd=?2 WHERE id=?1", params![task, cwd]).unwrap();
+        // 队列夹具使用不必存在的合成路径；同时修改新运行快照，模拟创建时已选定该路径。
+        conn.execute("UPDATE automation_runs SET task_snapshot=json_set(task_snapshot, '$.cwd', ?2) WHERE task_id=?1", params![task, cwd]).unwrap();
         active_run(conn, task).unwrap().unwrap().id
     }
 
@@ -2951,7 +3105,7 @@ mod tests {
     fn resume_waiting(conn: &Connection, cwd: &str, at: i64, deadline: Option<i64>) -> i64 {
         let run = queued(conn, "c1", cwd, false, at);
         if let Some(d) = deadline {
-            conn.execute("UPDATE automation_tasks SET wait_deadline=?2 WHERE id=(SELECT task_id FROM automation_runs WHERE id=?1)", params![run, d]).unwrap();
+            conn.execute("UPDATE automation_runs SET task_snapshot=json_set(task_snapshot, '$.wait_deadline', ?2) WHERE id=?1", params![run, d]).unwrap();
         }
         conn.execute("UPDATE automation_runs SET status='running', exec_started_at=?2 WHERE id=?1", params![run, at]).unwrap();
         let p = Progress { session_id: Some("s-1".into()), ..Default::default() };

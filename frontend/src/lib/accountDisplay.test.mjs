@@ -1,23 +1,43 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { accountQuotaWindows, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "./accountDisplay.ts"
+import { quotaValue, accountQueries } from "./accountDisplay.ts"
 
-test("订阅本机快照不能冒充实时状态，缺失和无效到期日不猜测", () => {
-  assert.equal(subscriptionDisplay(null).status, "未提供")
+test("账号查询包括所有平台及自定义服务，暂停账号不联网", () => {
+  const api = { id: "z", platformId: "zcode", kind: "api", baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4", status: "connected" }
+  assert.deepEqual(accountQueries(api), { quota: "z", balance: "z" })
+  assert.deepEqual(accountQueries({ ...api, kind: "auth", baseUrl: null }), { quota: "z", balance: null })
+  assert.deepEqual(accountQueries({ ...api, platformId: "custom" }), { quota: "z", balance: "z" })
+  assert.deepEqual(accountQueries({ ...api, platformId: "custom", status: "paused" }), { quota: null, balance: null })
+  assert.deepEqual(accountQueries({ ...api, status: "paused" }), { quota: null, balance: null })
+  assert.deepEqual(accountQueries({ ...api, baseUrl: null }), { quota: "z", balance: null })
+})
+
+test("额度优先显示真实剩余次数，百分比非法时不显示满额", () => {
+  assert.equal(quotaValue({ remaining_text: "剩余 0 次", used_percent: null }), "剩余 0 次")
+  assert.equal(quotaValue({ remaining_text: null, used_percent: 0 }), "剩余 100%")
+  for (const used_percent of [null, undefined, NaN, Infinity, -1, 101]) {
+    assert.equal(quotaValue({ used_percent }), "未提供")
+  }
+})
+
+test("订阅到期日期区分本机记录，缺失和无效日期不猜测", () => {
+  assert.equal(subscriptionDisplay(null).expires, "未提供")
   const snapshot = { subscription_status: "active", subscription_source: "local_snapshot", expires_at: "2026-10-25T10:00:00Z", observed_at: null, reset_credits: null }
-  assert.equal(subscriptionDisplay(snapshot).status, "待核实 · 本机记录")
   assert.match(subscriptionDisplay(snapshot).expires, /2026-10-25/)
   assert.match(subscriptionDisplay(snapshot).note, /官网/)
   assert.equal(subscriptionDisplay({ ...snapshot, expires_at: "invalid" }).expires, "未提供")
-  assert.equal(subscriptionDisplay({ ...snapshot, subscription_source: "live" }).status, "有效")
-  assert.equal(subscriptionDisplay({ ...snapshot, subscription_source: "live", subscription_status: "expired" }).status, "已到期")
+  assert.equal(subscriptionDisplay({ ...snapshot, subscription_source: "live" }).note, null)
 })
 
-test("重置卡区分零、未知与适用次数，不推断可以使用", () => {
+test("重置卡主卡显示总可用数，当前适用数不能覆盖它，零和未知分别保留", () => {
   assert.equal(resetCreditsText(null), "未提供")
-  assert.equal(resetCreditsText({ available_count: 1, applicable_available_count: 0 }), "剩余 1 次 · 当前可用 0 次")
-  assert.equal(resetCreditsText({ available_count: 0, applicable_available_count: null }), "剩余 0 次 · 适用次数未提供")
-  assert.equal(resetCreditsText({ available_count: null, applicable_available_count: 1 }), "总次数未提供 · 当前可用 1 次")
+  assert.equal(resetCreditsText({ available_count: 1, applicable_available_count: 0 }, true), "可用 1 次")
+  assert.equal(resetCreditsText({ available_count: 1, applicable_available_count: 0 }), "可用 1 次 · 当前适用 0 次")
+  assert.equal(resetCreditsText({ available_count: 0, applicable_available_count: null }, true), "可用 0 次")
+  assert.equal(resetCreditsText({ available_count: 0, applicable_available_count: null }), "可用 0 次 · 适用次数未提供")
+  assert.equal(resetCreditsText({ available_count: null, applicable_available_count: 1 }, true), "可用次数未提供")
+  assert.equal(resetCreditsText({ available_count: null, applicable_available_count: 1 }), "可用次数未提供 · 当前适用 1 次")
 })
 
 test("订阅卡片固定展示五小时和周额度，缺失不冒充满额且额外窗口不丢失", () => {
@@ -69,6 +89,31 @@ test("搜索与供应商筛选共同生效", () => {
   assert.deepEqual(filterAccounts(accounts, "codex", "").map((a) => a.baseName), ["团队 API"])
   assert.deepEqual(filterAccounts(accounts, null, "7K2A").map((a) => a.baseName), ["团队 API"])
   assert.equal(filterAccounts(accounts, "claude", "团队").length, 0)
+})
+
+test("账号类型按真实 kind 筛选，与供应商、搜索取交集", () => {
+  const accounts=[
+    {platformId:"claude",kind:"auth",baseName:"官方订阅",name:"官方订阅",label:"Pro"},
+    {platformId:"claude",kind:"api",baseName:"中转服务",name:"中转服务",label:"API Key"},
+    {platformId:"custom",kind:"api",baseName:"自定义服务",name:"自定义服务",label:"API Key"},
+  ]
+  assert.deepEqual(filterAccounts(accounts,null,"","auth").map(a=>a.baseName),["官方订阅"])
+  assert.deepEqual(filterAccounts(accounts,null,"","api").map(a=>a.baseName),["中转服务","自定义服务"])
+  assert.deepEqual(filterAccounts(accounts,"claude","服务","api").map(a=>a.baseName),["中转服务"])
+  assert.equal(filterAccounts(accounts,"claude","服务","auth").length,0)
+  assert.equal(filterAccounts(accounts,null,"",null).length,3)
+})
+
+test("账号六版本分别筛选，区域未知账号只留在全部供应商", () => {
+  const accounts = [
+    ["qoder", "cn"], ["qoder", "global"], ["workbuddy", "cn"],
+    ["workbuddy", "ai"], ["trae", "cn"], ["trae", "global"], ["qoder", null],
+  ].map(([platformId, edition], index) => ({ id: `browser:${index}`, platformId, edition, baseName: "账号", name: "账号", label: "订阅" }))
+  const providers = ["qoder-cn", "qoder", "workbuddy", "workbuddy-ai", "trae-cn", "trae"]
+  for (const [index, provider] of providers.entries()) {
+    assert.deepEqual(filterAccounts(accounts, provider, "账号").map(a => a.id), [`browser:${index}`])
+  }
+  assert.equal(filterAccounts(accounts, null, "").length, 7)
 })
 
 test("邮箱搜索独立于自定义连接名，错误脱敏保留诊断与金额", () => {

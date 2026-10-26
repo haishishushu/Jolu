@@ -48,6 +48,8 @@ pub fn sources_at(home: &Path, app: &Path) -> Vec<Source> {
             home.join(".zcode/cli/db/db.sqlite"),
         ),
         ("trae", "ide", "Trae IDE", app.join("Trae")),
+        ("trae", "cn", "Trae 国内版", app.join("Trae CN")),
+        ("zcode", "account", "ZCode 账号", home.join(".zcode/v2/credentials.json")),
         (
             "qoder",
             "global",
@@ -76,7 +78,7 @@ pub fn sources_at(home: &Path, app: &Path) -> Vec<Source> {
     .into_iter()
     .map(|(platform, instance, name, path)| {
         let implemented =
-            crate::platforms::supports(platform, "local_sessions") || platform == "grok";
+            crate::platforms::supports(platform, "local_sessions") || platform == "grok" || platform == "trae";
         let available = path.exists() && implemented;
         Source {
             id: format!("native:{platform}:{instance}"),
@@ -115,11 +117,27 @@ pub fn monitor_id(id: &str) -> Option<&str> {
     id.strip_prefix("monitor:")
 }
 
-pub fn register(
-    conn: &Connection,
-    platform: &str,
-    name: Option<&str>,
-) -> Result<(usize, usize, Vec<String>), String> {
+/// 探测已在数据库锁外完成；这里仅登记所选来源，不执行外部程序或网络请求。
+pub(crate) fn register_accounts(conn:&Connection,platform:&str,name:Option<&str>,accounts:Vec<crate::login_detect::NativeAccount>) -> Result<(usize,usize,Vec<String>),String> {
+        if !matches!(platform,"qoder"|"workbuddy"|"trae") { return Err("账号来源平台无效".into()); }
+        if accounts.is_empty() || accounts.iter().any(|account| !matches!((platform,account.source_id),
+            ("qoder","native:qoder:cn"|"native:qoder:global")|("workbuddy","native:workbuddy:main"|"native:workbuddy:ai")|("trae","native:trae:cn"|"native:trae:ide"))) {
+            return Err("账号来源与供应商不匹配".into());
+        }
+        let mut added=0;
+        let mut existing=0;
+        for account in accounts {
+            let display=crate::connections::validate_name(name.unwrap_or(account.name))?;
+            let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms) VALUES(?1,?2,'auth',?3,'本机来源','','connected',?4)",
+                params![format!("monitor:{}",account.source_id),platform,display,chrono::Utc::now().timestamp_millis()]).map_err(|_|"保存本机账号失败")?;
+            added+=changed;
+            existing+=usize::from(changed==0);
+        }
+        Ok((added,existing,vec![]))
+}
+
+pub fn register(conn:&Connection,platform:&str,name:Option<&str>) -> Result<(usize,usize,Vec<String>),String> {
+    if matches!(platform,"qoder"|"workbuddy"|"trae") { return Err("请先在数据库锁外读取对应区域的本地登录".into()); }
     if platform=="opencode" {
         if !crate::opencode::openai_logged_in(){return Err("请先在 OpenCode 中登录 OpenAI".into())}
         let name=crate::connections::validate_name(name.unwrap_or("OpenCode · OpenAI"))?;
@@ -185,6 +203,11 @@ pub fn check(id: &str, platform: &str) -> Result<Source, String> {
         .into_iter()
         .find(|s| s.id == key)
         .ok_or("本机来源标识无效")?;
+    if matches!(platform,"qoder"|"workbuddy"|"trae") {
+        let edition=match key {"native:qoder:cn"|"native:workbuddy:main"|"native:trae:cn"=>"cn","native:qoder:global"|"native:trae:ide"=>"global",_=>"ai"};
+        if crate::login_detect::native_accounts_for(platform,Some(edition))?.iter().any(|a|a.source_id==key) {return Ok(Source {available:true,..source})}
+        return Err("所选版本没有有效本地登录，请重新登录或选择浏览器授权".into());
+    }
     if !source.available {
         return Err(source.reason.unwrap_or_else(|| "本机来源不可用".into()));
     }
@@ -193,6 +216,13 @@ pub fn check(id: &str, platform: &str) -> Result<Source, String> {
 }
 
 fn validate_source(source: &Source) -> Result<(), String> {
+    if source.platform == "trae" {
+        return crate::trae_quota::validate_source(&source.path);
+    }
+    if source.id == "native:zcode:account" {
+        let home = source.path.parent().and_then(Path::parent).and_then(Path::parent).ok_or("ZCode 账号路径无效")?;
+        return crate::zcode_quota::validate_local_account_at(home);
+    }
     if source.platform == "opencode" {
         if source.path.is_dir(){crate::opencode_usage::read_json_files(&source.path)?;}else{let db=readonly(&source.path)?;let layout=crate::opencode_usage::detect_layout(&db)?;crate::opencode_usage::read_usage(&db,layout,i64::MAX)?;}
         return Ok(());
@@ -794,11 +824,15 @@ fn watch_root(source: &Source) -> PathBuf {
 }
 
 /// 需要实时监听的本机来源根目录（含尚不存在的，监听器按存在与否自行绑定）。
+fn collects_sessions(source: &Source) -> bool {
+    source.id != "native:zcode:account" && crate::platforms::supports(&source.platform, "local_sessions")
+}
+
 pub fn watch_roots() -> Vec<PathBuf> {
     let Some(home) = home() else { return Vec::new() };
     sources_at(&home, &app_data())
         .into_iter()
-        .filter(|source| crate::platforms::supports(&source.platform, "local_sessions"))
+        .filter(|source| collects_sessions(source))
         .map(|source| watch_root(&source))
         .collect()
 }
@@ -810,7 +844,7 @@ pub fn scan_at(db: &mut impl Store, home: &Path, app: &Path) -> ScanResult {
 fn scan_sources(db: &mut impl Store, home: &Path, app: &Path, only: Option<&[PathBuf]>) -> ScanResult {
     let mut result = ScanResult::default();
     for source in sources_at(home, app) {
-        if !source.available || !crate::platforms::supports(&source.platform, "local_sessions") {
+        if !source.available || !collects_sessions(&source) {
             continue;
         }
         if let Some(changed) = only {
@@ -884,6 +918,19 @@ pub fn scan_changed(db: &mut impl Store, changed: &[PathBuf]) -> ScanResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepared_native_accounts_register_without_local_probe_and_preserve_pause() {
+        let db=crate::db::open(Path::new(":memory:")).unwrap();
+        let account=||crate::login_detect::NativeAccount{source_id:"native:qoder:cn",name:"Qoder 国内版",account:None};
+        assert!(register_accounts(&db,"workbuddy",None,vec![account()]).is_err());
+        assert!(crate::connections::list(&db).unwrap().is_empty());
+        let (added,existing,_)=register_accounts(&db,"qoder",None,vec![account()]).unwrap();
+        assert_eq!((added,existing),(1,0));
+        crate::connections::set_paused(&db,"monitor:native:qoder:cn",true).unwrap();
+        let (added,existing,_)=register_accounts(&db,"qoder",None,vec![account()]).unwrap();
+        assert_eq!((added,existing),(0,1));
+        assert!(crate::connections::creds_of(&db,"monitor:native:qoder:cn").unwrap().unwrap().paused);
+    }
     #[test]
     fn opencode_pause_stops_collection_and_resume_is_idempotent() {
         let root=fixture_dir("opencode-paused");let data=crate::opencode::data_dir(&root);std::fs::create_dir_all(&data).unwrap();
@@ -1180,10 +1227,29 @@ mod tests {
     fn missing_sources_are_not_created_or_reported_connected() {
         let path = std::env::temp_dir().join(format!("missing-native-{}", std::process::id()));
         let list = sources_at(&path, &path);
-        assert_eq!(list.len(), 10);
+        assert_eq!(list.len(), 12);
         assert!(list.iter().all(|s| !s.available));
         assert!(!path.exists());
         assert!(readonly(&path.join("missing.db")).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn account_sources_have_distinct_identities_and_are_never_session_files() {
+        let path = std::env::temp_dir().join(format!("jolu-account-sources-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(path.join("Trae")).unwrap();
+        std::fs::create_dir_all(path.join("Trae CN")).unwrap();
+        std::fs::create_dir_all(path.join(".zcode/v2")).unwrap();
+        std::fs::write(path.join(".zcode/v2/credentials.json"), "{invalid credentials}").unwrap();
+        let list = sources_at(&path, &path);
+        let intl = list.iter().find(|s| s.id == "native:trae:ide").unwrap();
+        let cn = list.iter().find(|s| s.id == "native:trae:cn").unwrap();
+        let account = list.iter().find(|s| s.id == "native:zcode:account").unwrap();
+        assert!(intl.available && cn.available && account.available);
+        assert_ne!(intl.path, cn.path);
+        assert!(!collects_sessions(intl) && !collects_sessions(cn) && !collects_sessions(account));
+        assert!(validate_source(account).is_err(), "发现文件不等于登录有效");
+        assert!(std::fs::read_to_string(&account.path).unwrap().contains("invalid credentials"));
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

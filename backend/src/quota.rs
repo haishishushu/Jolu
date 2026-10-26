@@ -201,10 +201,13 @@ pub struct AccountMetadata {
     pub subscription_source: &'static str,
     pub observed_at: Option<String>,
     pub reset_credits: Option<ResetCredits>,
+    /// 来源返回或本机客户端记录的账号标识（邮箱 / 用户名）；连接本身没有邮箱时用于展示
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 impl Default for AccountMetadata {
     fn default() -> Self {
-        Self { subscription_status: "unknown", expires_at: None, subscription_source: "unavailable", observed_at: None, reset_credits: None }
+        Self { subscription_status: "unknown", expires_at: None, subscription_source: "unavailable", observed_at: None, reset_credits: None, email: None }
     }
 }
 
@@ -920,8 +923,7 @@ struct S2Subscription {
     daily_limit_usd: Option<f64>,
     weekly_limit_usd: Option<f64>,
     monthly_limit_usd: Option<f64>,
-    #[serde(rename = "expires_at")]
-    _expires_at: Option<String>,
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1111,7 +1113,15 @@ fn s2_quota_from_usage(d: S2Usage) -> QuotaState {
     QuotaState::Ok {
         windows,
         plan: d.plan_name,
-        account: None,
+        account: d.subscription.as_ref().map(|subscription| AccountMetadata {
+            expires_at: subscription.expires_at.as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.to_rfc3339()),
+            // 服务端的到期时间可以展示，但不能据此猜测自动续费、停用或订阅状态。
+            subscription_source: "live",
+            observed_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..AccountMetadata::default()
+        }),
     }
 }
 
@@ -1172,7 +1182,7 @@ mod official_connection_tests {
             "expires_at":"2026-10-01T00:00:00Z"
           }
         }"#).unwrap();
-        let QuotaState::Ok { windows, .. } = s2_quota_from_usage(usage) else {
+        let QuotaState::Ok { windows, account, .. } = s2_quota_from_usage(usage) else {
             panic!("应生成订阅窗口")
         };
         assert_eq!(windows[0].used_percent, None);
@@ -1180,6 +1190,17 @@ mod official_connection_tests {
         assert_eq!(windows[0].resets_at, None);
         assert_eq!(windows[1].used_percent, Some(0.0));
         assert_eq!(windows[1].resets_at, None);
+        let account = account.expect("订阅到期元数据不能丢失");
+        assert_eq!(account.expires_at.as_deref(), Some("2026-10-01T00:00:00+00:00"));
+        assert_eq!(account.subscription_source, "live");
+        assert_eq!(account.subscription_status, "unknown");
+    }
+
+    #[test]
+    fn sub2api_invalid_expiry_is_not_used_as_a_subscription_date() {
+        let usage: S2Usage = serde_json::from_str(r#"{"subscription":{"expires_at":"invalid"}}"#).unwrap();
+        let QuotaState::Ok { account: Some(account), .. } = s2_quota_from_usage(usage) else { panic!() };
+        assert_eq!(account.expires_at, None);
     }
 
     #[test]

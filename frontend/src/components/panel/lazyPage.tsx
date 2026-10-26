@@ -22,13 +22,13 @@ class PageErrorBoundary extends Component<{ children: ReactNode; label: string; 
   }
 }
 
-function ReadyPage({ children }: { children: ReactNode }) {
+function ReadyPage({ children, fillHeight }: { children: ReactNode; fillHeight: boolean }) {
   const motion = useContentMotion("ready", 220, 0, true)
-  return <div ref={motion} className="min-w-0">{children}</div>
+  return <div ref={motion} className={fillHeight ? "h-full min-h-0 min-w-0" : "min-w-0"}>{children}</div>
 }
 
 /** 在模块顶层创建；普通重渲染复用同一 lazy 实例，只有明确重试才丢弃缓存的拒绝结果。 */
-export function createLazyPage<T extends ComponentType<any>>(load: () => Promise<{ default: T }>, label: string, layout: SkeletonLayout) {
+export function createLazyPage<T extends ComponentType<any>>(load: () => Promise<{ default: T }>, label: string, layout: SkeletonLayout, fillHeight = false) {
   // 浏览器会缓存失败的模块请求；重新创建 lazy 无法清除它，资源错误必须由用户主动重载应用。
   const loadPage = () => load().catch((cause: unknown) => { throw new PageLoadError("页面资源加载失败", { cause }) })
   let current = lazy(loadPage)
@@ -42,8 +42,8 @@ export function createLazyPage<T extends ComponentType<any>>(load: () => Promise
     }
     return (
       <PageErrorBoundary key={attempt} label={label} onRetry={retry}>
-        <Suspense fallback={<LoadingSurface layout={layout} label={`正在加载${label}`} />}>
-          <ReadyPage>{createElement(Page, props)}</ReadyPage>
+        <Suspense fallback={<LoadingSurface className={fillHeight ? "h-full" : undefined} layout={layout} label={`正在加载${label}`} />}>
+          <ReadyPage fillHeight={fillHeight}>{createElement(Page, props)}</ReadyPage>
         </Suspense>
       </PageErrorBoundary>
     )

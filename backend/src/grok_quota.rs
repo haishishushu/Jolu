@@ -24,6 +24,19 @@ pub(crate) fn local_grok_quota() -> QuotaState {
     }
 }
 
+/// Jolu 独立浏览器授权；不读取或刷新原工具登录。
+pub(crate) fn authorized_quota(session: &crate::grok_browser_auth::Session) -> QuotaState {
+    if crate::validation::isolated() { return QuotaState::Unauthorized { reason: "隔离验收不查询真实 Grok 授权".into() }; }
+    if session.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp_millis()) {
+        return QuotaState::Unauthorized { reason: "Grok 浏览器授权已过期，请重新授权".into() };
+    }
+    let mut state = query_grok(&session.access_token);
+    if let QuotaState::Ok { account, .. } = &mut state {
+        *account = Some(crate::quota::AccountMetadata { email: session.account.clone(), ..Default::default() });
+    }
+    state
+}
+
 fn query_grok(access_token: &str) -> QuotaState {
     let c = match quota::client() { Ok(c) => c, Err(e) => return QuotaState::Failed { reason: e } };
     // 空 gRPC-web 帧：1 字节 flags + 4 字节大端长度 0
@@ -59,9 +72,7 @@ fn query_grok(access_token: &str) -> QuotaState {
 
     if !status.is_success() {
         // HTTP 408 与 grpc-status 4 同为服务端超时，按瞬时处理
-        let raw = resp.text().unwrap_or_default();
-        let head: String = raw.chars().take(400).collect();
-        return QuotaState::Failed { reason: format!("Grok 计费接口错误（HTTP {status}）: {head}") };
+        return QuotaState::Failed { reason: format!("Grok 计费接口错误（HTTP {status}）") };
     }
 
     if let Some(code) = header_status {
@@ -72,7 +83,7 @@ fn query_grok(access_token: &str) -> QuotaState {
 
     let raw = match resp.bytes() {
         Ok(b) => b,
-        Err(e) => return QuotaState::Failed { reason: format!("读取 Grok 计费响应失败: {e}") },
+        Err(_) => return QuotaState::Failed { reason: "读取 Grok 计费响应失败".into() },
     };
 
     let trailers = grpc_web_trailer_fields(&raw);
@@ -120,9 +131,9 @@ fn grpc_status_failure(status: i64, message: &str) -> QuotaState {
     if matches!(status, 4 | 14)
         || (status == 1 && ["timeout", "deadline", "expired"].iter().any(|k| message.to_lowercase().contains(k)))
     {
-        return QuotaState::Failed { reason: format!("Grok 计费服务暂时不可用（grpc-status {status}），可稍后重试: {message}") };
+        return QuotaState::Failed { reason: format!("Grok 计费服务暂时不可用（grpc-status {status}），可稍后重试") };
     }
-    QuotaState::Failed { reason: format!("Grok 计费 RPC 失败（grpc-status {status}）: {message}") }
+    QuotaState::Failed { reason: format!("Grok 计费 RPC 失败（grpc-status {status}）") }
 }
 
 /// 认证类失败（token 无效/过期）的 gRPC 状态判定（移植自 CodexBar 同名启发式）

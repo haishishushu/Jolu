@@ -29,6 +29,8 @@ export type ConnectionKind = "auth" | "api"
 export type ConnectionStatus = "connected" | "expired" | "invalid" | "offline" | "paused"
 
 export interface Connection {
+  /** 供应商区域来自后端的已验证来源；未知保持空值。 */
+  edition?: string | null
   accountEmail?: string | null
 
   id: string

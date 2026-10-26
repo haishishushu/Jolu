@@ -2,11 +2,18 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   blockBanner, canDeleteTask, clock, countByFilter, dayTime, durationText, filterTasks, launchLabel, nextFire, quotaTip, runCode, runTokens,
-  sessionTaskName, skillSummary, taskCode, taskStatus, untilText, usableSkills, validateForm,
+  runningMs, sessionTaskName, shortTool, skillSummary, taskCode, taskStatus, toolName, untilText, usableSkills, validateForm,
 } from "./automation.ts"
 
 const now = new Date(2026, 9, 22, 16, 48).getTime()
 const at = (d, h, m) => new Date(2026, 9, d, h, m).getTime()
+
+test("未知历史工具不猜作 Claude", () => {
+  assert.equal(toolName("unknown"), "—")
+  assert.equal(shortTool("unknown"), "—")
+  assert.equal(toolName("claude"), "Claude Code")
+  assert.equal(shortTool("codex"), "Codex")
+})
 
 const run = (patch = {}) => ({
   id: 91, task_id: 24, task_name: "完善登录页面", platform: "claude", connection_id: "c1", source: "now", status: "queued",
@@ -20,6 +27,15 @@ const task = (patch = {}) => ({
   id: 24, name: "完善登录页面", platform: "claude", connection_id: "c1", model: null, cwd: "D:/develop/jolu", session_id: null,
   prompt: "完善表单", skills: [], launch: "now", schedule: null, auto_resume: true, wait_deadline: null, state: "active",
   next_run_at: null, missed_at: null, created_at: at(22, 16, 2), updated_at: at(22, 16, 2), active: null, last: null, queue_ahead: null, ...patch,
+})
+
+test("需要处理或取消的运行不再累加遗留执行起点", () => {
+  for (const status of ["attention", "cancelled", "completed", "failed", "queued", "waiting"]) {
+    const value = run({ status, exec_ms: 500, exec_started_at: now - 1000 })
+    assert.equal(runningMs(value, now), 500)
+    assert.equal(runningMs(value, now + 60_000), 500)
+  }
+  assert.equal(runningMs(run({ status: "running", exec_ms: 500, exec_started_at: now - 1000 }), now), 1500)
 })
 
 test("时间与时长文案", () => {

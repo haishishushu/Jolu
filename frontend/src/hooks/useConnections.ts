@@ -24,6 +24,7 @@ export type FetchOutcome =
 function toConnection(d: ConnectionDto): Connection {
   return {
     id: d.id,
+    edition: d.edition ?? null,
     accountEmail: d.account_email ?? null,
     platformId: d.platform as PlatformId,
     kind: d.kind as ConnectionKind,
@@ -177,8 +178,8 @@ export function useConnections() {
     await reload()
   }, [reload])
 
-  const readLocal = useCallback(async (platform: string, kind: "auth" | "api", name?: string) => {
-    const summary = await api.readLocalConnections(platform, kind, name)
+  const readLocal = useCallback(async (platform: string, kind: "auth" | "api", name?: string, edition?: string) => {
+    const summary = await api.readLocalConnections(platform, kind, name, edition)
     await reload()
     return summary
   }, [reload])

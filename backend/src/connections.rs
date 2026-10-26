@@ -229,6 +229,162 @@ mod rename_tests {
 }
 
 #[cfg(test)]
+mod query_result_tests {
+    use super::*;
+
+    fn connection() -> (Sql, String, Creds) {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let id = add(&db, NewConnection {
+            service: None, platform: "claude".into(), kind: "api".into(), name: "query result".into(),
+            secret: Some("synthetic-old-key".into()), base_url: Some("https://gateway.example.test".into()),
+            model: None, effort: None, context_1m: None, protocol: None,
+        }).unwrap();
+        let expected = query_creds(&db, &id).unwrap().unwrap();
+        (db, id, expected)
+    }
+
+    #[test]
+    fn late_unauthorized_from_old_key_cannot_expire_replacement() {
+        let (db, id, expected) = connection();
+        replace_api_key(&db, &id, "synthetic-new-key").unwrap();
+        let result = record_query_result(&db, &id, &expected, Some(false));
+        assert_eq!(list(&db).unwrap()[0].status, "connected");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deleted_or_paused_connection_rejects_every_late_result() {
+        for outcome in [None, Some(true), Some(false)] {
+            let (db, id, expected) = connection();
+            set_paused(&db, &id, true).unwrap();
+            assert!(record_query_result(&db, &id, &expected, outcome).is_err());
+            assert_eq!(list(&db).unwrap()[0].status, "paused");
+            remove(&db, &id).unwrap();
+            assert!(record_query_result(&db, &id, &expected, outcome).is_err());
+        }
+    }
+
+    #[test]
+    fn query_target_changes_invalidate_even_non_status_results() {
+        for statement in [
+            "UPDATE connections SET secret='synthetic-new-key' WHERE id=?1",
+            "UPDATE connections SET base_url='https://other.example.test' WHERE id=?1",
+            "UPDATE connections SET platform='codex' WHERE id=?1",
+            "UPDATE connections SET kind='auth' WHERE id=?1",
+            "UPDATE connections SET model='different-model' WHERE id=?1",
+        ] {
+            let (db, id, expected) = connection();
+            db.execute(statement, [&id]).unwrap();
+            assert!(record_query_result(&db, &id, &expected, None).is_err());
+            assert_eq!(list(&db).unwrap()[0].status, "connected");
+        }
+    }
+
+    #[test]
+    fn unchanged_query_updates_status_and_rename_does_not_invalidate() {
+        let (db, id, expected) = connection();
+        rename_connection(&db, &id, "renamed").unwrap();
+        assert!(!record_query_result(&db, &id, &expected, None).unwrap());
+        assert!(record_query_result(&db, &id, &expected, Some(false)).unwrap());
+        assert_eq!(list(&db).unwrap()[0].status, "expired");
+        assert!(!record_query_result(&db, &id, &expected, None).unwrap());
+        assert_eq!(list(&db).unwrap()[0].status, "expired");
+        assert!(record_query_result(&db, &id, &expected, Some(true)).unwrap());
+        assert!(!record_query_result(&db, &id, &expected, Some(true)).unwrap());
+        let row = &list(&db).unwrap()[0];
+        assert_eq!(row.name, "renamed");
+        assert_eq!(row.status, "connected");
+        let synced: Option<i64> = db.query_row("SELECT last_sync_ms FROM connections WHERE id=?1", [&id], |row| row.get(0)).unwrap();
+        assert!(synced.is_some());
+    }
+}
+
+#[cfg(test)]
+mod removal_reference_tests {
+    use super::*;
+
+    fn connection(db: &Sql, name: &str) -> String {
+        add(db, NewConnection {
+            service: None, platform: "claude".into(), kind: "api".into(), name: name.into(),
+            secret: Some("synthetic-removal-key".into()), base_url: None,
+            model: None, effort: None, context_1m: None, protocol: None,
+        }).unwrap()
+    }
+
+    fn waiting_task(db: &Sql, connection_id: &str) -> (i64, crate::automation::TaskInput) {
+        crate::automation::ensure_schema(db).unwrap();
+        let input = crate::automation::TaskInput {
+            name: "snapshot reference".into(), platform: "claude".into(), connection_id: connection_id.into(),
+            model: None, cwd: std::env::temp_dir().to_string_lossy().into_owned(), session_id: None,
+            prompt: "synthetic task".into(), skills: vec![], launch: "quota".into(), schedule: None,
+            auto_resume: true, wait_deadline: None, serial_queue: true,
+        };
+        let task = crate::automation::create_task(db, &input, 1_000).unwrap();
+        (task, input)
+    }
+
+    #[test]
+    fn edited_task_does_not_release_its_active_run_snapshot_connection() {
+        for status in ["queued", "waiting", "running", "attention"] {
+            let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+            let original = connection(&db, "A");
+            let replacement = connection(&db, "B");
+            let (task, mut input) = waiting_task(&db, &original);
+            input.connection_id = replacement.clone();
+            crate::automation::update_task(&db, task, &input, 2_000).unwrap();
+            db.execute("UPDATE automation_runs SET status=?1 WHERE task_id=?2", params![status, task]).unwrap();
+            let result = remove(&db, &original);
+            assert!(result.is_err(), "active snapshot must protect its connection: {status}");
+            assert!(creds_of(&db, &original).unwrap().is_some());
+            let snapshot_connection: String = db.query_row("SELECT json_extract(task_snapshot, '$.connection_id') FROM automation_runs WHERE task_id=?1", [task], |row| row.get(0)).unwrap();
+            assert_eq!(snapshot_connection, original);
+        }
+    }
+
+    #[test]
+    fn active_and_paused_tasks_keep_their_current_connection() {
+        for state in ["active", "paused"] {
+            let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+            let id = connection(&db, "task account");
+            let (task, _) = waiting_task(&db, &id);
+            db.execute("UPDATE automation_runs SET status='completed' WHERE task_id=?1", [task]).unwrap();
+            db.execute("UPDATE automation_tasks SET state=?1 WHERE id=?2", params![state, task]).unwrap();
+            assert!(remove(&db, &id).is_err(), "resumable task must protect its connection: {state}");
+            assert!(creds_of(&db, &id).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn terminal_history_does_not_block_removal_and_is_preserved() {
+        for status in ["completed", "failed", "cancelled"] {
+            let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+            let original = connection(&db, "A");
+            let replacement = connection(&db, "B");
+            let (task, mut input) = waiting_task(&db, &original);
+            input.connection_id = replacement;
+            crate::automation::update_task(&db, task, &input, 2_000).unwrap();
+            db.execute("UPDATE automation_runs SET status=?1 WHERE task_id=?2", params![status, task]).unwrap();
+            remove(&db, &original).unwrap();
+            assert!(creds_of(&db, &original).unwrap().is_none());
+            let count: i64 = db.query_row("SELECT COUNT(*) FROM automation_runs WHERE task_id=?1", [task], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn unreferenced_connection_can_be_removed_without_automation_tables() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let id = connection(&db, "unreferenced");
+        remove(&db, &id).unwrap();
+        assert!(creds_of(&db, &id).unwrap().is_none());
+        crate::automation::ensure_schema(&db).unwrap();
+        let id = connection(&db, "empty automation");
+        remove(&db, &id).unwrap();
+        assert!(creds_of(&db, &id).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
 mod local_sync_tests {
     use super::*;
 
@@ -562,6 +718,8 @@ mod custom_provider_tests {
 /// 返回给前端的连接。**不含** secret 字段——这是刻意的，不要加。
 #[derive(Debug, Serialize)]
 pub struct ConnectionDto {
+    /// 仅返回供应商版本；本机来源 ID 或自身封存授权是唯一依据。
+    pub edition: Option<String>,
     /// 已核对凭证的账号邮箱；未知为 None，绝不由连接名称或 Key 推断。
     pub account_email: Option<String>,
     pub service: Option<String>,
@@ -647,7 +805,16 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
     let platform: String = r.get("platform")?;
     let kind: String = r.get("kind")?;
     let base_url = normalized_base(&platform, &kind, r.get("base_url")?);
+    let id:String=r.get("id")?;
+    let edition=match id.as_str() {
+        "monitor:native:qoder:cn"|"monitor:native:workbuddy:main"|"monitor:native:trae:cn"=>Some("cn".into()),
+        "monitor:native:qoder:global"|"monitor:native:trae:ide"=>Some("global".into()),
+        "monitor:native:workbuddy:ai"=>Some("ai".into()),
+        _ if kind=="auth"=>crate::provider_browser_auth::edition_for(&id,&platform,r.get::<_,Option<String>>("secret")?.as_deref()),
+        _=>None,
+    };
     Ok(ConnectionDto {
+        edition,
         account_email: r.get("account_email")?,
         id: r.get("id")?,
         platform: r.get("platform")?,
@@ -691,6 +858,7 @@ fn list_with_account_lookup(
                 let secret: Option<String> = r.get("secret")?;
                 dto.account_email = secret
                     .as_deref()
+                    .filter(|secret|!crate::provider_browser_auth::is_browser(Some(secret)))
                     .and_then(|s| account_lookup(&dto.platform, s));
             }
             Ok(dto)
@@ -1028,8 +1196,34 @@ pub(crate) fn selectable_creds(conn: &Sql, id: &str) -> Result<Option<Creds>, St
     creds_of(conn, id).map_err(|e| e.to_string())
 }
 
-pub fn remove(conn: &Sql, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM connections WHERE id = ?1", params![id])?;
+/// 调用方持有同一个数据库锁，引用检查与删除不能拆到不同 with_database 闭包。
+/// 已结束的历史保留原连接标识；仍可执行/续跑的任务和运行必须先解除引用。
+pub fn remove(conn: &Sql, id: &str) -> Result<(), String> {
+    let table_exists = |name: &str| -> Result<bool, String> {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |row| row.get(0))
+            .map_err(|error| error.to_string())
+    };
+    // 运行使用创建时的快照，任务改用另一个账号后，等待/续跑中的旧运行仍依赖原账号。
+    if table_exists("automation_runs")? {
+        let referenced: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM automation_runs WHERE status IN ('queued','waiting','running','attention')
+             AND json_extract(task_snapshot, '$.connection_id')=?1)",
+            [id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if referenced {
+            return Err("该连接仍被未结束的自动化运行使用，请先取消相关运行，再删除账号".into());
+        }
+    }
+    if table_exists("automation_tasks")? {
+        let referenced: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM automation_tasks WHERE connection_id=?1 AND state IN ('active','paused'))",
+            [id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if referenced {
+            return Err("该连接仍被自动化任务使用，请先调整任务使用的账号或取消任务，再删除账号".into());
+        }
+    }
+    conn.execute("DELETE FROM connections WHERE id = ?1", params![id]).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -1045,6 +1239,7 @@ pub fn set_paused(conn: &Sql, id: &str, paused: bool) -> Result<(), String> {
 
 /// 取出连接的凭证与地址，**仅供后端查额度/余额使用**。
 /// 返回值含凭证原值，绝不可序列化给前端或写进日志。
+#[derive(Clone, PartialEq)]
 pub(crate) struct Creds {
     pub paused: bool,
     pub name: String,
@@ -1116,6 +1311,25 @@ pub(crate) fn record_query_status(conn: &Sql, id: &str, success: bool) -> Result
     if old.is_none() || old.as_deref() == Some("paused") { return Ok(false); }
     if success { touch_sync(conn, id) } else { mark_expired(conn, id) }.map_err(|e| e.to_string())?;
     Ok(old.as_deref() != Some(if success { "connected" } else { "expired" }))
+}
+
+/// 应在同一次 with_database 闭包（持有数据库锁）中校验查询归属并写入状态。
+/// 临时失败/不支持（outcome=None）也必须校验，避免将旧凭证结果返回当前连接。
+/// 名称不参与查询，允许请求期间改名；此快照比较不能检测先改后恢复的 ABA 变更。
+pub(crate) fn record_query_result(conn: &Sql, id: &str, expected: &Creds, outcome: Option<bool>) -> Result<bool, String> {
+    let current = query_creds(conn, id)
+        .map_err(|reason| format!("本次查询结果无法应用：{reason}"))?
+        .ok_or("连接已删除，本次查询结果已过期，请刷新")?;
+    if current.paused != expected.paused
+        || current.platform != expected.platform
+        || current.kind != expected.kind
+        || current.secret != expected.secret
+        || current.base_url != expected.base_url
+        || current.model != expected.model
+    {
+        return Err("连接凭证或查询目标已变化，本次查询结果已过期，请刷新".into());
+    }
+    outcome.map_or(Ok(false), |success| record_query_status(conn, id, success))
 }
 
 pub fn replace_api_key(conn: &Sql, id: &str, secret: &str) -> Result<(), String> {

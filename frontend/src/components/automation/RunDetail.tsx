@@ -72,7 +72,7 @@ export function RunDetail({ detail, now, account, onBack, onOpenSession, onStop,
         {run.status === "running" && (
           <JoluButton size="sm" variant="danger-soft" disabled={stopping} onClick={onStop}><Square aria-hidden />{stopping ? "正在停止…" : "停止运行"}</JoluButton>
         )}
-        {run.session_id && (
+        {run.session_id && run.platform !== "unknown" && (
           <JoluButton size="sm" variant="primary" onClick={() => onOpenSession(run.platform, run.session_id!)}><ArrowUpRight aria-hidden />查看会话</JoluButton>
         )}
       </div>
@@ -133,7 +133,7 @@ export function RunDetail({ detail, now, account, onBack, onOpenSession, onStop,
                 {logs.map((l) => `${hhmmss(l.ts)}  ${l.title}`).join("\n")}
               </pre>
             ) : <span className="text-[11px] text-jolu-muted">暂无执行日志</span>}
-            {run.session_id && (
+            {run.session_id && run.platform !== "unknown" && (
               <JoluButton size="sm" variant="soft" className="self-start" onClick={() => onOpenSession(run.platform, run.session_id!)}>打开完整会话<ChevronRight aria-hidden /></JoluButton>
             )}
           </Card>
@@ -162,7 +162,7 @@ export function RunDetail({ detail, now, account, onBack, onOpenSession, onStop,
             <KeyValue label="项目" value={projectOf(task?.cwd)} title={task?.cwd} />
             <KeyValue label="账号" value={accountName} />
             <KeyValue label="模型" value={run.model ?? "跟随工具默认"} />
-            <KeyValue label="Skills" value={task?.skills.length ? task.skills.join(" / ") : "未选择"} />
+            <KeyValue label="Skills" value={task ? task.skills.length ? task.skills.join(" / ") : "未选择" : "—"} />
             <span className="text-[10px] text-jolu-muted">执行器、模型和账号以本次运行快照为准。</span>
           </Card>
         </div>

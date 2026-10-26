@@ -26,7 +26,7 @@ pub fn native(id: &str) -> bool {
     known(id) && !matches!(id, "claude" | "codex" | "custom")
 }
 pub fn uses_native_quota(platform: &str, kind: &str) -> bool {
-    native(platform) && !(matches!(platform,"zcode"|"opencode") && kind=="api")
+    native(platform) && kind == "auth"
 }
 pub fn supports(id: &str, capability: &str) -> bool {
     get(id).is_some_and(|p| p.capabilities.iter().any(|c| c == capability))
@@ -42,8 +42,10 @@ mod tests {
     use super::*;
     #[test]
     fn api_plan_quota_is_not_blocked_by_native_platform() {
-        for p in ["zcode","opencode"] {assert!(!uses_native_quota(p,"api"));assert!(uses_native_quota(p,"auth"));}
-        assert!(uses_native_quota("gemini","api"));
+        for p in ["zcode","opencode","gemini","grok","qoder","workbuddy","trae"] {
+            assert!(!uses_native_quota(p,"api"));
+            assert!(uses_native_quota(p,"auth"));
+        }
     }
     #[test]
     fn all_ten_platforms_have_unique_ids() {

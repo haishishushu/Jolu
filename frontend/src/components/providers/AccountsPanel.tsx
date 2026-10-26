@@ -1,11 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { AlertTriangle, Check, ChevronDown, CircleAlert, Eye, EyeOff, Globe, LockKeyhole, Mail, LoaderCircle, Pencil, Plus, RefreshCw, Search, Ticket, Trash2, X } from "lucide-react"
+import { AlertTriangle, Blocks, Check, ChevronDown, CircleAlert, EyeClosed, Globe, KeyRound, Mail, LoaderCircle, Pencil, Plus, RefreshCw, ScanEye, Search, Ticket, Trash2, X } from "lucide-react"
 import { api, isTauri, type QuotaWindowDto } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { PROVIDERS, editSaveState, fallsBackToManualModel, modelFetchErrorText, protocolLabel, providerEntry, requestGate, canStartVerify, modelBusyAfter, validateConnectionName, type ModelBusy } from "@/lib/providerCatalog"
-import { accountQuotaWindows, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "@/lib/accountDisplay"
+import { PROVIDERS, connectionProviderId, connectionProviderEntry, editSaveState, fallsBackToManualModel, modelFetchErrorText, protocolLabel, providerEntry, requestGate, canStartVerify, modelBusyAfter, validateConnectionName, type ProviderId, type ModelBusy } from "@/lib/providerCatalog"
+import { accountQueries, quotaValue, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "@/lib/accountDisplay"
+import { accountCardPolicy } from "@/lib/accountCardPolicy"
 import { remainingPercent } from "@/lib/quota"
 import { removeAccountWithReplacement } from "@/lib/accountActions"
 import { useConnections } from "@/hooks/useConnections"
@@ -17,16 +18,21 @@ import { JoluButton } from "@/components/ui/JoluButton"
 import { ModelPicker } from "@/components/providers/ConnectDialog"
 import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
-import type { Connection, PlatformId } from "@/types"
+import type { Connection, ConnectionKind, PlatformId } from "@/types"
 
 const PrivacyContext = createContext(false)
 const PRIVACY_KEY = "jolu.accounts.hide-sensitive"
-/** 隐藏时不把原文放入 DOM、title 或无障碍标签；固定宽度防止显隐时卡片跳动。 */
-function SensitiveValue({ value, label, icon: Icon = Mail }: { value: string | null | undefined; label: string; icon?: typeof Mail }) {
+/** 马赛克使用生成的纹理，原文不进入 DOM、title 或无障碍标签。 */
+function PrivacyMosaic({ label, length }: { label: string; length: number }) {
+  return <span role="img" aria-label={`${label}已隐藏`} className="privacy-mosaic" style={{ width: `${Math.min(30, Math.max(8, length))}ch` }} />
+}
+
+/** 显隐保留字段图标和行高，隐藏态没有可复制或悬浮显示的原文。 */
+function SensitiveValue({ value, label, icon: Icon = Mail,compact=false }: { value: string | null | undefined; label: string; icon?: typeof Mail;compact?:boolean }) {
   const hidden = useContext(PrivacyContext)
-  return <span className="flex h-7 min-w-0 items-center gap-2 rounded-md bg-jolu-side px-2 text-[11px] text-jolu-muted">
+  return <span className={cn("flex min-w-0 shrink-0 items-center gap-2 rounded-md bg-jolu-side px-2 text-[11px] text-jolu-muted",compact?"h-5":"h-7")}>
     <Icon aria-hidden className="size-3.5 shrink-0" />
-    {hidden && value ? <span aria-label={`${label}已隐藏`} className="flex min-w-0 items-center gap-2"><span aria-hidden className="tracking-[0.18em]">•••• ••••</span><LockKeyhole aria-hidden className="size-3" /></span>
+    {hidden && value ? <PrivacyMosaic label={label} length={value.length} />
       : <span className="min-w-0 truncate" title={value || undefined}>{value || `${label}未获取`}</span>}
   </span>
 }
@@ -38,7 +44,7 @@ function displayName(account: Connection, hidden: boolean) {
 /** 「设为当前」只对能写入本机 CLI 配置的平台开放 */
 const CLI_PLATFORMS: readonly PlatformId[] = ["claude", "codex"]
 /** 筛选栏直接露出的供应商，其余收进「更多供应商」（画板 07 / 09） */
-const QUICK_FILTERS: readonly PlatformId[] = ["claude", "codex"]
+const QUICK_FILTERS: readonly ProviderId[] = ["claude", "codex"]
 
 type Conn = ReturnType<typeof useConnections>
 
@@ -48,7 +54,7 @@ type Conn = ReturnType<typeof useConnections>
  */
 export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
   conn: Conn
-  onConnect: (platform: PlatformId) => void
+  onConnect: (platform: ProviderId) => void
   onBrowseProviders: () => void
 }) {
   const [hidden, setHidden] = useState(() => {
@@ -64,12 +70,15 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
   }
   const toast = useToast()
   const cfg = useSettings()
-  const [platform, setPlatform] = useState<PlatformId | null>(null)
+  const [platform, setPlatform] = useState<ProviderId | null>(null)
+  const [kind, setKind] = useState<ConnectionKind | null>(null)
   const [query, setQuery] = useState("")
   const [current, setCurrent] = useState<string[]>([])
   const [removing, setRemoving] = useState<Connection | null>(null)
   const [promoting, setPromoting] = useState<Connection | null>(null)
   const [editing, setEditing] = useState<Connection | null>(null)
+  const gridRef=useRef<HTMLDivElement>(null)
+  useEffect(()=>{gridRef.current?.scrollTo({top:0})},[platform,query,kind])
 
   useEffect(() => {
     if (!isTauri) return
@@ -79,7 +88,7 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
   }, [conn.connections])
 
   const accounts = conn.connections
-  const visible = useMemo(() => filterAccounts(accounts, platform, query), [accounts, platform, query])
+  const visible = useMemo(() => filterAccounts(accounts, platform, query, kind), [accounts, platform, query,kind])
   const currentCount = accounts.filter((a) => current.includes(a.id)).length
 
   if (!conn.loading && !conn.error && !accounts.length) {
@@ -93,17 +102,23 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
 
   return (
     <PrivacyContext.Provider value={hidden}>
+      <div className="flex min-h-0 flex-1 flex-col gap-3" data-account-panel>
       <Header total={accounts.length} current={currentCount} onAdd={onBrowseProviders} hidden={hidden} onTogglePrivacy={togglePrivacy} />
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex h-[34px] w-[258px] items-center gap-2 rounded-lg border border-jolu-border px-3 focus-within:border-jolu-accent">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <label className="flex h-[34px] w-[220px] items-center gap-2 rounded-lg border border-jolu-border px-3 focus-within:border-jolu-accent">
           <Search aria-hidden className="size-4 shrink-0 text-jolu-muted" />
           <input type={hidden ? "password" : "text"} autoComplete="off" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户名、邮箱、连接名称" aria-label="搜索账号" className="min-w-0 flex-1 bg-transparent text-xs text-jolu-text outline-none placeholder:text-jolu-muted" />
         </label>
+        <div role="group" aria-label="账号类型" className="flex items-center gap-2">
+          <FilterChip active={kind === null} onClick={() => setKind(null)}>全部类型</FilterChip>
+          <FilterChip active={kind === "auth"} onClick={() => setKind("auth")}>Auth官方订阅</FilterChip>
+          <FilterChip active={kind === "api"} onClick={() => setKind("api")}>第三方ApiKey</FilterChip>
+        </div>
         <FilterChip active={platform === null} onClick={() => setPlatform(null)}>全部供应商</FilterChip>
         {QUICK_FILTERS.map((id) => (
-          <FilterChip key={id} active={platform === id} onClick={() => setPlatform(id)}>{providerEntry(id).name}</FilterChip>
+          <FilterChip key={id} active={platform === id} onClick={() => setPlatform(id)}><span aria-hidden className="grid size-4 shrink-0 place-items-center"><PlatformLogo platform={providerEntry(id).platformId} size={16} /></span>{providerEntry(id).name}</FilterChip>
         ))}
-        <MoreFilter accounts={accounts} value={platform} onChange={setPlatform} />
+        <MoreFilter accounts={accounts.filter(account=>!kind || account.kind===kind)} value={platform} onChange={setPlatform} />
       </div>
 
       {conn.error && (
@@ -115,7 +130,8 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
       {conn.loading && !accounts.length && <p role="status" className="text-xs text-jolu-muted">正在读取账号…</p>}
 
       {visible.length ? (
-        <div className="grid grid-cols-4 gap-4">
+        <div className="relative min-h-0 flex-1">
+        <div ref={gridRef} role="list" aria-label="账号列表" data-account-grid className="absolute inset-0 grid grid-cols-4 content-start gap-3 overflow-y-auto pr-1" style={{gridAutoRows:"calc((100% - 12px) / 2)",scrollbarGutter:"stable"}}>
           {visible.map((account) => (
             <AccountCard
               key={`${account.id}:${account.status}`}
@@ -132,23 +148,24 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
             />
           ))}
         </div>
+        </div>
       ) : accounts.length > 0 && (
         <EmptyState
           title="没有找到匹配的账号"
-          desc="试试其他供应商，或清除搜索条件。"
+          desc="切换账号类型、供应商，或清除搜索条件。"
           action={<>
-            <JoluButton variant="neutral" onClick={() => { setQuery(""); setPlatform(null) }}>清除筛选</JoluButton>
+            <JoluButton variant="neutral" onClick={() => { setQuery(""); setPlatform(null); setKind(null) }}>清除筛选</JoluButton>
             <JoluButton variant="soft" onClick={() => platform ? onConnect(platform) : onBrowseProviders()}><Plus aria-hidden />添加账号</JoluButton>
           </>}
         />
       )}
-      <p className="text-[11px] text-jolu-muted">额度显示剩余量；「未提供」表示服务未返回，不能视为 0。当前账号按供应商分别设置。</p>
+      <p className="flex shrink-0 items-center justify-between gap-3 text-[10px] text-jolu-muted"><span>仅显示供应商实际提供的信息；完整额度与服务信息见详情。</span><span className="shrink-0">共 {visible.length} 个{visible.length > 8 ? " · 滚轮查看更多" : ""}</span></p>
 
       {removing && (
         <RemoveDialog
           account={removing}
           current={current.includes(removing.id)}
-          alternatives={accounts.filter((a) => a.platformId === removing.platformId && a.id !== removing.id)}
+          alternatives={accounts.filter((a) => connectionProviderId(removing) !== null && connectionProviderId(a) === connectionProviderId(removing) && a.id !== removing.id)}
           islandUsers={islandUsers(removing.id, cfg.settings)}
           onClose={() => setRemoving(null)}
           onConfirm={async (replacement) => {
@@ -190,6 +207,7 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
           }}
         />
       )}
+      </div>
     </PrivacyContext.Provider>
   )
 }
@@ -203,14 +221,14 @@ function islandUsers(id: string, settings: ReturnType<typeof useSettings>["setti
 
 function Header({ total, current, onAdd, hidden, onTogglePrivacy }: { total: number; current: number; onAdd: () => void; hidden: boolean; onTogglePrivacy: () => void }) {
   return (
-    <div className="flex h-9 items-center justify-between">
+    <div className="flex h-9 shrink-0 items-center justify-between">
       <div className="flex items-baseline gap-3">
         <h2 className="text-[22px] font-semibold text-jolu-text">账号管理</h2>
         <span className="text-xs text-jolu-muted">{total} 个账号 · {current} 个当前使用</span>
       </div>
       <div className="flex items-center gap-2">
         <JoluButton variant="outline" aria-pressed={hidden} onClick={onTogglePrivacy}>
-          {hidden ? <Eye aria-hidden /> : <EyeOff aria-hidden />}{hidden ? "显示敏感信息" : "隐藏敏感信息"}
+          {hidden ? <ScanEye aria-hidden strokeWidth={1.6} /> : <EyeClosed aria-hidden strokeWidth={1.6} />}{hidden ? "显示敏感信息" : "隐藏敏感信息"}
         </JoluButton>
         <JoluButton variant="primary" onClick={onAdd}><Plus aria-hidden className="!text-[#071B10]" />添加账号</JoluButton>
       </div>
@@ -235,19 +253,20 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
 }
 
 /** 「更多供应商」：全部选项三列网格，带账号数量；0 个账号的供应商仍可选（画板 25） */
-function MoreFilter({ accounts, value, onChange }: { accounts: readonly Connection[]; value: PlatformId | null; onChange: (platform: PlatformId | null) => void }) {
-  const count = (id: PlatformId) => accounts.filter((a) => a.platformId === id).length
+function MoreFilter({ accounts, value, onChange }: { accounts: readonly Connection[]; value: ProviderId | null; onChange: (platform: ProviderId | null) => void }) {
+  const count = (id: ProviderId) => accounts.filter((a) => connectionProviderId(a) === id).length
   const inMore = value !== null && !QUICK_FILTERS.includes(value)
-  const item = (key: string, label: string, selected: boolean, onSelect: () => void) => (
+  const item = (key: string, label: string, selected: boolean, onSelect: () => void, platform?: PlatformId) => (
     <Menu.Item
       key={key}
       onSelect={onSelect}
       className={cn(
-        "flex h-8 cursor-default select-none items-center justify-center rounded-md border text-xs outline-none",
+        "flex h-8 min-w-0 cursor-default select-none items-center gap-2 rounded-md border px-2 text-xs outline-none",
         selected ? "border-jolu-accent bg-jolu-selected font-medium text-jolu-on" : "border-jolu-border text-jolu-text data-[highlighted]:bg-jolu-side",
       )}
     >
-      {label}
+      <span aria-hidden className="grid size-4 shrink-0 place-items-center">{platform ? <PlatformLogo platform={platform} size={16} /> : <Blocks className="size-4" />}</span>
+      <span className="min-w-0 truncate" title={label}>{label}</span>
     </Menu.Item>
   )
   return (
@@ -259,12 +278,13 @@ function MoreFilter({ accounts, value, onChange }: { accounts: readonly Connecti
         )}
       >
         <ChevronDown aria-hidden className="size-4 text-jolu-muted" />
+        {inMore && <span aria-hidden className="grid size-4 shrink-0 place-items-center"><PlatformLogo platform={providerEntry(value).platformId} size={16} /></span>}
         {inMore ? providerEntry(value).name : "更多供应商"}
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="start" sideOffset={6} collisionPadding={12} style={{ maxHeight: "var(--radix-dropdown-menu-content-available-height)" }} className="motion-popover z-[100] grid w-[420px] max-w-[calc(100vw-24px)] overflow-y-auto grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover">
+        <Menu.Content align="start" sideOffset={6} collisionPadding={12} style={{ maxHeight: "var(--radix-dropdown-menu-content-available-height)" }} className="motion-popover z-[100] grid w-[528px] max-w-[calc(100vw-24px)] overflow-y-auto grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover">
           {item("all", `全部供应商 · ${accounts.length}`, value === null, () => onChange(null))}
-          {PROVIDERS.map((entry) => item(entry.id, `${entry.name} · ${count(entry.id)}`, value === entry.id, () => onChange(entry.id)))}
+          {PROVIDERS.map((entry) => item(entry.id, `${entry.name} · ${count(entry.id)}`, value === entry.id, () => onChange(entry.id), entry.platformId))}
         </Menu.Content>
       </Menu.Portal>
     </Menu.Root>
@@ -290,41 +310,65 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
   onResume: () => void
 }) {
   const hidden = useContext(PrivacyContext)
-  const entry = providerEntry(account.platformId)
+  const [detailsOpen,setDetailsOpen]=useState(false)
+  const entry = connectionProviderEntry(account)
   const paused = account.status === "paused"
-  const canPromote = !current && CLI_PLATFORMS.includes(account.platformId)
-  // 两个查询都在卡片层发起：刷新按钮刷新的就是卡片正在显示的数据（画板 23）
-  const zcodeLocal = account.platformId === "zcode" && account.kind === "auth"
-  const quota = useQuota(account.kind === "auth" && !paused && !zcodeLocal ? account.id : null, zcodeLocal && !paused ? "zcode" : false)
-  // 自定义供应商不查余额（D-11），不发起余额查询，也不显示刷新按钮
-  const custom = account.platformId === "custom"
-  const balance = useBalance(account.kind === "api" && account.baseUrl && !paused && !custom ? account.id : null)
-  const refresh = account.kind === "api" ? (account.baseUrl && !custom ? balance : null) : quota
+  const canPromote = !current && CLI_PLATFORMS.includes(account.platformId) && !account.id.startsWith("browser:")
+  const queries = accountQueries(account)
+  const quota = useQuota(queries.quota)
+  const balance = useBalance(queries.balance)
+  const policy = accountCardPolicy(account,quota.state,balance.state)
+  const isApi = account.kind === "api"
+  const email=account.accountEmail ?? (quota.state?.state === "ok" ? quota.state.account?.email : null)
+  const refresh = !queries.quota && !queries.balance ? null : {
+    ...(policy.showQuota ? quota : balance),
+    loading: quota.loading || balance.loading,
+    stale: quota.stale || balance.stale,
+    refresh: async () => { await Promise.all([queries.quota && quota.refresh(), queries.balance && balance.refresh()]) },
+  }
+  const emptyReason=isApi && balance.state && balance.state.state!=="ok" ? balance.state.reason : quota.state && quota.state.state!=="ok" ? quota.state.reason : "供应商未返回可展示的额度或余额"
+  const name = displayName(account, hidden)
   return (
-    <article className={cn("flex min-h-[470px] min-w-0 flex-col gap-3 rounded-xl border bg-jolu-bg p-4", current ? "border-jolu-accent" : "border-jolu-border")}>
-      <div className="flex min-h-[34px] items-center gap-2.5">
-        <span className="grid size-7 shrink-0 place-items-center"><PlatformLogo platform={account.platformId} size={22} /></span>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="truncate text-sm font-semibold text-jolu-text" title={hidden ? undefined : account.baseName}>{displayName(account, hidden)}</span>
-          <span className="truncate text-[11px] text-jolu-muted">
-            {custom ? `${protocolLabel(account.protocol)} · ${entry.name}` : account.kind === "api" ? `${account.baseUrl ? "自定义 API" : "官方 API"} · 用于 ${entry.name}` : `${entry.name} 订阅账号`}
-          </span>
+    <article role="listitem" data-account-card className={cn("flex h-full min-h-0 min-w-0 flex-col gap-1.5 rounded-xl border bg-jolu-bg p-3", current ? "border-jolu-accent" : "border-jolu-border")}>
+      <div className="flex h-8 shrink-0 items-center gap-2">
+        <span className="grid size-6 shrink-0 place-items-center"><PlatformLogo platform={account.platformId} size={22} /></span>
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-[13px] font-semibold text-jolu-text" title={hidden ? undefined : account.baseName}>{name !== account.baseName ? <PrivacyMosaic label="账号名称" length={account.baseName.length} /> : name}</span>
+          <span className="truncate text-[10px] text-jolu-muted">{entry.name} · {isApi ? `ApiKey${account.protocol ? ` · ${protocolLabel(account.protocol)}` : ""}` : "Auth 官方订阅"}</span>
         </div>
-      </div>
-      {account.kind === "auth" && <SensitiveValue label="邮箱 / 账号" value={account.accountEmail} />}
-      <div className="flex flex-wrap items-center gap-2">
         {current && <Badge tone="on">当前使用</Badge>}
-        <span className="text-xs font-medium text-jolu-text">{account.kind === "api" ? "按量计费" : entry.name}</span>
-        <Badge tone="muted">{account.kind === "api" ? "API Key" : "订阅授权"}</Badge>
       </div>
-      {paused ? (
-        <div className="flex items-center gap-3 rounded-lg bg-jolu-side px-3 py-2.5 text-xs text-jolu-muted">
-          <span className="min-w-0 flex-1">此账号暂停查询，额度与余额不更新；配置、凭据与历史统计保留。</span>
-          <JoluButton size="sm" variant="soft" disabled={!isTauri} onClick={onResume}>恢复查询</JoluButton>
+      {account.kind === "auth" && email && <SensitiveValue label="邮箱 / 账号" value={email} compact />}
+      {isApi && account.baseUrl && <SensitiveValue label="服务地址" icon={Globe} value={account.baseUrl} compact />}
+      <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden" data-account-summary>
+        {(!isApi || policy.expiresAt) && <SubscriptionExpiry account={account} quota={quota} compact />}
+        {paused ? <div className="flex flex-col items-start gap-2 rounded-lg bg-jolu-side p-2.5 text-[11px] text-jolu-muted"><span>已暂停查询，配置与历史保留。</span><JoluButton size="sm" variant="soft" disabled={!isTauri} onClick={onResume}>恢复查询</JoluButton></div> : <>
+          {policy.showBalance && <ApiMetrics account={account} balance={balance} compact />}
+          {policy.showQuota && (!isApi || !policy.showBalance) && <SubscriptionMetrics account={account} quota={quota} compact limit={isApi ? 1 : 2} />}
+          {!isApi && policy.resetCredits && <ResetCreditsMetrics quota={quota} compact />}
+          {!policy.showQuota && !policy.showBalance && !policy.resetCredits && <p className="line-clamp-3 text-[11px] leading-relaxed text-jolu-muted">{hidden ? redactAccountMessage(emptyReason) : emptyReason}</p>}
+        </>}
+        {isApi && <div className="mt-auto flex min-w-0 shrink-0 flex-col gap-1.5">
+          {account.model && <Stat label="模型" value={account.model} />}
+          {account.masked && <SensitiveValue label="Key 标识" icon={KeyRound} value={account.masked} compact />}
+        </div>}
+      </div>
+      <CardActions account={account} paused={paused} refresh={refresh} hasQuota={policy.showQuota} canPromote={canPromote} onPromote={onPromote} onEdit={onEdit} onRemove={onRemove} onDetails={()=>setDetailsOpen(true)} />
+      {detailsOpen && <ConfirmShell title="账号详情" subtitle={`${displayName(account,hidden)} · ${entry.name}`} onClose={()=>setDetailsOpen(false)} busy={false} footer={<JoluButton variant="neutral" onClick={()=>setDetailsOpen(false)}>关闭</JoluButton>}>
+        <div className="flex max-h-[calc(100dvh-250px)] min-h-0 flex-col gap-4 overflow-y-auto pr-1" data-account-details>
+          {email && <SensitiveValue label="邮箱 / 账号" value={email} />}
+          {(!isApi || policy.expiresAt) && <SubscriptionExpiry account={account} quota={quota} />}
+          {paused ? <p className="text-xs text-jolu-muted">已暂停查询，额度与余额不更新。</p> : <>
+            {(policy.showQuota || account.kind === "auth") && <SubscriptionMetrics account={account} quota={quota} />}
+            {queries.balance && <ApiMetrics account={account} balance={balance} />}
+            {policy.resetCredits && <ResetCreditsMetrics quota={quota} />}
+          </>}
+          {account.baseUrl && <SensitiveValue label="Base URL" icon={Globe} value={account.baseUrl} />}
+          {account.protocol && <Stat label="服务协议" value={protocolLabel(account.protocol)} />}
+          {account.model && <Stat label="默认模型" value={account.model} />}
+          {account.kind === "api" && account.masked && <SensitiveValue label="Key 标识" icon={KeyRound} value={account.masked} />}
         </div>
-      ) : account.kind === "api" ? <ApiMetrics account={account} balance={balance} /> : <SubscriptionMetrics account={account} quota={quota} />}
-      <span className="flex-1" />
-      <CardActions account={account} paused={paused} refresh={refresh} canPromote={canPromote} onPromote={onPromote} onEdit={onEdit} onRemove={onRemove} />
+      </ConfirmShell>}
     </article>
   )
 }
@@ -342,64 +386,69 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "da
   return (
     <div className="flex min-w-0 items-center justify-between gap-2">
       <span className="text-[10px] text-jolu-muted">{label}</span>
-      <span className={cn("truncate text-xs font-medium", tone === "danger" ? "text-jolu-danger" : tone === "muted" ? "text-jolu-muted" : "text-jolu-text")}>{value}</span>
+      <span title={value} className={cn("truncate text-xs font-medium", tone === "danger" ? "text-jolu-danger" : tone === "muted" ? "text-jolu-muted" : "text-jolu-text")}>{value}</span>
     </div>
   )
 }
 
-/** 订阅账号：套餐 / 订阅状态 / 到期时间 + 额度窗口 + 重置卡（画板 07、23） */
-function SubscriptionMetrics({ account, quota }: { account: Connection; quota: QuotaResult }) {
-  const hidden = useContext(PrivacyContext)
-  const [checkingCards, setCheckingCards] = useState(false)
-  const state = quota.state
-  const unauthorized = state?.state === "unauthorized"
-  const plan = (state?.state === "ok" ? state.plan : null) ?? (account.label && account.label !== "本机来源" ? account.label : null)
-  const windows = accountQuotaWindows(account.platformId, state?.state === "ok" ? state.windows : [])
-  const metadata = state?.state === "ok" ? state.account : null
-  const subscription = subscriptionDisplay(metadata)
-  return (
-    <>
-      <div className="flex flex-col gap-2">
-        <Stat label="等级 / 套餐" value={plan ?? "未获取"} tone={plan ? undefined : "muted"} />
-        <Stat label="订阅状态" value={unauthorized ? "未确认 · 授权过期" : subscription.status} tone={unauthorized ? "danger" : metadata?.subscription_source === "live" ? undefined : "muted"} />
-        <Stat label={metadata?.subscription_source === "local_snapshot" ? "到期时间 · 本机记录" : "到期时间"} value={subscription.expires} tone={subscription.expires === "未提供" ? "muted" : undefined} />
-      </div>
-      {subscription.note && <p className="text-[10px] leading-relaxed text-jolu-muted">{subscription.note}</p>}
-      {windows.length > 0 && (
-        <div className="grid grid-cols-1 gap-3">
-          {windows.map((window) => <QuotaBar key={window.key} window={window} />)}
-        </div>
-      )}
-      {state?.state !== "ok" && (
-        <div className="rounded-lg bg-jolu-side px-3 py-2.5 text-[11px] text-jolu-muted">
-          {quota.loading && !state ? "正在读取额度…" : state ? `额度 · ${unauthorized ? "账号认证已失效，重新登录后同步" : `未提供（${hidden ? redactAccountMessage(state.reason) : state.reason}）`}` : "额度 · 未提供"}
-        </div>
-      )}
-      {quota.stale && quota.failure && (
-        <p role="status" className="flex items-center gap-1.5 text-[11px] text-jolu-danger">
-          <AlertTriangle aria-hidden className="size-3.5" />刷新失败 · {formatSyncedAt(quota.fetchedAt).replace("同步", "数据")}
-        </p>
-      )}
-      <div className="flex min-h-10 items-center gap-2 rounded-[7px] bg-jolu-side px-2.5 py-2 text-[11px] text-jolu-muted">
-        <Ticket aria-hidden className="size-[15px] shrink-0" />
-        <div className="min-w-0 flex-1"><span className="block">重置卡</span><span className="block pt-1 text-[10px]">{account.platformId === "codex" ? resetCreditsText(metadata?.reset_credits) : "当前来源不支持查询"}</span></div>
-        {account.platformId === "codex" && <JoluButton size="sm" variant="soft" aria-label="查询重置卡" disabled={!isTauri || checkingCards || quota.loading} onClick={() => {
-          setCheckingCards(true)
-          void quota.refresh().finally(() => setCheckingCards(false))
-        }}>{checkingCards ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}查询</JoluButton>}
-      </div>
-    </>
-  )
+/** Auth 固定显示订阅到期；ApiKey 仅有真实套餐日期时显示套餐到期。 */
+function SubscriptionExpiry({ account, quota, compact=false }: { account: Connection; quota: QuotaResult; compact?:boolean }) {
+  const policy=accountCardPolicy(account,quota.state)
+  const subscription=subscriptionDisplay(quota.state?.state==="ok" ? quota.state.account : null)
+  const state=(quota.stale ? quota.failure?.state : null) ?? quota.state?.state
+  const value=account.status==="paused" ? "已暂停查询"
+    : policy.expiresAt ? `${subscription.expires}${policy.expiryIsSnapshot ? " · 本机" : ""}${quota.stale ? " · 上次数据" : ""}`
+    : state==="unauthorized" ? "登录失效"
+    : state==="failed" ? "查询失败"
+    : state==="forbidden" ? "无查询权限"
+    : state==="rate_limited" ? "请求受限"
+    : state==="ok" || state==="unsupported" ? "未提供"
+    : quota.loading ? "查询中…" : "尚未查询"
+  return <>
+    <Stat label={account.kind === "api" ? "套餐到期" : "订阅到期"} value={value} tone={state==="unauthorized" || state==="failed" || state==="forbidden" || state==="rate_limited" || quota.stale ? "danger" : "muted"} />
+    {!compact && subscription.note && <p className="text-[11px] leading-relaxed text-jolu-muted">{subscription.note}</p>}
+  </>
 }
 
-function QuotaBar({ window }: { window: QuotaWindowDto }) {
-  const remaining = window.used_percent === null ? null : remainingPercent(window.used_percent)
+/** 按真实响应显示套餐与额度；主卡限主要窗口，详情完整保留。 */
+function SubscriptionMetrics({ account, quota, compact=false, limit=2 }: { account: Connection; quota: QuotaResult; compact?:boolean; limit?:number }) {
+  const hidden = useContext(PrivacyContext)
+  const state = quota.state
+  const unauthorized = state?.state === "unauthorized"
+  const policy=accountCardPolicy(account,state)
+  const windows=compact ? policy.windows.slice(0,limit) : policy.windows
+  return <>
+    {policy.plan && (compact ? <span className="truncate text-[10px] font-medium leading-4 text-jolu-text" title={policy.plan}>{policy.plan}</span> : <Stat label="等级 / 套餐" value={policy.plan} />)}
+    {windows.length > 0 && <div className="grid grid-cols-1 gap-2">{windows.map(window=><QuotaBar key={window.key} window={window} compact={compact} showReset={!compact} />)}</div>}
+    {compact && policy.windows.length > windows.length && <span className="text-[10px] text-jolu-muted">共 {policy.windows.length} 项额度，完整内容见详情</span>}
+    {state?.state !== "ok" && <div className={cn("rounded-lg bg-jolu-side px-2 py-1.5 text-[11px] text-jolu-muted",compact&&"line-clamp-2")}>
+      {quota.loading && !state ? "正在读取额度…" : state ? `额度 · ${unauthorized ? "账号认证已失效，重新登录后同步" : hidden ? redactAccountMessage(state.reason) : state.reason}` : "额度尚未查询"}
+    </div>}
+    {!compact && quota.stale && quota.failure && <p role="status" className="flex items-center gap-1.5 text-[11px] text-jolu-danger"><AlertTriangle aria-hidden className="size-3.5" />刷新失败 · {formatSyncedAt(quota.fetchedAt).replace("同步", "数据")}</p>}
+  </>
+}
+
+/** 没有真实重置卡对象就不挂载此区域，零值仍正常显示。 */
+function ResetCreditsMetrics({ quota,compact=false }: { quota: QuotaResult; compact?:boolean }) {
+  const [checkingCards, setCheckingCards] = useState(false)
+  const credits = quota.state?.state === "ok" ? quota.state.account?.reset_credits : null
+  if(!credits) return null
+  const text=resetCreditsText(credits,compact)
+  return <div className="flex shrink-0 items-center gap-1.5 rounded-[7px] bg-jolu-side px-2 py-1 text-[10px] text-jolu-muted">
+    <Ticket aria-hidden className="size-3.5 shrink-0" /><span className="shrink-0">重置卡</span><span className="min-w-0 flex-1 truncate" title={resetCreditsText(credits)}>{text}</span>
+    <JoluButton size="sm" variant="soft" className={compact?"!size-6 !p-0":undefined} aria-label="查询重置卡" disabled={!isTauri || checkingCards || quota.loading} onClick={()=>{setCheckingCards(true);void quota.refresh().finally(()=>setCheckingCards(false))}}>{checkingCards ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}{!compact&&"查询"}</JoluButton>
+  </div>
+}
+
+function QuotaBar({ window,compact=false,showReset=true }: { window: QuotaWindowDto;compact?:boolean;showReset?:boolean }) {
+  const used = window.used_percent
+  const remaining = used == null || !Number.isFinite(used) || used < 0 || used > 100 ? null : remainingPercent(used)
   const reset = formatResetAt(window.resets_at)
   return (
-    <div className="flex min-w-0 flex-col gap-[5px]">
+    <div className="flex min-w-0 flex-col gap-[3px]">
       <div className="flex items-center justify-between text-[11px]">
-        <span className="truncate text-jolu-muted">{quotaTitle(window.key, window.window_name)}</span>
-        <span className="font-semibold text-jolu-text">{remaining === null ? "未提供" : `剩余 ${Math.round(remaining)}%`}</span>
+        <span className={cn("min-w-0 text-jolu-muted",compact?"truncate":"break-all")} title={window.window_name}>{quotaTitle(window.key, window.window_name)}</span>
+        <span className="text-right font-semibold text-jolu-text">{quotaValue(window)}</span>
       </div>
       {/* 未知额度不用空进度条表示（画板 23） */}
       {remaining !== null && (
@@ -407,69 +456,45 @@ function QuotaBar({ window }: { window: QuotaWindowDto }) {
           <div className="motion-quota-bar h-full rounded-[3px] bg-jolu-accent" style={{ width: `${remaining}%` }} />
         </div>
       )}
-      <span className="text-[10px] text-jolu-muted">{reset ?? "重置时间未提供"}</span>
+      {showReset && (reset || !compact) && <span className="text-[10px] text-jolu-muted">{reset ?? "重置时间未提供"}</span>}
     </div>
   )
 }
 
-/** API Key 账号：可用余额 + 消费 + 服务信息（画板 07、23「余额查询状态」） */
-function ApiMetrics({ account, balance }: { account: Connection; balance: BalanceResult }) {
+/** API账号显示真实余额与消费；不占位显示来源没有提供的今日消费/充值。 */
+function ApiMetrics({ account, balance,compact=false }: { account: Connection; balance: BalanceResult;compact?:boolean }) {
   const hidden = useContext(PrivacyContext)
   const state = balance.state
-  return (
-    <>
-      <div className="flex flex-col gap-1 rounded-lg bg-jolu-selected px-3 py-2.5">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="text-jolu-on">可用余额</span>
-          <span className="text-[10px] text-jolu-muted">{account.platformId === "custom" ? "不支持查询" : state?.state === "ok" ? (balance.stale ? "刷新失败 · 显示上次金额" : "供应商返回") : ""}</span>
-        </div>
-        {state?.state === "ok" ? (
-          <div className="flex flex-wrap items-baseline gap-1.5">
-            <span className="tnum text-[22px] font-semibold text-jolu-text">{formatMoney(state.balance, state.currency)}</span>
-            <span className="text-[11px] text-jolu-muted">{state.currency}</span>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[22px] font-semibold text-jolu-muted">—</span>
-            <span className="text-[11px] text-jolu-muted">
-              {/* 自定义供应商不查余额（画板 29A 状态 B，同画板 23「余额状态 · 不支持查询」） */}
-              {account.platformId === "custom" ? "此服务未提供可用的余额查询方式，不显示为 0。"
-                : !account.baseUrl ? "官方直连不提供余额查询，不显示为 0。"
-                : balance.loading ? "正在获取余额…"
-                : state ? `此服务未提供可用的余额查询：${hidden ? redactAccountMessage(state.reason) : state.reason}` : "还没有余额数据。查询成功后显示金额和币种。"}
-            </span>
-          </div>
-        )}
-      </div>
-      <div className="flex flex-col gap-2">
-        <Stat label="今日消费" value="未提供" tone="muted" />
-        <Stat label="累计消费" value={state?.state === "ok" && state.used !== null ? `${formatMoney(state.used, state.currency)} ${state.currency}` : "未提供"} tone={state?.state === "ok" && state.used !== null ? undefined : "muted"} />
-        <Stat label="累计充值" value="未提供" tone="muted" />
-      </div>
-      <div className="flex flex-col gap-[5px] text-[11px] text-jolu-muted">
-        <SensitiveValue label="Base URL" icon={Globe} value={account.baseUrl ?? providerEntry(account.platformId).baseUrl?.value} />
-        <span className="truncate">模型 {account.model ?? "未设置"}  ·  Key {account.masked || "未保存"}</span>
-      </div>
-    </>
-  )
+  const policy=accountCardPolicy(account,null,state)
+  return <>
+    {policy.showBalance ? <div className={cn("flex flex-col gap-1 rounded-lg bg-jolu-selected px-2.5 py-2",compact&&"py-1.5")}>
+      <div className="flex items-center justify-between text-[10px]"><span className="text-jolu-on">可用余额</span>{balance.stale&&<span className="text-jolu-danger">刷新失败 · 上次金额</span>}</div>
+      {policy.balanceAmount!==null ? <div className="flex items-baseline gap-1"><span className={cn("tnum font-semibold text-jolu-text",compact?"text-lg":"text-[22px]")}>{formatMoney(policy.balanceAmount,policy.balanceCurrency??"")}</span><span className="text-[10px] text-jolu-muted">{policy.balanceCurrency}</span></div>
+        : <span className={cn("text-[11px] text-jolu-muted",compact&&"line-clamp-2")}>{balance.loading&&!state ? "正在获取余额…" : state&&state.state!=="ok" ? `${state.state==="unauthorized"?"凭证失效":state.state==="forbidden"?"查询权限不足":"余额查询失败"}：${hidden?redactAccountMessage(state.reason):state.reason}` : "余额尚未查询"}</span>}
+    </div> : !compact && state?.state==="unsupported" && <p className="text-[11px] text-jolu-muted">余额 · {hidden?redactAccountMessage(state.reason):state.reason}</p>}
+    {policy.used!==null&&<Stat label="累计消费" value={`${formatMoney(policy.used,policy.balanceCurrency??"")} ${policy.balanceCurrency??""}`} />}
+  </>
 }
 
-function CardActions({ account, paused, refresh, canPromote, onPromote, onEdit, onRemove }: {
+function CardActions({ account, paused, refresh, hasQuota, canPromote, onPromote, onEdit, onRemove,onDetails }: {
   account: Connection
   paused: boolean
   refresh: QuotaResult | BalanceResult | null
+  hasQuota: boolean
   canPromote: boolean
   onPromote: () => void
   onEdit: () => void
   onRemove: () => void
+  onDetails: () => void
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-jolu-border pt-3">
-      <span className="w-full truncate text-[10px] text-jolu-muted">
-        {paused ? "暂停查询" : refresh?.fetchedAt ? formatSyncedAt(refresh.fetchedAt, new Date(), account.kind === "api" ? "余额" : "") : account.lastSyncText}
+    <div className="flex shrink-0 items-center justify-end gap-1 border-t border-jolu-border pt-2">
+      <span className={cn("min-w-0 flex-1 truncate text-[10px]",refresh?.stale?"text-jolu-danger":"text-jolu-muted")}>
+        {paused ? "暂停查询" : refresh?.stale ? "刷新失败 · 上次结果" : refresh?.fetchedAt ? formatSyncedAt(refresh.fetchedAt, new Date(), hasQuota ? "" : "余额") : account.lastSyncText}
       </span>
+      <JoluButton size="sm" variant="neutral" className="!px-2" aria-label="查看账号详情" onClick={onDetails}>详情</JoluButton>
       {canPromote && <Tip label="设置为使用"><JoluButton size="sm" variant="soft" className="!w-8 !px-0" aria-label="设置为使用" disabled={!isTauri} onClick={onPromote}><Check aria-hidden /><span className="sr-only">设置为使用</span></JoluButton></Tip>}
-      {refresh && <RefreshButton label={account.kind === "api" ? "刷新余额" : "刷新当前账号"} result={refresh} />}
+      {refresh && <RefreshButton label={hasQuota ? "刷新当前账号" : "刷新余额"} result={refresh} />}
       {/* 编辑入口位置待确认：Jolu.pen 画板 27 有编辑弹窗，但账号卡片上未画入口 */}
       <Tip label="编辑连接">
         <button
@@ -498,7 +523,7 @@ function CardActions({ account, paused, refresh, canPromote, onPromote, onEdit, 
 /** 刷新只影响当前卡片；请求中禁用防重复点击，结果直接体现在卡片上（画板 23「正在刷新」） */
 function RefreshButton({ label, result }: { label: string; result: QuotaResult | BalanceResult }) {
   const [busy, setBusy] = useState(false)
-  const loading = busy
+  const loading = busy || result.loading
   return (
     <Tip label={label}><JoluButton
       size="sm"
@@ -571,7 +596,7 @@ function RemoveDialog({ account, current, alternatives, islandUsers, onClose, on
   onClose: () => void
   onConfirm: (replacement: string | null) => Promise<void>
 }) {
-  const entry = providerEntry(account.platformId)
+  const entry = connectionProviderEntry(account)
   const [replacement, setReplacement] = useState<string>(alternatives[0]?.id ?? "")
   const confirm = useConfirm(() => onConfirm(current && replacement ? replacement : null))
   return (
@@ -629,13 +654,13 @@ function EditDialog({ account, others, onClose, onSave }: {
   onClose: () => void
   onSave: (name: string, secret: string | null, model: string | null) => Promise<void>
 }) {
-  const entry = providerEntry(account.platformId)
+  const entry = connectionProviderEntry(account)
   const [name, setName] = useState(account.baseName)
   const [replacing, setReplacing] = useState(false)
   const [secret, setSecret] = useState("")
   const [model, setModel] = useState(account.model ?? "")
   const [modelReady, setModelReady] = useState(false)
-  const nameError = validateConnectionName(name, others, account.platformId, account.kind)
+  const nameError = validateConnectionName(name, others, connectionProviderId(account) ?? account.platformId, account.kind)
   const newSecret = replacing ? secret.trim() : ""
   const save = editSaveState({
     platformId: account.platformId, kind: account.kind, nameChanged: name.trim() !== account.baseName,
@@ -827,7 +852,7 @@ function CustomModelSection({ baseUrl, secret, protocol, model, onModel }: {
 }
 
 function PromoteDialog({ account, onClose, onConfirm }: { account: Connection; onClose: () => void; onConfirm: () => Promise<void> }) {
-  const entry = providerEntry(account.platformId)
+  const entry = connectionProviderEntry(account)
   const confirm = useConfirm(onConfirm)
   return (
     <ConfirmShell

@@ -72,6 +72,7 @@ export function demoTaskDetail(id: number, now: number): TaskDetailDto {
   const item = tasks(now).find((x) => x.id === id) ?? tasks(now)[0]
   return {
     item,
+    execution: item,
     queue: [{ task_id: 24, name: "完善登录页面", status: "waiting" }, { task_id: 26, name: "整理项目文档", status: "queued" }].filter((q) => q.task_id === item.id || item.connection_id === "demo-momo"),
     events: [
       { ts: t(16, 2, 8), kind: "start", title: "开始执行", detail: "在所选会话中追加任务指令" },

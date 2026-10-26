@@ -1,6 +1,7 @@
 import { useContentMotion, useExitPresence } from "@/lib/motion"
 import { useCallback, useEffect, useId, useRef, useState } from "react"
 import { api, isTauri, listenEvent, openUrl, type MainIntentDto } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import { pageForIntent, pageLabel, readSidebarCollapsed, resolveOpenPage, writeSidebarCollapsed, type MainPage } from "@/lib/mainNavigation"
 import { settingsApi } from "@/lib/settingsApi"
 import { applyAppearance, normalizeDensity } from "@/lib/appearance"
@@ -20,7 +21,7 @@ import type { AutomationPrefill, AutomationTarget } from "./AutomationView"
 import type { UsageRequest } from "./UsageView"
 
 const IslandView = createLazyPage(() => import("./IslandView").then((m) => ({ default: m.IslandView })), "灵动岛", "island")
-const ProvidersView = createLazyPage(() => import("./ProvidersView").then((m) => ({ default: m.ProvidersView })), "供应商", "providers")
+const ProvidersView = createLazyPage(() => import("./ProvidersView").then((m) => ({ default: m.ProvidersView })), "供应商", "providers", true)
 const SessionsView = createLazyPage(() => import("./SessionsView").then((m) => ({ default: m.SessionsView })), "会话线程", "sessions")
 const AutomationView = createLazyPage(() => import("./AutomationView").then((m) => ({ default: m.AutomationView })), "自动化", "tasks")
 const SkillsView = createLazyPage(() => import("./SkillsView").then((m) => ({ default: m.SkillsView })), "Skills 管理", "table")
@@ -223,10 +224,10 @@ export function MainPanelWindow({
       <TitleBar />
       <div className="flex min-h-0 flex-1">
         <SideNav page={page} collapsed={collapsed} onNavigate={navigate} />
-        <main className="relative flex min-w-0 flex-1 flex-col">
+        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <PageHeader title={pageLabel(page)} collapsed={collapsed} onToggleSidebar={toggleSidebar} />
           <div ref={scrollRef} data-panel-scroll className="min-h-0 min-w-0 flex-1 overflow-auto">
-            <div ref={pageMotion} className="px-8 py-5">
+            <div ref={pageMotion} className={cn("px-8 py-5", page === "providers" && "h-full min-h-0")}>
               {page === "island" && <IslandView />}
               {page === "usage" && (
                 <UsageView
