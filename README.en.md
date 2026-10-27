@@ -4,7 +4,7 @@
 
 **All your AI coding tools, managed in one place.**
 
-A desktop island that stays on screen, plus a seven-module main window: connect providers, track usage, browse sessions, schedule automations and manage Skills — all on your own machine.
+A desktop island that stays on screen, plus an eight-module main window: connect providers, claim daily check-in rewards, track usage, browse sessions, schedule automations and manage Skills — all on your own machine.
 
 [![Release](https://img.shields.io/github/v/release/haishishushu/Jolu?label=release&logo=github)](https://github.com/haishishushu/Jolu/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
@@ -43,6 +43,7 @@ A desktop island that stays on screen, plus a seven-module main window: connect 
 | --- | --- |
 | Island | Shows the current connection's quota, reset time and session deltas on your desktop; stays on top, docks to screen edges and supports up to 8 clones |
 | Providers | Connect Claude Code, Codex, Gemini, Grok and more; manage accounts and see subscription quotas and API key usage |
+| Check-in | Claim official daily rewards for WorkBuddy, Qoder and Trae in batch or one by one, and review check-in history and credit totals |
 | Usage | Overview, analysis and call details; filter by time, provider, account and model, and export calls to CSV |
 | Sessions | Browse local sessions by project, search titles, session IDs or message text, read messages and continue in the original tool |
 | Automation | Let Claude Code / Codex run tasks now, on a schedule or once quota recovers; progress is kept when quota runs out and resumed later |
@@ -121,6 +122,13 @@ Make one more request in your AI tool, then open **Usage → Overview** to see t
 
 ## Using each module
 
+### Check-in: claim daily rewards in one place
+
+- Open it from the sidebar, right below Providers. WorkBuddy, Qoder and Trae each have a China and an international card — six in total.
+- To add an account, pick the provider first, then follow that provider's connection flow; several accounts can be added from the same browser.
+- Check in all accounts at once or one at a time, and retry only the ones that failed. History and period totals mark whether a record came from the provider or from Jolu.
+- Manual check-in currently covers WorkBuddy (China), Qoder (China and international) and Trae (China). WorkBuddy AI settles rewards automatically after valid tasks, and Trae international has no official daily check-in yet.
+
 ### Usage: from totals to single calls
 
 - **Overview**: total tokens, calls, estimated cost and input cache hit rate; the trend for today or the chosen range; the top 5 models; usage per provider and the most expensive sessions.
@@ -178,8 +186,6 @@ General (launch at login, silent start, auto refresh), Appearance (light / dark 
 - The dot on the tray icon shows the current connection's quota: green normal, yellow near the limit, red exhausted, grey unknown.
 - Left-click the tray icon to open the main window. Closing the main window keeps collection, the island and automation scheduling running; quit from the tray menu.
 
-![Tray menu](./docs/assets/readme/tray-menu.png)
-
 ## Understanding the numbers
 
 | Metric | Meaning |
@@ -197,7 +203,7 @@ Local tokens, island deltas and official quotas therefore do not have to match. 
 
 ## Updates and data retention
 
-In-app update checks are not available yet. To upgrade, download the new installer from [GitHub Releases](https://github.com/haishishushu/Jolu/releases) and install over the existing version.
+Jolu checks for updates at launch and then every 30 minutes. A new version is downloaded and signature-checked in the background; a green version button then appears in the page header, and clicking it installs the update and restarts the app. You can also download the new installer from [GitHub Releases](https://github.com/haishishushu/Jolu/releases) and install over the existing version.
 
 Settings and statistics live in the app data folder, which an in-place install keeps using. Island connections, display preferences, the main window position, automation tasks and run records all persist.
 
