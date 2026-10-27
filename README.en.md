@@ -4,7 +4,7 @@
 
 **All your AI coding tools, managed in one place.**
 
-A desktop island that stays on screen, plus an eight-module main window: connect providers, claim daily check-in rewards, track usage, browse sessions, schedule automations and manage Skills — all on your own machine.
+Quota always on your desktop island · Daily rewards in one click · Tasks that wait out quota limits and resume on their own
 
 [![Release](https://img.shields.io/github/v/release/haishishushu/Jolu?label=release&logo=github)](https://github.com/haishishushu/Jolu/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
@@ -13,16 +13,64 @@ A desktop island that stays on screen, plus an eight-module main window: connect
 
 [简体中文](./README.md) | English
 
-<img src="./docs/assets/readme/island-collapsed.png" alt="Jolu desktop island" width="428" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/island-collapsed-dark.png" />
+  <img src="./docs/assets/readme/island-collapsed.png" alt="Jolu desktop island" width="448" />
+</picture>
 
 </div>
 
 > Screenshots come from the frontend preview. Accounts, projects and numbers in them are examples, not your real usage. Actual data depends on local records, connection authorization and what each provider returns.
 
-![Jolu main window · Usage](./docs/assets/readme/panel-usage.png)
+## Highlights
+
+### Island: quota and sessions always on your desktop
+
+No window switching, no web dashboards. The island at the top of your screen shows how much quota the current account has left, when it resets, how many sessions are running and how many tokens this round has used.
+
+| Collapsed | Expanded |
+| --- | --- |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/island-collapsed-dark.png" /><img src="./docs/assets/readme/island-collapsed.png" alt="Collapsed island" /></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/island-expanded-dark.png" /><img src="./docs/assets/readme/island-expanded.png" alt="Expanded island" /></picture> |
+| 5-hour / 7-day quota, reset countdown and session deltas | Subscription quota, running sessions and today's local tokens |
+
+- **Double-click** to expand or collapse; **drag to a screen edge** to dock out of the way.
+- Open up to **8 clones**, each showing a different account or tool, so every quota is visible at once.
+- The **right-click menu** switches connections, changes position, keeps it on top, toggles do-not-disturb and opens or destroys clones. At least one island always remains.
+- The dot on the tray icon mirrors the quota: green normal, yellow near the limit, red exhausted, grey unknown.
+- Left-click the tray icon to open the main window. Closing the main window keeps the island, collection and automation scheduling running; quit from the tray menu.
+
+<img src="./docs/assets/readme/context-menu.png" alt="Island right-click menu" width="268" />
+
+### Check-in: claim every daily reward at once
+
+![Check-in](./docs/assets/readme/panel-checkin.png)
+
+- WorkBuddy, Qoder and Trae each have a China and an international card — six in total — showing today's reward, check-in days this week / month and the account quota.
+- **Check in all** claims every eligible account in turn; you can also claim one at a time and retry only the failures. The same account is never claimed twice.
+- To add an account, pick the provider first and follow its authorization flow; several accounts can be added from the same browser, and **Batch manage** removes them in bulk.
+- History and period totals mark whether a record came from the provider or from Jolu. The eye button hides account names for screenshots.
+- Manual check-in currently covers WorkBuddy (China), Qoder (China and international) and Trae (China). WorkBuddy AI settles rewards automatically after valid tasks, and Trae international has no official daily check-in yet.
+
+### Out of quota? It waits and resumes on its own
+
+![Automation: waiting for quota and resuming](./docs/assets/readme/automation-wait.png)
+
+Hand tasks to Claude Code or Codex without wasting a run when quota runs out:
+
+- **Quota runs out mid-run**: finished file changes and session progress are kept, the task moves to "Waiting for quota", and the page shows the expected recovery time and the next check.
+- **Quota recovers**: Jolu re-checks the 5-hour and weekly quota and, once available, continues in the **same session** instead of starting over. If it cannot resume safely, the task is marked for manual follow-up.
+- **Start modes**: run now, scheduled (once / daily / weekly), or "after quota recovers" to line heavy work up for the moment quota resets.
+- **Per-account queue**: tasks for the same account run one after another; run records track execution time and waiting time separately.
+
+![Automation task list](./docs/assets/readme/panel-automation.png)
+
+- When creating a task, choose the tool, account, model, project directory and session; a session and its project can be brought over from Sessions in one click.
+- The account must be the one currently signed in to the tool — Jolu does not switch logins for you, and file permissions follow the tool's own configuration.
+- Jolu must keep running in the background; nothing is scheduled while the computer sleeps, and missed schedules are marked "missed" so you can decide whether to run them.
 
 ## Contents
 
+- [Highlights](#highlights)
 - [Features](#features)
 - [Supported platforms and quotas](#supported-platforms-and-quotas)
 - [Download and install](#download-and-install)
@@ -49,6 +97,8 @@ A desktop island that stays on screen, plus an eight-module main window: connect
 | Automation | Let Claude Code / Codex run tasks now, on a schedule or once quota recovers; progress is kept when quota runs out and resumed later |
 | Skills | Scan, view, create, import, copy and enable/disable Claude Code and Codex Skills, with a backup before every write |
 | Settings | Launch at login, theme, local CLI proxy, data import/export and cleanup, notifications and do-not-disturb |
+
+![Jolu main window · Usage](./docs/assets/readme/panel-usage.png)
 
 Local statistics and online quotas are independent: **having local sessions does not mean the account quota can be queried, and having a quota does not mean sessions were recorded locally.**
 
@@ -122,12 +172,7 @@ Make one more request in your AI tool, then open **Usage → Overview** to see t
 
 ## Using each module
 
-### Check-in: claim daily rewards in one place
-
-- Open it from the sidebar, right below Providers. WorkBuddy, Qoder and Trae each have a China and an international card — six in total.
-- To add an account, pick the provider first, then follow that provider's connection flow; several accounts can be added from the same browser.
-- Check in all accounts at once or one at a time, and retry only the ones that failed. History and period totals mark whether a record came from the provider or from Jolu.
-- Manual check-in currently covers WorkBuddy (China), Qoder (China and international) and Trae (China). WorkBuddy AI settles rewards automatically after valid tasks, and Trae international has no official daily check-in yet.
+Island, Check-in and Automation are covered in [Highlights](#highlights).
 
 ### Usage: from totals to single calls
 
@@ -148,17 +193,6 @@ Latency, time to first token and status codes are shown only when the source pro
 - **Continue in tool** checks that Claude Code / Codex is installed and the project directory is reachable, then resumes the session in a new console.
 - **View usage** opens this session's calls; **Create automation** carries the session and project into a new task. Session compaction supports incremental summaries, refinement and Markdown handoff. Exploratory short-session evaluation is complete; long-session quality still requires suitable samples.
 
-### Automation: keep AI working while you are away
-
-![Automation](./docs/assets/readme/panel-automation.png)
-
-- When creating a task, choose the tool (Claude Code / Codex), account, model, project directory and session, then describe the work.
-- Start modes: **Run now**, **Scheduled** (once / daily / weekly) and **After quota recovers**.
-- If quota runs out mid-run, progress is kept and the task waits, then resumes in the same session; if it cannot resume safely it is marked for manual follow-up instead of starting over.
-- Tasks for the same account run one after another; run records track execution time and waiting time separately.
-- The account must be the one currently signed in to the tool — Jolu does not switch logins for you, and file permissions follow the tool's own configuration.
-- Jolu must keep running in the background; nothing is scheduled while the computer sleeps, and missed schedules are marked "missed" so you can decide whether to run them.
-
 ### Skills: manage every tool's Skills in one place
 
 ![Skills](./docs/assets/readme/panel-skills.png)
@@ -173,18 +207,6 @@ Latency, time to first token and status codes are shown only when the source pro
 ![Settings](./docs/assets/readme/panel-settings.png)
 
 General (launch at login, silent start, auto refresh), Appearance (light / dark / system), Network and proxy (local CLI proxy), Data and storage (import/export, retention, cleanup, open data folder), Notifications (do-not-disturb, balance alerts) and About.
-
-### Island and tray
-
-| Collapsed | Expanded |
-| --- | --- |
-| ![Collapsed island](./docs/assets/readme/island-collapsed.png) | ![Expanded island](./docs/assets/readme/island-expanded.png) |
-| Key quota and activity at a glance | Connection, session details and supported local deltas |
-
-- **Double-click** to expand or collapse; **drag to a screen edge** to dock.
-- **Right-click** for the menu: switch connection, position, always on top, and open / destroy clones. At least one island always remains.
-- The dot on the tray icon shows the current connection's quota: green normal, yellow near the limit, red exhausted, grey unknown.
-- Left-click the tray icon to open the main window. Closing the main window keeps collection, the island and automation scheduling running; quit from the tray menu.
 
 ## Understanding the numbers
 
@@ -302,6 +324,8 @@ pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
 The installer is written to `backend/target/release/bundle/nsis/`. The first Rust build takes a while; if the dev port conflicts, check that the Vite address matches Tauri's `devUrl`.
 
+Session handoff supports incremental summaries, draft refinement and Markdown preview/export. Exploratory prompt evaluation covered five short sessions; it does not establish long-session quality. OpenCode JSON/SQLite V1/V2 usage parsing keeps unknown fields unknown and adds visible output and separate reasoning while preferring the source total. See [unverified integrations](docs/todo/2026-10-22-unverified-integrations.md). Update checks are on by default; set both `JOLU_UPDATES_ENABLED=0` and `VITE_JOLU_UPDATES_ENABLED=0` at build time to turn them off.
+
 ### Project structure
 
 ```text
@@ -339,6 +363,3 @@ The collector reads local records incrementally and de-duplicates them into SQLi
     <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
   </picture>
 </a>
-
-
-Session handoff supports incremental summaries, draft refinement and Markdown preview/export. Exploratory prompt evaluation covered five short sessions; it does not establish long-session quality. OpenCode JSON/SQLite V1/V2 usage parsing keeps unknown fields unknown and adds visible output and separate reasoning while preferring the source total. See [unverified integrations](docs/todo/2026-10-22-unverified-integrations.md). Update checks are on by default; set both `JOLU_UPDATES_ENABLED=0` and `VITE_JOLU_UPDATES_ENABLED=0` at build time to turn them off.

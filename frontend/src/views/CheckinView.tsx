@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { CalendarCheck2, Check, Eye, EyeOff, Info, LoaderCircle, Plus, RefreshCw } from "lucide-react"
 import { api, isTauri, listenEvent } from "@/lib/api"
 import { checkinApi, type CheckinRecordDto, type CheckinUpdate } from "@/lib/checkinApi"
+import { demoCheckinApi } from "@/mock/checkin"
 import { CHECKIN_EDITIONS, STATE_LABELS, applyCheckinUpdate, checkinAccountLabel, checkinSummary, checkinTargets, currentOutcome, initialCheckinAccount, rewardLabel, uniqueCheckinAccounts, type CheckinAccount, type CheckinEdition } from "@/lib/dailyCheckin"
 import { cn } from "@/lib/utils"
 import { JoluButton } from "@/components/ui/JoluButton"
@@ -18,6 +19,8 @@ import { removeAccounts, type BatchAccountDeleteResult } from "@/lib/accountActi
 
 type Activity = { kind: "refresh" | "claim"; done: number; total: number; name: string } | null
 const PRIVACY_KEY = "jolu:checkin:hideAccounts"
+// 浏览器预览使用示例数据；桌面端读取失败时不回落到示例。
+const checkinSource: typeof checkinApi = isTauri ? checkinApi : demoCheckinApi
 
 /** Jolu.pen 模块 I（133–160）：四列摘要、右侧详情、统一操作区及批量删除/领取。 */
 export function CheckinView({ active = true }: { active?: boolean }) {
@@ -60,7 +63,7 @@ export function CheckinView({ active = true }: { active?: boolean }) {
     pendingRefresh.current = false
     if (alive.current) { setError(null); setActivity({ kind: "refresh", done: 0, total: 0, name: "" }) }
     try {
-      const data = isTauri ? await checkinApi.overview() : { accounts: [], records: [] }
+      const data = await checkinSource.overview()
       if (!alive.current) return
       let rows = data.accounts.map(initialCheckinAccount)
       setAccounts(rows)
@@ -73,7 +76,7 @@ export function CheckinView({ active = true }: { active?: boolean }) {
         while (alive.current && cursor < targets.length) {
           const account = targets[cursor++]
           let update: CheckinUpdate
-          try { update = await checkinApi.status(account.id) }
+          try { update = await checkinSource.status(account.id) }
           catch { update = failedUpdate(account, "签到状态读取失败，请重新查询") }
           // 先刷新缓存再挂载该身份的额度区，末个完成的账号也能拿到本次手动查询结果。
           if (notify && alive.current && activeRef.current && update.account_key !== null) {
@@ -138,7 +141,7 @@ export function CheckinView({ active = true }: { active?: boolean }) {
     operating.current = true
     setActivity({ kind: "refresh", done: 0, total: 1, name: account.name })
     try {
-      const result = await checkinApi.status(account.id)
+      const result = await checkinSource.status(account.id)
       if (alive.current) setAccounts(rows => applyCheckinUpdate(rows, result))
     } catch {
       if (alive.current) setAccounts(rows => applyCheckinUpdate(rows, failedUpdate(account, "签到状态读取失败，请重新查询")))
@@ -162,7 +165,7 @@ export function CheckinView({ active = true }: { active?: boolean }) {
         if (!checkinTargets(rows).some(a => a.id === account.id)) { finished++; continue }
         setActivity({ kind: "claim", done: finished, total: targets.length, name: hidden ? "账号" : account.name })
         let update: CheckinUpdate
-        try { update = await checkinApi.claim(account.id, account.account_key!) }
+        try { update = await checkinSource.claim(account.id, account.account_key!) }
         catch { update = failedUpdate(account, "领取结果尚未确认，请先刷新状态核实", "unknown") }
         rows = applyCheckinUpdate(rows, update)
         if (update.outcome.state === "claimed") claimed++
@@ -174,7 +177,7 @@ export function CheckinView({ active = true }: { active?: boolean }) {
         const title = failures ? `本次处理完成：${claimed} 个已签到，${failures} 个需处理` : `本次处理完成：${claimed} 个已签到`
         if (failures) toast.warn(title, "请查看对应账号状态；未自动重试领取。")
         else toast.success(title)
-        try { setRecords((await checkinApi.overview()).records) }
+        try { setRecords((await checkinSource.overview()).records) }
         catch { setError("签到操作已结束，但最新记录读取失败，请刷新状态。") }
       }
     } finally {
@@ -278,7 +281,6 @@ export function CheckinView({ active = true }: { active?: boolean }) {
     </div>
     {error && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-jolu-danger-soft p-4 text-xs text-jolu-danger"><span>{error}</span><JoluButton size="sm" variant="danger-soft" disabled={busy} onClick={() => void refresh()}>重新读取</JoluButton></div>}
     {!loaded && busy ? <LoadingSurface layout="cards" label="正在读取签到账号" /> : <>
-      {!isTauri && <p className="rounded-lg bg-jolu-side p-3 text-xs text-jolu-muted">浏览器预览不读取真实账号；请在 Jolu 桌面应用中连接账号并签到。</p>}
       {unresolved.length > 0 && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-jolu-side p-3 text-xs text-jolu-muted"><span>{unresolved.length} 个账号的版本无法核实，请重新授权对应版本。</span>{selection.active ? <div className="flex flex-wrap gap-3">{unresolved.map(account => <label key={account.id} className="flex items-center gap-2"><input type="checkbox" aria-label={`选择账号 ${checkinAccountLabel(account, hidden)}`} checked={selection.selected.has(account.id)} disabled={operationBusy} onChange={() => selection.toggle(account.id)} className="size-4 accent-jolu-accent" />{checkinAccountLabel(account, hidden)}</label>)}</div> : <JoluButton size="sm" disabled={busy} onClick={() => openConnection("claude")}>连接账号</JoluButton>}</div>}
       <div className="grid grid-cols-1 gap-4 @[560px]:grid-cols-2 @[780px]:grid-cols-3 @[1040px]:grid-cols-4">
         {CHECKIN_EDITIONS.map(entry => {

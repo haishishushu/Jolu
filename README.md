@@ -4,7 +4,7 @@
 
 **把 AI 编程工具管在一处。**
 
-常驻桌面的灵动岛 + 八个模块的主窗口：连接供应商、一键签到、看用量、翻会话、排自动化任务、管 Skills，全部在本机完成。
+额度常驻桌面灵动岛 · 每日福利一键签到 · 额度用完自动等待、恢复后续跑
 
 [![Release](https://img.shields.io/github/v/release/haishishushu/Jolu?label=release&logo=github)](https://github.com/haishishushu/Jolu/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
@@ -13,16 +13,64 @@
 
 简体中文 | [English](./README.en.md)
 
-<img src="./docs/assets/readme/island-collapsed.png" alt="Jolu 桌面灵动岛" width="428" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/island-collapsed-dark.png" />
+  <img src="./docs/assets/readme/island-collapsed.png" alt="Jolu 桌面灵动岛" width="448" />
+</picture>
 
 </div>
 
 > 文中的界面图片来自前端预览，图中的账号、项目和数值都是示例，不代表你的真实用量。实际数据取决于本机留存记录、连接授权和服务商返回结果。
 
-![Jolu 主窗口 · 用量统计](./docs/assets/readme/panel-usage.png)
+## 三大亮点
+
+### 灵动岛：额度和会话常驻桌面
+
+不用切窗口、不用开网页，屏幕上方的灵动岛随时告诉你：当前账号还剩多少额度、什么时候重置、有几个会话正在跑、这一轮又用了多少 Token。
+
+| 收缩态 | 展开态 |
+| --- | --- |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/island-collapsed-dark.png" /><img src="./docs/assets/readme/island-collapsed.png" alt="灵动岛收缩态" /></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/island-expanded-dark.png" /><img src="./docs/assets/readme/island-expanded.png" alt="灵动岛展开态" /></picture> |
+| 5 小时 / 7 天额度、重置倒计时与会话增量 | 订阅额度、运行中的会话明细与本地今日 Token |
+
+- **双击**展开或收起；**拖向屏幕边缘**自动吸附停靠，不挡视线。
+- 最多开启 **8 个分身**，每个分身显示不同的账号或工具，多账号额度一眼看全。
+- **右键菜单**可切换连接、调整显示位置、置顶、免打扰，以及开启或销毁分身；至少保留一个灵动岛。
+- 系统托盘图标右下角的圆点同步显示额度状态：绿色正常、黄色接近上限、红色已耗尽、灰色未知。
+- 左键单击托盘图标打开主窗口；关闭主窗口后，灵动岛、后台采集和自动化调度继续运行，完全退出请使用托盘菜单。
+
+<img src="./docs/assets/readme/context-menu.png" alt="灵动岛右键菜单" width="268" />
+
+### 一键签到：每日福利一次领取
+
+![一键签到](./docs/assets/readme/panel-checkin.png)
+
+- 按 WorkBuddy、Qoder、Trae 的国内版与国际版分成六张卡片，每张卡片显示今日奖励、本周 / 本月签到天数和账号额度。
+- 点 **一键签到** 依次领取全部可签到账号；也可以逐个签到，部分失败时单独重试，不会重复领取同一账号。
+- 添加账号时先选供应商，按该供应商的流程授权；同一浏览器中可以添加多个账号，**批量管理** 支持批量删除。
+- 签到记录与本期累计积分按来源区分官方记录与 Jolu 记录；点眼睛图标可一键隐藏账号，方便截图分享。
+- 当前支持 WorkBuddy 国内版、Qoder 国内 / 国际版、Trae 国内版的手动签到；WorkBuddy AI 完成有效任务后自动结算，Trae 国际版官方暂未开放每日签到。
+
+### 额度用完不中断：恢复后自动续跑
+
+![自动化：等待额度并在恢复后续跑](./docs/assets/readme/automation-wait.png)
+
+把任务交给 Claude Code 或 Codex，额度耗尽也不会白跑：
+
+- **执行中额度耗尽**：保留已完成的文件修改和会话进度，任务进入「等待额度」，界面显示预计恢复时间和下次检查时间。
+- **额度恢复后**：自动重新检查 5 小时与周额度，确认可用后在**原会话**里继续执行，不会从头重跑；无法安全续跑时标记为需要手动继续。
+- **启动方式**：立即执行、定时执行（单次 / 每天 / 每周），或直接设为「额度恢复后执行」，把重活排到额度刷新的那一刻。
+- **同账号排队**：同一账号的任务按队列依次执行；运行记录里分开统计执行耗时与等待时长。
+
+![自动化任务列表](./docs/assets/readme/panel-automation.png)
+
+- 新建任务时选择执行工具、账号、模型、项目目录和执行会话，可以从会话线程一键带入会话和项目。
+- 执行账号必须是原工具当前登录的账号，Jolu 不会替你切换登录；文件修改权限沿用工具自身的配置。
+- 本地任务需要 Jolu 在后台运行；休眠与关机期间停止调度，错过的定时触发标为「已错过」，由你决定是否补跑。
 
 ## 目录
 
+- [三大亮点](#三大亮点)
 - [核心功能](#核心功能)
 - [平台与额度支持](#平台与额度支持)
 - [下载与安装](#下载与安装)
@@ -49,6 +97,8 @@
 | 自动化 | 让 Claude Code / Codex 立即、定时或额度恢复后执行任务；额度耗尽时保留进度，恢复后续跑 |
 | Skills 管理 | 扫描、查看、新建、导入、复制、启停 Claude Code 与 Codex 的 Skills，写入前自动备份 |
 | 设置 | 开机启动、主题、CLI 本地代理、数据导入导出与清理、通知与免打扰 |
+
+![Jolu 主窗口 · 用量统计](./docs/assets/readme/panel-usage.png)
 
 本地统计与在线额度是两条独立链路：**有本机会话不代表能查询账号额度；有账号额度也不代表本机留存了会话记录。**
 
@@ -122,12 +172,7 @@
 
 ## 各模块怎么用
 
-### 一键签到：集中领取每日奖励
-
-- 入口在侧栏「供应商」下方，按 WorkBuddy、Qoder、Trae 的国内版与国际版分成六张卡片。
-- 添加账号时先选供应商，再按该供应商的连接流程完成授权；支持在同一浏览器中添加多个账号。
-- 可一键签到全部账号，也可逐个签到；部分失败时可单独重试，签到记录与本期累计积分按来源区分官方与 Jolu 记录。
-- 当前支持 WorkBuddy 国内版、Qoder 国内 / 国际版、Trae 国内版的手动签到；WorkBuddy AI 完成有效任务后自动结算，Trae 国际版官方暂未开放每日签到。
+灵动岛、一键签到和自动化的用法见[三大亮点](#三大亮点)。
 
 ### 用量统计：从总量到单次调用
 
@@ -148,17 +193,6 @@
 - **在原工具中继续**：检查 Claude Code / Codex 是否安装、项目目录是否可访问后，在新的控制台里续聊原会话。
 - **查看用量明细**跳到这条会话的调用明细；**创建自动化**把会话和项目带进新建任务。**压缩会话**支持增量整理、对话式修改草稿及 Markdown 交接；已完成短会话探索性评测，长会话质量仍待合格样本验证。
 
-### 自动化：让 AI 在你不在时继续工作
-
-![自动化](./docs/assets/readme/panel-automation.png)
-
-- 新建任务时选择执行工具（Claude Code / Codex）、账号、模型、项目目录和执行会话，填写执行内容。
-- 启动方式：**立即执行**、**定时执行**（单次 / 每天 / 每周）、**额度恢复后执行**。
-- 执行中额度耗尽时保留进度并等待，额度恢复后在原会话里续跑；无法安全续跑时标记为需要手动继续，不会从头重跑。
-- 同一账号的任务按队列依次执行；运行记录里分开统计执行耗时和等待时长。
-- 执行账号必须是原工具当前登录的账号，Jolu 不会替你切换登录；文件修改权限沿用工具自身的配置。
-- 本地任务需要 Jolu 在后台运行；休眠与关机期间停止调度，错过的定时触发标为「已错过」，由你决定是否补跑。
-
 ### Skills 管理：一处管理各工具的 Skills
 
 ![Skills 管理](./docs/assets/readme/panel-skills.png)
@@ -173,18 +207,6 @@
 ![设置](./docs/assets/readme/panel-settings.png)
 
 常规（开机启动、静默启动、自动刷新）、外观（浅色 / 深色 / 跟随系统）、网络与代理（CLI 本地代理）、数据与存储（导入导出、历史保留、清理、打开数据目录）、通知（免打扰、余额提醒）以及关于与更新。
-
-### 灵动岛与托盘
-
-| 收缩态 | 展开态 |
-| --- | --- |
-| ![灵动岛收缩态](./docs/assets/readme/island-collapsed.png) | ![灵动岛展开态](./docs/assets/readme/island-expanded.png) |
-| 快速查看关键额度与活动信息 | 查看连接、会话明细及支持的本机增量 |
-
-- **双击**展开或收起；**拖向屏幕边缘**可吸附停靠。
-- **右键**打开菜单：切换连接、显示位置、始终置顶，以及开启 / 销毁分身。至少保留一个灵动岛。
-- 系统托盘图标右下角的圆点表示当前连接的额度状态：绿色正常、黄色接近上限、红色已耗尽，灰色表示未知。
-- 左键单击托盘图标打开主窗口；关闭主窗口后，后台采集、灵动岛和自动化调度继续运行，完全退出请使用托盘菜单。
 
 ## 读懂统计数据
 
@@ -302,6 +324,8 @@ pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
 安装包位于 `backend/target/release/bundle/nsis/`。首次 Rust 编译耗时较长；开发端口冲突时，检查 Vite 地址与 Tauri 的 `devUrl` 是否一致。
 
+开发验证边界见 [未验证项清单](docs/todo/2026-10-22-unverified-integrations.md)。检查更新默认启用，构建时同时设置 `JOLU_UPDATES_ENABLED=0` 和 `VITE_JOLU_UPDATES_ENABLED=0` 可停用。OpenCode 统计支持 JSON / SQLite V1/V2；落盘 output 表示可见输出，Jolu 将其与独立 reasoning 相加；总量优先采用来源的 total，缺失字段保持未知。
+
 ### 项目结构
 
 ```text
@@ -339,6 +363,3 @@ jolu/
     <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
   </picture>
 </a>
-
-
-开发验证边界见 [未验证项清单](docs/todo/2026-10-22-unverified-integrations.md)。检查更新默认启用，构建时同时设置 `JOLU_UPDATES_ENABLED=0` 和 `VITE_JOLU_UPDATES_ENABLED=0` 可停用。OpenCode 统计支持 JSON / SQLite V1/V2；落盘 output 表示可见输出，Jolu 将其与独立 reasoning 相加；总量优先采用来源的 total，缺失字段保持未知。

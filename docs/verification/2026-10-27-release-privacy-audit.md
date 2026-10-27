@@ -18,7 +18,7 @@
 
 ### 非隐私问题
 
-- `docs/assets/readme/tray-menu.png` 与 `docs/assets/social-preview-1280x640.png` 仍显示旧名称和旧界面，需要重新截图。
+- README 配图已于同日按浏览器预览示例数据重新截取，旧的 `tray-menu.png` 由右键菜单图 `context-menu.png` 取代；`docs/assets/social-preview-1280x640.png` 仍显示旧名称和旧界面，需要重新制作。
 
 ## 首次发行
 
