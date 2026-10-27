@@ -910,14 +910,15 @@ pub fn prepare_new(mut c: NewConnection) -> Result<NewConnection, String> {
     }
     c.name = validate_name(&c.name)?;
     let using_local = c.secret.as_deref().map_or(true, |s| s.trim().is_empty());
+    let local = using_local.then(|| crate::creds::read_local_pair(&c.platform, &c.kind)).flatten();
     if using_local && c.base_url.as_deref().map_or(true, |s| s.trim().is_empty()) {
-        c.base_url = crate::creds::local_base_url(&c.platform, &c.kind);
+        c.base_url = local.as_ref().and_then(|pair| pair.1.clone());
     }
     c.secret = c.secret
         .take()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| crate::creds::read_secret(&c.platform, &c.kind));
+        .or_else(|| local.map(|pair| pair.0));
     if c.secret.is_none() {
         return Err("未找到可保存的凭证；请粘贴 API Key，或先在对应 CLI 中登录".into());
     }

@@ -60,28 +60,21 @@ fn has_value(v: &Value, key: &str) -> bool {
     }
 }
 
-fn env_set(key: &str) -> bool {
-    std::env::var(key).map(|v| !v.trim().is_empty()).unwrap_or(false)
-}
-
 /// Claude Code：API Key 优先于订阅（CLI 自身也是这个优先级）
 fn claude() -> ConnectionInfo {
-    if env_set("ANTHROPIC_API_KEY") || env_set("ANTHROPIC_AUTH_TOKEN") {
+    let Ok(settings) = claude_settings() else { return ConnectionInfo { kind: None, label: None }; };
+    if claude_api_from_settings(settings.as_ref()).is_some() {
         return ConnectionInfo {
             kind: Some("api".into()),
-            label: Some("API Key（环境变量）".into()),
+            label: Some("API Key（本机配置或环境变量）".into()),
         };
     }
     let Some(dir) = claude_dir() else {
         return ConnectionInfo { kind: None, label: None };
     };
 
-    if let Some(v) = read_json(&dir.join("settings.json")) {
-        let env_api = v
-            .get("env")
-            .map(|e| has_value(e, "ANTHROPIC_API_KEY") || has_value(e, "ANTHROPIC_AUTH_TOKEN"))
-            .unwrap_or(false);
-        if env_api || has_value(&v, "apiKeyHelper") {
+    if let Some(v) = settings {
+        if has_value(&v, "apiKeyHelper") {
             return ConnectionInfo {
                 kind: Some("api".into()),
                 label: Some("API Key（本机配置）".into()),
@@ -151,25 +144,44 @@ fn str_at(v: &Value, path: &[&str]) -> Option<String> {
     }
 }
 
+/// 读取一份配置快照。损坏或正在写入的配置不能回退成启动器中的旧凭证。
+fn claude_settings() -> Result<Option<Value>, ()> {
+    let Some(dir) = claude_dir() else { return Ok(None); };
+    let text = match std::fs::read_to_string(dir.join("settings.json")) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let settings: Value = serde_json::from_str(&text).map_err(|_| ())?;
+    if !settings.is_object() || settings.get("env").is_some_and(|env| !env.is_object()) { return Err(()); }
+    Ok(Some(settings))
+}
+
+/// 普通 CLI 会话中 settings.env 覆盖同名继承变量；空字符串显式取消旧变量。
+/// 地址和凭证按同一份快照解析，Bearer token 的优先级高于 API Key。
+fn claude_api_from_settings(settings: Option<&Value>) -> Option<(String, Option<String>)> {
+    let value = |key: &str| {
+        match settings.and_then(|settings| settings.get("env")).and_then(|env| env.get(key)) {
+            Some(value) => value.as_str().map(str::to_string),
+            None => std::env::var(key).ok(),
+        }.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    };
+    let secret = value("ANTHROPIC_AUTH_TOKEN").or_else(|| value("ANTHROPIC_API_KEY"))?;
+    let base = value("ANTHROPIC_BASE_URL").map(|base| base.trim_end_matches('/').to_string());
+    Some((secret, base))
+}
+
+fn local_claude_api_pair() -> Option<(String, Option<String>)> {
+    claude_api_from_settings(claude_settings().ok()?.as_ref())
+}
+
 /// 「获取」按钮的实际读取（§6.3）。
 ///
 /// 这是**唯一**会把凭证原值读进内存的函数，调用方必须立刻脱敏后再落库，
 /// 且不得把返回值写进日志或传给前端。
 pub fn read_secret(platform: &str, kind: &str) -> Option<String> {
     match (platform, kind) {
-        ("claude", "api") => std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                std::env::var("ANTHROPIC_AUTH_TOKEN")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .or_else(|| {
-                let v = read_json(&claude_dir()?.join("settings.json"))?;
-                str_at(&v, &["env", "ANTHROPIC_API_KEY"])
-                    .or_else(|| str_at(&v, &["env", "ANTHROPIC_AUTH_TOKEN"]))
-            }),
+        ("claude", "api") => local_claude_api_pair().map(|pair| pair.0),
 
         ("claude", _) => {
             let v = read_json(&claude_dir()?.join(".credentials.json"))?;
@@ -203,9 +215,7 @@ pub struct Candidate {
 /// 与本机 Claude Key 配套的网关，避免把网关 Key 发往官方端点。
 pub fn local_base_url(platform: &str, kind: &str) -> Option<String> {
     if platform != "claude" || kind != "api" { return None; }
-    std::env::var("ANTHROPIC_BASE_URL").ok().filter(|s| !s.trim().is_empty())
-        .or_else(|| str_at(&read_json(&claude_dir()?.join("settings.json"))?, &["env", "ANTHROPIC_BASE_URL"]))
-        .map(|s| s.trim().trim_end_matches('/').to_string())
+    local_claude_api_pair().and_then(|pair| pair.1)
 }
 
 /// Codex 自定义供应商的网关地址（与 local_connections 同一来源）。
@@ -262,6 +272,7 @@ fn parse_grok_auth_json(content: &str, now_secs: i64) -> Result<String, String> 
 /// 与 local_connections（添加）同源，保证两条路径口径一致；
 /// 返回 None 表示本机没有可用的该类凭证。
 pub fn read_local_pair(platform: &str, kind: &str) -> Option<(String, Option<String>)> {
+    if platform == "claude" && kind == "api" { return local_claude_api_pair(); }
     if platform == "codex" {
         let connection = local_connections(platform, kind).ok()?.into_iter().next()?;
         return Some((connection.secret?, connection.base_url));
@@ -316,10 +327,10 @@ pub fn local_connections(platform: &str, kind: &str) -> Result<Vec<crate::connec
     }
     let mut out = Vec::new();
     if platform == "claude" {
-        if let Some(secret) = read_secret("claude", kind) {
+        if let Some((secret, base_url)) = read_local_pair("claude", kind) {
             out.push(crate::connections::NewConnection { service: None,
                 platform: platform.into(), kind: kind.into(), name: if kind == "auth" { "Claude 官方订阅" } else { "Claude API Key" }.into(),
-                secret: Some(secret), base_url: local_base_url("claude", kind),
+                secret: Some(secret), base_url,
                 model: None, effort: None, context_1m: None, protocol: None,
             });
         }
@@ -400,6 +411,59 @@ pub fn scanned_locations(platform: &str, kind: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod directory_tests {
+    #[test]
+    fn settings_environment_overrides_stale_launcher_for_every_read_path() {
+        const CHILD: &str = "JOLU_CLAUDE_PRECEDENCE_CASE";
+        if let Ok(case) = std::env::var(CHILD) {
+            let expected = match case.as_str() {
+                "configured" => Some(("current-settings-token".to_string(), Some("https://current.example.test".to_string()))),
+                "partial" => Some(("stale-launcher-token".to_string(), Some("https://current.example.test".to_string()))),
+                "missing" => Some(("stale-launcher-token".to_string(), Some("https://stale.example.test".to_string()))),
+                _ => None,
+            };
+            assert_eq!(super::read_local_pair("claude", "api"), expected);
+            assert_eq!(super::read_secret("claude", "api"), expected.as_ref().map(|pair| pair.0.clone()));
+            assert_eq!(super::local_base_url("claude", "api"), expected.as_ref().and_then(|pair| pair.1.clone()));
+            assert_eq!(super::detect("claude").kind.as_deref(), expected.as_ref().map(|_| "api"));
+            let saved = super::local_connections("claude", "api").unwrap();
+            assert_eq!(saved.len(), usize::from(expected.is_some()));
+            if let Some((secret, base)) = expected {
+                assert_eq!(saved[0].secret.as_deref(), Some(secret.as_str()));
+                assert_eq!(saved[0].base_url, base);
+            }
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("jolu-claude-precedence-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (case, settings) in [
+            ("configured", Some(r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"current-settings-token","ANTHROPIC_BASE_URL":"https://current.example.test/"}}"#)),
+            ("partial", Some(r#"{"env":{"ANTHROPIC_BASE_URL":"https://current.example.test/"}}"#)),
+            ("missing", None),
+            ("empty", Some(r#"{"env":{"ANTHROPIC_API_KEY":"","ANTHROPIC_AUTH_TOKEN":"","ANTHROPIC_BASE_URL":""}}"#)),
+            ("invalid", Some("{")),
+        ] {
+            let dir = root.join(case);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(settings) = settings { std::fs::write(dir.join("settings.json"), settings).unwrap(); }
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "creds::directory_tests::settings_environment_overrides_stale_launcher_for_every_read_path"])
+                .env(CHILD, case).env("USERPROFILE", root.join("empty-home")).env("HOME", root.join("empty-home"))
+                .env("CLAUDE_CONFIG_DIR", &dir).env("CODEX_HOME", root.join("empty-codex"))
+                .env("ANTHROPIC_API_KEY", "stale-launcher-api-key").env("ANTHROPIC_AUTH_TOKEN", "stale-launcher-token")
+                .env("ANTHROPIC_BASE_URL", "https://stale.example.test/")
+                .output().unwrap();
+            assert!(result.status.success(), "case={case}: {}", String::from_utf8_lossy(&result.stdout));
+        }
+        // 仅清理本测试新建的临时目录。
+        for case in ["configured", "partial", "missing", "empty", "invalid"] {
+            let dir = root.join(case);
+            let file = dir.join("settings.json");
+            if file.exists() { std::fs::remove_file(file).unwrap(); }
+            std::fs::remove_dir(dir).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
     #[test]
     fn overridden_directories_are_used_for_detection_credentials_and_addresses() {
         const CHILD: &str = "JOLU_CREDS_DIRECTORY_TEST";
