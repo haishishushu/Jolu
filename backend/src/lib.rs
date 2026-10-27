@@ -2249,8 +2249,9 @@ fn main_panel_ready(app: tauri::AppHandle) -> Result<(), String> {
     let window = app.get_webview_window(MAIN).ok_or("主面板窗口不存在")?;
     window.show().map_err(|error| error.to_string())?;
     window.unminimize().map_err(|error| error.to_string())?;
+    let captured = main_window::capture(&window);
     if let Ok(mut placement) = MAIN_PLACEMENT.lock() {
-        *placement = main_window::capture(&window);
+        *placement = captured;
     }
     MAIN_READY.store(true, Ordering::Release);
     let _ = window.set_focus();
@@ -2628,8 +2629,10 @@ fn reset_window_layout(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window(MAIN) {
         let _ = w.set_size(tauri::LogicalSize::new(1280.0, 900.0));
         let _ = w.center();
+        // 原生查询会等待 UI 线程；移动/缩放回调也要取此锁，必须先查询再加锁。
+        let captured = main_window::capture(&w);
         if let Ok(mut placement) = MAIN_PLACEMENT.lock() {
-            *placement = main_window::capture(&w);
+            *placement = captured;
         }
     }
 }
