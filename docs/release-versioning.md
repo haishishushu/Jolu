@@ -18,7 +18,7 @@
 ## 流程与校验
 
 1. 计算版本号，按当前提交创建草稿发行版。
-2. Windows（NSIS）、macOS arm64 / x86_64（app、dmg）、Linux x86_64（AppImage、deb）四路并行构建，使用仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 签名更新包。由 `scripts/release/release-assets.mjs collect` 统一重命名为 `Jolu-vX.Y.Z-<平台>` 后上传。
+2. Windows（NSIS）、macOS arm64 / x86_64（app、dmg）、Linux x86_64（AppImage、deb）四路并行构建，使用仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`（带密码的私钥）和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 签名更新包；私钥必须与 `backend/tauri.conf.json` 中的公钥成对，换钥会让已安装版本无法验证更新。由 `scripts/release/release-assets.mjs collect` 统一重命名为 `Jolu-vX.Y.Z-<平台>` 后上传。
 3. `release-assets.mjs manifest` 用四个平台的 `.sig` 生成 `latest.json`，下载地址指向 `releases/download/vX.Y.Z/…`。`verify-release.mjs` 核对标签、清单、安装包名称、签名文件和下载地址都属于这一版。
 4. 校验通过后，草稿转为公开并标记为最新。应用的更新端点 `releases/latest/download/latest.json` 由此指向新版本。任一平台失败时发行版保持草稿，现有更新端点不受影响。
 5. 构建失败留下的草稿不复用版本号。下一次构建取更高版本，避免旧包与新包混在一页。
