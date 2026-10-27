@@ -54,7 +54,7 @@ Remove-Item Env:JOLU_DEV_URL                                 # 验收结束后�
 - `node scripts/acceptance/account-cards.cjs`：默认使用 5314 开发服务器（`JOLU_COMPONENT_URL` 可覆盖，仅限本机），挂载真实 MainPanelWindow、懒加载外层、供应商页与合成桥接。验证 1280×900 和 1920×1080 下四列、首屏两行八张、仅列表滚轮查看后续账号、筛选归零滚动位置，以及完整六模型详情、Auth 订阅到期、ApiKey 独立摘要和真实套餐到期、类型/供应商/搜索组合筛选及清除、隐私隐藏、真实零、按来源显示重置卡和单账号查询。浅深色截图位于 `output/acceptance/account-cards/`；不访问真实桌面或账号。
 - `node scripts/acceptance/usage-overview.cjs`：同样默认使用 5314，挂载真实概览组件。验证混合已知/未知记录时显示已知 Token、缓存可计算覆盖次数、模型占比、不做部分总量环比、未知不变零，以及四条趋势线跨缺失点连续且悬浮说明保留。仅使用合成数据；截图位于 `output/acceptance/usage-overview/`。
 - `node --test backend/src/workbuddy_auth.test.mjs`：通过合成官方 sym-v1 信封和原生存储替身，验证 WorkBuddy 凭证内存解码、篡改拒绝、不同客户端密钥拒绝及错误输出脱敏；不读取真实账号或联网。真实只读查询仍需单独运行 Rust 的忽略测试。
-- `node scripts/acceptance/update-flow.cjs`：使用单独启用 `VITE_JOLU_UPDATES_ENABLED=1` 的 5197 前端服务（可用 `JOLU_PREVIEW_URL` 覆盖），合成更新 API 验证取消、重试、稍后安装和任务导航。不会安装更新；真实签名与安装链路须分别验证。
+- `node scripts/acceptance/update-flow.cjs`：使用单独的 5197 前端服务（可用 `JOLU_PREVIEW_URL` 覆盖），合成更新 API 验证检查后自动下载、取消、重试、稍后安装、任务导航和点击版本按钮直接安装。不会安装更新；真实安装链路见 `scripts/release/local-update-e2e.md`。
 
 ## 组件异步状态回归
 

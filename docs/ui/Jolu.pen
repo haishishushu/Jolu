@@ -136444,7 +136444,7 @@
       "type": "frame",
       "id": "ueX0K",
       "x": 0,
-      "y": 28214,
+      "y": 28414,
       "name": "模块 H · 全局规范与品牌",
       "context": "此容器集中存放全局规范与品牌的全部现有页面、弹窗和状态；浅色在左、深色在右。子画板 ID 保留。",
       "width": 8304,
@@ -328517,7 +328517,7 @@
       "y": 24034,
       "name": "模块 G · 设置",
       "width": 8304,
-      "height": 4000,
+      "height": 4200,
       "fill": "#F0F3F1",
       "cornerRadius": 24,
       "stroke": "#DCE5DF",
@@ -340738,7 +340738,7 @@
                                               "fill": "$jolu-muted",
                                               "textGrowth": "fixed-width",
                                               "width": "fill_container",
-                                              "content": "仅检查版本，下载和安装由你确认。",
+                                              "content": "启动时和每 30 分钟检查一次，新版本自动在后台下载，安装由你确认。",
                                               "lineHeight": 1.4,
                                               "fontFamily": "Inter",
                                               "fontSize": 11,
@@ -343857,7 +343857,7 @@
           },
           "clip": true,
           "width": 1280,
-          "height": 1120,
+          "height": 1320,
           "fill": "$jolu-bg",
           "cornerRadius": 16,
           "stroke": "$jolu-border",
@@ -346007,6 +346007,346 @@
                                               "fontWeight": "normal"
                                             }
                                           ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "RZqf9",
+                                      "name": "06 · 页头版本按钮",
+                                      "width": "fill_container",
+                                      "fill": "$jolu-bg",
+                                      "cornerRadius": 12,
+                                      "stroke": "$jolu-border",
+                                      "strokeWidth": 1,
+                                      "layout": "vertical",
+                                      "gap": 12,
+                                      "padding": 16,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "o7pms",
+                                          "name": "06 · 页头版本按钮",
+                                          "fill": "$jolu-text",
+                                          "content": "06 · 页头版本按钮",
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "QjMq1",
+                                          "name": "自动检查说明",
+                                          "fill": "$jolu-muted",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "启动后检查一次，之后每 30 分钟检查一次；发现新版本自动在后台下载并校验签名，右上角检查更新按钮换成绿色版本按钮。",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 11,
+                                          "fontWeight": "normal"
+                                        },
+                                        {
+                                          "type": "frame",
+                                          "id": "gOlG4",
+                                          "name": "按钮状态",
+                                          "width": "fill_container",
+                                          "gap": 12,
+                                          "children": [
+                                            {
+                                              "type": "frame",
+                                              "id": "L02LH",
+                                              "name": "状态 · 无新版本",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "Y27ZHE",
+                                                  "name": "检查更新按钮",
+                                                  "width": 36,
+                                                  "height": 36,
+                                                  "cornerRadius": 8,
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "djsLf",
+                                                      "name": "检查更新图标",
+                                                      "width": 20,
+                                                      "height": 20,
+                                                      "icon": "circle-fading-arrow-up",
+                                                      "library": "lucide",
+                                                      "fill": "$jolu-muted"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "xVKZv",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "无新版本",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "i7HfRT",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "常态图标按钮，不置灰：悬浮图标上移，按下短暂收缩；点击手动检查，检查中图标转圈并忽略重复点击。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            },
+                                            {
+                                              "type": "frame",
+                                              "id": "S83mG",
+                                              "name": "状态 · 后台下载中",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "PZhWO",
+                                                  "name": "绿色版本按钮",
+                                                  "context": "jolu-accent 实心底、深色字 #071B10，与主按钮一致；悬浮加深，按下短暂反馈，Tab 聚焦显示绿色轮廓。",
+                                                  "height": 36,
+                                                  "fill": "$jolu-accent",
+                                                  "cornerRadius": 8,
+                                                  "gap": 6,
+                                                  "padding": [
+                                                    0,
+                                                    12
+                                                  ],
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "p4thb",
+                                                      "name": "loader-circle图标",
+                                                      "width": 16,
+                                                      "height": 16,
+                                                      "icon": "loader-circle",
+                                                      "library": "lucide",
+                                                      "fill": "#071B10"
+                                                    },
+                                                    {
+                                                      "type": "text",
+                                                      "id": "Qwh92",
+                                                      "name": "版本号",
+                                                      "fill": "#071B10",
+                                                      "content": "v1.1.0",
+                                                      "fontFamily": "Inter",
+                                                      "fontSize": 13,
+                                                      "fontWeight": "600"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "G7z7U",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "后台下载中",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "HVsoI",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "图标转圈，悬停显示下载进度；点击打开 03 进度弹窗。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            },
+                                            {
+                                              "type": "frame",
+                                              "id": "i8dHTJ",
+                                              "name": "状态 · 已下载并校验",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "mAM2W",
+                                                  "name": "绿色版本按钮",
+                                                  "context": "jolu-accent 实心底、深色字 #071B10，与主按钮一致；悬浮加深，按下短暂反馈，Tab 聚焦显示绿色轮廓。",
+                                                  "height": 36,
+                                                  "fill": "$jolu-accent",
+                                                  "cornerRadius": 8,
+                                                  "gap": 6,
+                                                  "padding": [
+                                                    0,
+                                                    12
+                                                  ],
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "VSTZ6",
+                                                      "name": "circle-fading-arrow-up图标",
+                                                      "width": 16,
+                                                      "height": 16,
+                                                      "icon": "circle-fading-arrow-up",
+                                                      "library": "lucide",
+                                                      "fill": "#071B10"
+                                                    },
+                                                    {
+                                                      "type": "text",
+                                                      "id": "eC6Aj",
+                                                      "name": "版本号",
+                                                      "fill": "#071B10",
+                                                      "content": "v1.1.0",
+                                                      "fontFamily": "Inter",
+                                                      "fontSize": 13,
+                                                      "fontWeight": "600"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "tS5jW",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "已下载并校验",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "XKIMW",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "点击直接进入安装界面（只显示进度窗口），装完自动重启；有运行中的自动化任务时拦下并打开 04。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            },
+                                            {
+                                              "type": "frame",
+                                              "id": "rdX9z",
+                                              "name": "状态 · 下载失败",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "h4bGKr",
+                                                  "name": "绿色版本按钮",
+                                                  "context": "jolu-accent 实心底、深色字 #071B10，与主按钮一致；悬浮加深，按下短暂反馈，Tab 聚焦显示绿色轮廓。",
+                                                  "height": 36,
+                                                  "fill": "$jolu-accent",
+                                                  "cornerRadius": 8,
+                                                  "gap": 6,
+                                                  "padding": [
+                                                    0,
+                                                    12
+                                                  ],
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "jXZKT",
+                                                      "name": "circle-fading-arrow-up图标",
+                                                      "width": 16,
+                                                      "height": 16,
+                                                      "icon": "circle-fading-arrow-up",
+                                                      "library": "lucide",
+                                                      "fill": "#071B10"
+                                                    },
+                                                    {
+                                                      "type": "text",
+                                                      "id": "bQ1OT",
+                                                      "name": "版本号",
+                                                      "fill": "#071B10",
+                                                      "content": "v1.1.0",
+                                                      "fontFamily": "Inter",
+                                                      "fontSize": 13,
+                                                      "fontWeight": "600"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "Esh1n",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "下载失败",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "mYulb",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "悬停提示「下载失败，点击重试」；点击重新下载，下一轮检查也会自动重试。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "JVrd7",
+                                          "name": "安装说明",
+                                          "fill": "$jolu-muted",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "安装路径固定为 %LOCALAPPDATA%\\Jolu；首次安装向导和更新安装都不显示安装路径。",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 11,
+                                          "fontWeight": "normal"
                                         }
                                       ]
                                     }
@@ -358238,7 +358578,7 @@
                                               "fill": "$jolu-muted",
                                               "textGrowth": "fixed-width",
                                               "width": "fill_container",
-                                              "content": "仅检查版本，下载和安装由你确认。",
+                                              "content": "启动时和每 30 分钟检查一次，新版本自动在后台下载，安装由你确认。",
                                               "lineHeight": 1.4,
                                               "fontFamily": "Inter",
                                               "fontSize": 11,
@@ -361357,7 +361697,7 @@
           },
           "clip": true,
           "width": 1280,
-          "height": 1120,
+          "height": 1320,
           "fill": "$jolu-bg",
           "cornerRadius": 16,
           "stroke": "$jolu-border",
@@ -363507,6 +363847,346 @@
                                               "fontWeight": "normal"
                                             }
                                           ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "frame",
+                                      "id": "hTs47",
+                                      "name": "06 · 页头版本按钮",
+                                      "width": "fill_container",
+                                      "fill": "$jolu-bg",
+                                      "cornerRadius": 12,
+                                      "stroke": "$jolu-border",
+                                      "strokeWidth": 1,
+                                      "layout": "vertical",
+                                      "gap": 12,
+                                      "padding": 16,
+                                      "children": [
+                                        {
+                                          "type": "text",
+                                          "id": "ef1ew",
+                                          "name": "06 · 页头版本按钮",
+                                          "fill": "$jolu-text",
+                                          "content": "06 · 页头版本按钮",
+                                          "fontFamily": "Inter",
+                                          "fontSize": 14,
+                                          "fontWeight": "600"
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "qkcCl",
+                                          "name": "自动检查说明",
+                                          "fill": "$jolu-muted",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "启动后检查一次，之后每 30 分钟检查一次；发现新版本自动在后台下载并校验签名，右上角检查更新按钮换成绿色版本按钮。",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 11,
+                                          "fontWeight": "normal"
+                                        },
+                                        {
+                                          "type": "frame",
+                                          "id": "PUwTY",
+                                          "name": "按钮状态",
+                                          "width": "fill_container",
+                                          "gap": 12,
+                                          "children": [
+                                            {
+                                              "type": "frame",
+                                              "id": "KFPp8",
+                                              "name": "状态 · 无新版本",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "IIsxu",
+                                                  "name": "检查更新按钮",
+                                                  "width": 36,
+                                                  "height": 36,
+                                                  "cornerRadius": 8,
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "gQI2l",
+                                                      "name": "检查更新图标",
+                                                      "width": 20,
+                                                      "height": 20,
+                                                      "icon": "circle-fading-arrow-up",
+                                                      "library": "lucide",
+                                                      "fill": "$jolu-muted"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "mbdr5",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "无新版本",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "Z8DQxl",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "常态图标按钮，不置灰：悬浮图标上移，按下短暂收缩；点击手动检查，检查中图标转圈并忽略重复点击。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            },
+                                            {
+                                              "type": "frame",
+                                              "id": "gJLaU",
+                                              "name": "状态 · 后台下载中",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "HqhtV",
+                                                  "name": "绿色版本按钮",
+                                                  "context": "jolu-accent 实心底、深色字 #071B10，与主按钮一致；悬浮加深，按下短暂反馈，Tab 聚焦显示绿色轮廓。",
+                                                  "height": 36,
+                                                  "fill": "$jolu-accent",
+                                                  "cornerRadius": 8,
+                                                  "gap": 6,
+                                                  "padding": [
+                                                    0,
+                                                    12
+                                                  ],
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "z8e3l",
+                                                      "name": "loader-circle图标",
+                                                      "width": 16,
+                                                      "height": 16,
+                                                      "icon": "loader-circle",
+                                                      "library": "lucide",
+                                                      "fill": "#071B10"
+                                                    },
+                                                    {
+                                                      "type": "text",
+                                                      "id": "Y5j5CR",
+                                                      "name": "版本号",
+                                                      "fill": "#071B10",
+                                                      "content": "v1.1.0",
+                                                      "fontFamily": "Inter",
+                                                      "fontSize": 13,
+                                                      "fontWeight": "600"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "m02MuX",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "后台下载中",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "OGkI7",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "图标转圈，悬停显示下载进度；点击打开 03 进度弹窗。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            },
+                                            {
+                                              "type": "frame",
+                                              "id": "OIVjJ",
+                                              "name": "状态 · 已下载并校验",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "D6Hf7",
+                                                  "name": "绿色版本按钮",
+                                                  "context": "jolu-accent 实心底、深色字 #071B10，与主按钮一致；悬浮加深，按下短暂反馈，Tab 聚焦显示绿色轮廓。",
+                                                  "height": 36,
+                                                  "fill": "$jolu-accent",
+                                                  "cornerRadius": 8,
+                                                  "gap": 6,
+                                                  "padding": [
+                                                    0,
+                                                    12
+                                                  ],
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "hfbS2",
+                                                      "name": "circle-fading-arrow-up图标",
+                                                      "width": 16,
+                                                      "height": 16,
+                                                      "icon": "circle-fading-arrow-up",
+                                                      "library": "lucide",
+                                                      "fill": "#071B10"
+                                                    },
+                                                    {
+                                                      "type": "text",
+                                                      "id": "Bkdut",
+                                                      "name": "版本号",
+                                                      "fill": "#071B10",
+                                                      "content": "v1.1.0",
+                                                      "fontFamily": "Inter",
+                                                      "fontSize": 13,
+                                                      "fontWeight": "600"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "QDpTU",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "已下载并校验",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "Um7hW",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "点击直接进入安装界面（只显示进度窗口），装完自动重启；有运行中的自动化任务时拦下并打开 04。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            },
+                                            {
+                                              "type": "frame",
+                                              "id": "M7EmY",
+                                              "name": "状态 · 下载失败",
+                                              "width": "fill_container",
+                                              "fill": "$jolu-side",
+                                              "cornerRadius": 9,
+                                              "layout": "vertical",
+                                              "gap": 8,
+                                              "padding": 12,
+                                              "children": [
+                                                {
+                                                  "type": "frame",
+                                                  "id": "upx4y",
+                                                  "name": "绿色版本按钮",
+                                                  "context": "jolu-accent 实心底、深色字 #071B10，与主按钮一致；悬浮加深，按下短暂反馈，Tab 聚焦显示绿色轮廓。",
+                                                  "height": 36,
+                                                  "fill": "$jolu-accent",
+                                                  "cornerRadius": 8,
+                                                  "gap": 6,
+                                                  "padding": [
+                                                    0,
+                                                    12
+                                                  ],
+                                                  "justifyContent": "center",
+                                                  "alignItems": "center",
+                                                  "children": [
+                                                    {
+                                                      "type": "icon",
+                                                      "id": "X4KQP",
+                                                      "name": "circle-fading-arrow-up图标",
+                                                      "width": 16,
+                                                      "height": 16,
+                                                      "icon": "circle-fading-arrow-up",
+                                                      "library": "lucide",
+                                                      "fill": "#071B10"
+                                                    },
+                                                    {
+                                                      "type": "text",
+                                                      "id": "LkqFw",
+                                                      "name": "版本号",
+                                                      "fill": "#071B10",
+                                                      "content": "v1.1.0",
+                                                      "fontFamily": "Inter",
+                                                      "fontSize": 13,
+                                                      "fontWeight": "600"
+                                                    }
+                                                  ]
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "UoM5K",
+                                                  "name": "状态名",
+                                                  "fill": "$jolu-text",
+                                                  "content": "下载失败",
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 12,
+                                                  "fontWeight": "500"
+                                                },
+                                                {
+                                                  "type": "text",
+                                                  "id": "T4bLO7",
+                                                  "name": "状态说明",
+                                                  "fill": "$jolu-muted",
+                                                  "textGrowth": "fixed-width",
+                                                  "width": "fill_container",
+                                                  "content": "悬停提示「下载失败，点击重试」；点击重新下载，下一轮检查也会自动重试。",
+                                                  "lineHeight": 1.5,
+                                                  "fontFamily": "Inter",
+                                                  "fontSize": 11,
+                                                  "fontWeight": "normal"
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "type": "text",
+                                          "id": "iJ1Cg",
+                                          "name": "安装说明",
+                                          "fill": "$jolu-muted",
+                                          "textGrowth": "fixed-width",
+                                          "width": "fill_container",
+                                          "content": "安装路径固定为 %LOCALAPPDATA%\\Jolu；首次安装向导和更新安装都不显示安装路径。",
+                                          "lineHeight": 1.5,
+                                          "fontFamily": "Inter",
+                                          "fontSize": 11,
+                                          "fontWeight": "normal"
                                         }
                                       ]
                                     }
@@ -404033,7 +404713,7 @@
       "type": "frame",
       "id": "ZaER3",
       "x": 0,
-      "y": 31956,
+      "y": 32156,
       "name": "模块 I · 一键签到",
       "width": 3400,
       "height": 15500,
@@ -485763,7 +486443,7 @@
       "type": "frame",
       "id": "g8oQ9t",
       "x": 3560,
-      "y": 31956,
+      "y": 32156,
       "name": "签到统计卡方案 · A 已确认",
       "width": 1104,
       "height": 1640,

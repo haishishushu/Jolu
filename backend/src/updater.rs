@@ -2,9 +2,10 @@
 //!
 //! 走 tauri-plugin-updater：更新端点与签名公钥配置在 tauri.conf.json，
 //! 发布时用 `tauri signer` 私钥对安装包签名，Release 附 latest.json。
-//! 前端只在启动 1 秒后的静默检查与设置页手动检查时调用 `check_app_update_available`；
-//! `download_app_update` 下载并校验签名，`install_downloaded_update_and_restart`
-//! 在用户点击安装后使用已下载的安装包，避免再次下载。
+//! 前端在启动 1 秒后、之后每 30 分钟以及手动检查时调用 `check_app_update_available`；
+//! 发现新版本后自动调用 `download_app_update` 在后台下载并校验签名，
+//! `install_downloaded_update_and_restart` 在用户点击版本按钮后使用已下载的安装包，
+//! 以被动模式（只显示进度窗口）启动安装器，装完自动重启。
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -112,11 +113,11 @@ fn update_check(update: &Update) -> UpdateCheck {
     }
 }
 
-/// 检查更新总开关：首个 Jolu Release 发布前停用，停用时不发出任何网络请求。
+/// 检查更新总开关：默认启用；构建时设 `JOLU_UPDATES_ENABLED=0` 可停用，停用时不发出任何网络请求。
 /// 与前端 lib/updateState.ts 的 UPDATES_ENABLED 同步修改。
 const UPDATES_ENABLED: bool = match option_env!("JOLU_UPDATES_ENABLED") {
-    Some(value) => matches!(value.as_bytes(), [b'1']),
-    None => false,
+    Some(value) => !matches!(value.as_bytes(), [b'0']),
+    None => true,
 };
 const UPDATES_DISABLED: &str = "检查更新暂时停用";
 

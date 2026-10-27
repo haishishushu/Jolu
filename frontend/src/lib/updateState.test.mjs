@@ -4,6 +4,7 @@ import {
   DISMISSED_KEY,
   formatBytes,
   isUpdateRelevant,
+  needsDownload,
   progressPercent,
   readDismissedVersion,
   writeDismissedVersion,
@@ -70,4 +71,20 @@ test("formatBytes：按量级选单位，保留一位小数", () => {
   assert.equal(formatBytes(1024), "1.0 KB")
   assert.equal(formatBytes(12.4 * 1024 * 1024), "12.4 MB")
   assert.equal(formatBytes(2.5 * 1024 * 1024 * 1024), "2.5 GB")
+})
+
+test("needsDownload：发现新版本且尚未下载时在后台下载", () => {
+  assert.equal(needsDownload("idle", null, "0.2.0"), true)
+  assert.equal(needsDownload("checking", null, "0.2.0"), true)
+  assert.equal(needsDownload("downloadError", null, "0.2.0"), true)
+  assert.equal(needsDownload("idle", null, null), false)
+})
+
+test("needsDownload：下载或安装进行中不重复下载", () => {
+  for (const phase of ["downloading", "installing", "ready"]) assert.equal(needsDownload(phase, null, "0.2.0"), false)
+})
+
+test("needsDownload：已下载同版本复用安装包，出现更高版本时重新下载", () => {
+  assert.equal(needsDownload("downloaded", "0.2.0", "0.2.0"), false)
+  assert.equal(needsDownload("downloaded", "0.2.0", "0.2.1"), true)
 })

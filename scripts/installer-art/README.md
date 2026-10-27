@@ -17,7 +17,7 @@ pnpm installer-art        # 或 node scripts/installer-art/build.mjs
 | 文件 | 用途 | 尺寸 |
 |---|---|---|
 | `sidebar.html` → `sidebar.bmp` | 欢迎页与完成页的左侧大图 | 164×314 |
-| `header.html` → `header.bmp` | 目录页 / 安装页 / 完成页右上角标识 | 150×57 |
+| `header.html` → `header.bmp` | 安装页右上角标识（安装器已去掉目录页） | 150×57 |
 | `png-to-bmp.ps1` | PNG 转 24 位 BMP | — |
 | `build.mjs` | 串起渲染与转换 | — |
 

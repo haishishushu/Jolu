@@ -19,7 +19,7 @@ Windows 桌面 AI 工具管理器。前端 `frontend/`：React 19 + TypeScript +
   | 模块 D · 会话线程 | 40–57 | 会话列表与消息、搜索、在原工具继续、压缩会话与 Markdown 交接、从会话创建自动化 | 已按新稿实现：`views/SessionsView.tsx`、`components/sessions/`、`lib/sessionThreads.ts`，后端 `session_threads.rs`；压缩会话（48/50/52/54/57A）已接入配置、对话式修订、MD 预览与导出；创建自动化携带会话与项目；短会话真实探索评测完成，长会话正式评测缺少样本 |
   | 模块 E · 自动化 | 58–73 | 任务列表、新建任务、等待额度与续跑、运行记录与详情、执行会话选择 | 已按新稿实现：`views/AutomationView.tsx`、`components/automation/`、`lib/automation.ts` / `automationApi.ts`，后端 `automation.rs`（Claude Code / Codex 非交互执行与本机调度）；Skills 选择（D-08，`SkillPicker.tsx`，下拉面板待确认）只列目标工具已启用的全局 + 工作目录项目 Skills，执行前与续跑前复查，执行账号须为原工具当前登录的账号 |
   | 模块 F · Skills 管理 | 74–85 | Skills 列表、供应商选择、详情与文件、新建 / 编辑、导入与冲突检查 | 已按新稿实现：`views/SkillsView.tsx`、`components/skills/`、`lib/skillsManager.ts` / `skillsApi.ts`，后端 `skills.rs`；已接入 Claude Code、Codex、Gemini、OpenCode、Qoder、Trae、ZCode；WorkBuddy 仅只读扫描 `.codebuddy/skills`；自定义目录只读；Grok 未接入；HTTPS Git 仓库导入、草稿与磁盘差异已有实现；项目范围由会话记录自动带出 + 手动添加，Claude Code 停用 = 移到应用数据目录的停用区（不写 `skillOverrides`） |
-  | 模块 G · 设置 | 86–103 | 常规、外观、网络与代理、数据与存储、通知、关于与更新、清理确认、状态与反馈、手动联网 | 已按新稿实现：`views/SettingsPage.tsx`、`components/settings/`（settingsUi、各分区与 DataDialogs）、`lib/settingsPage.ts`、`lib/settingsApi.ts`，后端 `storage_stats.rs`；默认页面、缩放、密度、减少动效、联网方式、诊断、任务提醒与导入预览已有实现；安装版行为待真机核对，检查更新默认停用；全局快捷键与套餐查询凭证已按鼠鼠要求删除，设计稿已同步 |
+  | 模块 G · 设置 | 86–103 | 常规、外观、网络与代理、数据与存储、通知、关于与更新、清理确认、状态与反馈、手动联网 | 已按新稿实现：`views/SettingsPage.tsx`、`components/settings/`（settingsUi、各分区与 DataDialogs）、`lib/settingsPage.ts`、`lib/settingsApi.ts`，后端 `storage_stats.rs`；默认页面、缩放、密度、减少动效、联网方式、诊断、任务提醒与导入预览已有实现；检查更新默认启用（启动及每 30 分钟检查、后台下载、页头绿色版本按钮、被动安装后自动重启，画板 100/101 的 06），首次安装与 0.1.0→0.1.1 更新已用改名测试包真机验证，见 `docs/verification/2026-10-27-update-install-e2e.md`；全局快捷键与套餐查询凭证已按鼠鼠要求删除，设计稿已同步 |
   | 模块 H · 全局规范与品牌 | 104–110 | 按钮与图标交互六态、Logo 与人物、桌面 / 任务栏 / 托盘图标、启动页 | `components/brand/`、`components/ui/`、`components/tray/`；启动页（109 / 110）已按新稿实现：`frontend/startup.html`、`src/startup.ts` / `startup.css`，窗口在 `lib.rs` 的 `show_startup` |
   | 模块 A2 · 浮动灵动岛 | 111–132 | 浮动灵动岛：Auth / API 收缩与展开、仅 Token、Token 动效、配置细节、平台选择、拖动贴边、右键菜单与分身 | `components/island/`、`views/IslandWindow.tsx`、`views/ContextMenuWindow.tsx` |
 
@@ -59,7 +59,8 @@ scripts/
 - 前端：组件 `PascalCase.tsx`（一个文件导出多个基础组件时用 camelCase，如 `primitives.tsx`）；hook `useXxx.ts` 放在 `hooks/`；纯逻辑 `camelCase.ts`；测试 `<源文件名>.test.mjs`，与源文件同名同目录。
 - 后端 Rust：`snake_case.rs`；脚本：`kebab-case`。
 - 发布脚本在 `scripts/release/`。恢复 GitHub Actions 工作流时，脚本路径要改成这个目录。
-- 检查更新目前停用：首个带 `latest.json` 的 Release 发布时，同时设置 `JOLU_UPDATES_ENABLED=1` / `VITE_JOLU_UPDATES_ENABLED=1` 构建；默认构建仍停用。测试公钥和本地端点仅放 output 的覆盖配置，不修改生产配置。
+- 检查更新默认启用；构建时同时设置 `JOLU_UPDATES_ENABLED=0` / `VITE_JOLU_UPDATES_ENABLED=0` 可停用。Release 必须附正式私钥签名的安装包与 `latest.json`，否则检查会失败。测试公钥和本地端点仅放 output 的覆盖配置，不修改生产配置。
+- 安装器使用自定义模板 `backend/windows/installer.nsi`（基于 tauri-cli 2.11.4，改动处标 `Jolu:`）：固定安装到 `%LOCALAPPDATA%\Jolu`，不显示选择目录页。升级 `@tauri-apps/cli` 时须与上游模板对照。卸载钩子会删除名为 `Jolu` 的开机自启项，本机测试安装包时先备份、测后恢复。
 
 ## 3. 常用命令（在仓库根目录执行）
 

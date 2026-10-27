@@ -1,9 +1,9 @@
 import type { ReactNode } from "react"
-import { CircleFadingArrowUp, Github, Moon, PanelLeft, PictureInPicture2, Sun } from "lucide-react"
+import { CircleFadingArrowUp, Github, LoaderCircle, Moon, PanelLeft, PictureInPicture2, Sun } from "lucide-react"
 import { isTauri, openUrl } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { resolveDarkTheme } from "@/lib/displayPreferences"
-import { UPDATES_ENABLED } from "@/lib/updateState"
+import { UPDATES_ENABLED, progressPercent } from "@/lib/updateState"
 import { useSettings } from "@/hooks/useSettings"
 import { useSystemDark } from "@/hooks/useSystemDark"
 import { useToast } from "@/components/ui/Toast"
@@ -15,6 +15,7 @@ export const REPO_URL = "https://github.com/haishishushu/Jolu"
 /**
  * 内容区固定页头（Jolu.pen 画板 01「内容区固定页头」，高 64）：
  * 左侧侧栏开关 + 竖分隔线 + 当前模块标题，右侧 GitHub / 灵动岛显隐 / 界面主题 / 检查更新。
+ * 发现新版本后检查更新按钮换成绿色版本按钮（鼠鼠 2026-10-27 确认，设计稿暂无此状态）。
  */
 export function PageHeader({ title, collapsed, onToggleSidebar }: { title: string; collapsed: boolean; onToggleSidebar: () => void }) {
   return (
@@ -49,12 +50,8 @@ function HeaderActions() {
   const desktopOnly = isTauri ? undefined : "（仅桌面端可用）"
 
   const onUpdate = () => {
-    if (update.info && (update.phase === "idle" || update.phase === "available" || update.phase === "downloaded")) {
-      update.startDownload()
-      return
-    }
     void update.checkNow()
-      .then((available) => toast.success(available ? "发现新版本" : "已是最新版本"))
+      .then((available) => toast.success(available ? "发现新版本，正在后台下载" : "已是最新版本"))
       .catch((reason) => toast.danger("检查更新失败", String(reason)))
   }
 
@@ -80,22 +77,60 @@ function HeaderActions() {
       >
         {dark ? <Moon aria-hidden className="size-5" /> : <Sun aria-hidden className="size-5" />}
       </HeaderButton>
-      <HeaderButton
-        motion="update"
-        label={UPDATES_ENABLED ? "检查更新" : "检查更新暂时停用"}
-        disabled={!UPDATES_ENABLED || update.phase === "checking" || update.phase === "downloading" || update.phase === "installing"}
-        onClick={onUpdate}
-      >
-        <CircleFadingArrowUp aria-hidden className="size-5" />
-      </HeaderButton>
+      {UPDATES_ENABLED && update.info && update.phase !== "ready" ? <UpdateVersionButton /> : (
+        <HeaderButton
+          motion="update"
+          label={!UPDATES_ENABLED ? "检查更新暂时停用" : update.phase === "checking" ? "正在检查更新" : "检查更新"}
+          busy={update.phase === "checking"}
+          disabled={!UPDATES_ENABLED}
+          onClick={onUpdate}
+        >
+          <CircleFadingArrowUp aria-hidden className="size-5" />
+        </HeaderButton>
+      )}
     </div>
   )
 }
 
-function HeaderButton({ motion, label, pressed, disabled, onClick, children }: {
+/** 有新版本时的绿色版本按钮：下载完成后点击直接进入安装界面 */
+function UpdateVersionButton() {
+  const { phase, info, progress, openUpdate } = useUpdate()
+  if (!info) return null
+  const version = `v${info.availableVersion}`
+  const percent = progressPercent(progress.downloaded, progress.total)
+  const label = phase === "downloaded" ? `安装 ${version}`
+    : phase === "installing" ? `正在打开 ${version} 安装界面`
+      : phase === "downloading" ? `正在下载 ${version}${percent === null ? "" : `（${percent}%）`}`
+        : phase === "downloadError" ? `${version} 下载失败，点击重试`
+          : `下载 ${version}`
+  const spinning = phase === "downloading" || phase === "installing"
+  return (
+    <Tip label={label}>
+      <span className="inline-flex">
+        <button
+          type="button"
+          aria-label={label}
+          data-icon-motion="update"
+          disabled={phase === "installing"}
+          onClick={openUpdate}
+          className="motion-button inline-flex h-9 items-center gap-1.5 rounded-lg bg-jolu-accent px-3 text-[13px] font-semibold text-[#071B10] outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-70"
+        >
+          {spinning
+            ? <LoaderCircle aria-hidden className="size-4 animate-spin" />
+            : <CircleFadingArrowUp aria-hidden className="size-4" />}
+          <span className="tnum">{version}</span>
+        </button>
+      </span>
+    </Tip>
+  )
+}
+
+function HeaderButton({ motion, label, pressed, busy, disabled, onClick, children }: {
   motion: "github" | "island" | "sun" | "moon" | "update"
   label: string
   pressed?: boolean
+  /** 进行中：保持可见可悬浮，图标转圈，忽略重复点击 */
+  busy?: boolean
   disabled?: boolean
   onClick: () => void
   children: ReactNode
@@ -109,8 +144,9 @@ function HeaderButton({ motion, label, pressed, disabled, onClick, children }: {
           aria-label={label}
           data-icon-motion={motion}
           aria-pressed={pressed}
+          aria-busy={busy || undefined}
           disabled={disabled}
-          onClick={onClick}
+          onClick={busy ? undefined : onClick}
           className={cn(
             "grid size-9 place-items-center rounded-lg text-jolu-muted outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent",
             "disabled:pointer-events-none disabled:opacity-45",

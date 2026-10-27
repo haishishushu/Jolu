@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { ChevronRight, ExternalLink, Info, RefreshCw } from "lucide-react"
 import { openUrl } from "@/lib/api"
 import { settingsApi } from "@/lib/settingsApi"
-import { UPDATES_ENABLED } from "@/lib/updateState"
+import { UPDATES_ENABLED, progressPercent } from "@/lib/updateState"
 import { AppIcon } from "@/components/brand/AppIcon"
 import { Wordmark } from "@/components/brand/Wordmark"
 import { REPO_URL } from "@/components/panel/PageHeader"
@@ -11,7 +11,7 @@ import { useUpdate } from "@/components/panel/UpdateContext"
 import { useToast } from "@/components/ui/Toast"
 import { ActionButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 
-/** 关于与更新（画板 96）：检查更新目前停用（UPDATES_ENABLED = false），如实显示停用状态 */
+/** 关于与更新（画板 96）：检查更新默认启用；构建时停用（UPDATES_ENABLED = false）则如实显示停用状态 */
 export function AboutSection() {
   const cfg = useSettings()
   const [version, setVersion] = useState<string | null>(null)
@@ -45,7 +45,7 @@ export function AboutSection() {
         <SettingsRow
           className="min-h-[72px]"
           title="自动检查更新"
-          desc={UPDATES_ENABLED ? "仅检查版本，下载和安装由你确认。" : "当前发布通道尚未开放，偏好会保留；启用更新后生效。"}
+          desc={UPDATES_ENABLED ? "启动时和每 30 分钟检查一次，新版本自动在后台下载，安装由你确认。" : "当前发布通道尚未开放，偏好会保留；启用更新后生效。"}
           control={<Switch label="自动检查更新" on={cfg.settings.auto_check_updates} disabled={!cfg.ready || cfg.isSaving("auto_check_updates")} onChange={(on) => void cfg.setAutoCheckUpdates(on)} />}
         />
       </SettingsGroup>
@@ -84,23 +84,32 @@ export function AboutSection() {
 /** 检查更新启用后的行：沿用 UpdateContext 的检查、下载与安装流程 */
 function UpdateRow({ versionText }: { versionText: string }) {
   const toast = useToast()
-  const { phase, info, checkNow, startDownload } = useUpdate()
+  const { phase, info, progress, checkNow, openUpdate } = useUpdate()
   const checking = phase === "checking"
-  const busy = phase === "downloading" || phase === "installing"
-  const hasUpdate = !!info && (phase === "idle" || phase === "available" || phase === "downloaded")
+  const hasUpdate = !!info && phase !== "ready"
+  const percent = progressPercent(progress.downloaded, progress.total)
   const check = () => {
     void checkNow()
-      .then((available) => toast.success(available ? "发现新版本" : "已是最新版本"))
+      .then((available) => toast.success(available ? "发现新版本，正在后台下载" : "已是最新版本"))
       .catch((reason) => toast.danger("检查更新失败", String(reason)))
   }
+  const version = info ? `v${info.availableVersion}` : ""
+  const desc = !hasUpdate ? "启动时和每 30 分钟自动检查，新版本会在后台下载。"
+    : phase === "downloaded" ? `${version} 安装包已下载并校验，点击安装即进入安装界面，装完自动重启`
+      : phase === "downloading" ? `正在后台下载 ${version}${percent === null ? "" : `（${percent}%）`}`
+        : phase === "installing" ? `正在打开 ${version} 安装界面`
+          : phase === "downloadError" ? `${version} 下载失败，可重试`
+            : `发现新版本 ${version}`
   return (
     <SettingsRow
       className="min-h-[72px]"
       title={`当前版本 ${versionText}`}
-      desc={phase === "downloaded" ? "安装包已校验，可选择合适的时间安装" : hasUpdate && info ? `发现新版本 v${info.availableVersion}，点击下载后由你确认安装` : phase === "downloadError" ? "下载失败，可重试" : "仅检查版本，下载和安装由你确认。"}
+      desc={desc}
       control={hasUpdate
-        ? <ActionButton tone="accent" onClick={startDownload}>{phase === "downloaded" ? "安装" : "下载"} v{info?.availableVersion}</ActionButton>
-        : <ActionButton icon={<RefreshCw aria-hidden className="size-3.5" />} busy={checking || busy} onClick={check}>{checking ? "检查中…" : "检查更新"}</ActionButton>}
+        ? <ActionButton tone="accent" busy={phase === "installing"} onClick={openUpdate}>
+          {phase === "downloaded" || phase === "installing" ? "安装" : phase === "downloading" ? "查看下载" : phase === "downloadError" ? "重试下载" : "下载"} {version}
+        </ActionButton>
+        : <ActionButton icon={<RefreshCw aria-hidden className="size-3.5" />} busy={checking} onClick={check}>{checking ? "检查中…" : "检查更新"}</ActionButton>}
     />
   )
 }

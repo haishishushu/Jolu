@@ -18,12 +18,14 @@ export interface UpdateContextValue {
   /** 左上角更新提示是否显示：有新版本且未被忽略 */
   visible: boolean
   error: string | null
-  /** 手动检查（设置页）。返回是否有更新；失败抛错由调用方 toast */
+  /** 检查更新，发现新版本自动在后台下载。返回是否有更新；失败抛错由调用方决定是否 toast */
   checkNow: () => Promise<boolean>
-  /** 点击版本入口：下载并校验，随后进入安装界面 */
+  /** 打开进度对话框；未下载或下载失败时同时开始下载 */
   startDownload: () => void
-  /** 点击安装：使用已下载的安装包安装并重启 */
+  /** 点击安装：使用已下载的安装包进入安装界面，装完自动重启 */
   installDownloaded: () => void
+  /** 版本按钮：已下载直接进入安装界面，否则打开进度对话框 */
+  openUpdate: () => void
   /** 忽略此版本：同版本不再亮灯，更新版本仍会提示 */
   dismiss: () => void
 }

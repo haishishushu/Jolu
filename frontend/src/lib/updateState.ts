@@ -6,8 +6,8 @@
  * 便于 node --test 直接验证。
  */
 
-/** 检查更新总开关：首个 Jolu Release 发布前停用；与后端 updater.rs 的 UPDATES_ENABLED 同步修改 */
-export const UPDATES_ENABLED = import.meta.env?.VITE_JOLU_UPDATES_ENABLED === "1"
+/** 检查更新总开关：默认启用，构建时设 VITE_JOLU_UPDATES_ENABLED=0 可停用；与后端 updater.rs 的 UPDATES_ENABLED 同步修改 */
+export const UPDATES_ENABLED = import.meta.env?.VITE_JOLU_UPDATES_ENABLED !== "0"
 
 export type UpdatePhase ="idle" | "checking" | "available" | "downloading" | "downloadError" | "downloaded" | "installing" | "ready"
 
@@ -22,6 +22,19 @@ export interface UpdateProgress {
   downloaded: number
   /** 总量未知时为 null（分块下载早期拿不到 content-length） */
   total: number | null
+}
+
+/** 自动检查：启动后检查一次，之后每 30 分钟检查一次 */
+export const AUTO_CHECK_INTERVAL_MS = 30 * 60 * 1000
+
+/**
+ * 检查到新版本后是否需要在后台下载：
+ * 下载或安装进行中不重复下载；已下载的正是这个版本时直接复用安装包。
+ */
+export function needsDownload(phase: UpdatePhase, preparedVersion: string | null, availableVersion: string | null): boolean {
+  if (!availableVersion) return false
+  if (phase === "downloading" || phase === "installing" || phase === "ready") return false
+  return !(phase === "downloaded" && preparedVersion === availableVersion)
 }
 
 /** 忽略的版本号存在 localStorage；同版本不再亮绿灯，更新版本仍会提示 */

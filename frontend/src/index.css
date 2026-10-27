@@ -643,11 +643,17 @@ fieldset[data-saving="true"] :disabled:not([disabled]) {
 [data-icon-motion="sun"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(30deg); }
 [data-icon-motion="moon"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(-15deg); }
 [data-icon-motion="update"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: translateY(-2px); }
+/* 检查更新：按下时图标短暂收缩；检查期间图标转圈，按钮不置灰。 */
+[data-icon-motion="update"]:not(:disabled):active > svg { transform: translateY(-1px) scale(0.86); transition-duration: 80ms; }
+@keyframes update-check-spin { to { transform: rotate(360deg); } }
+[data-icon-motion="update"][aria-busy="true"] > svg { animation: update-check-spin 900ms linear infinite; }
 /* 系统与应用内的减少动效设置都保留颜色反馈，取消位移、缩放和旋转。 */
 @media (prefers-reduced-motion: reduce) {
-  [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
+  [data-icon-motion]:is(:hover, :focus-visible, :active) > svg { transform: none !important; }
+  [data-icon-motion][aria-busy="true"] > svg { animation: none; }
 }
-html.reduce-motion [data-icon-motion]:is(:hover, :focus-visible) > svg { transform: none !important; }
+html.reduce-motion [data-icon-motion]:is(:hover, :focus-visible, :active) > svg { transform: none !important; }
+html.reduce-motion [data-icon-motion][aria-busy="true"] > svg { animation: none; }
 
 /* 首帧就有占位；只让柔光移动，不把等待阶段隐藏成空白。 */
 @keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }

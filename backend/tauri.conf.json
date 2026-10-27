@@ -50,6 +50,8 @@
     ],
     "windows": {
       "nsis": {
+        "template": "./windows/installer.nsi",
+        "installMode": "currentUser",
         "installerHooks": "./windows/hooks.nsh",
         "languages": [
           "SimpChinese",

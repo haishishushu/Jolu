@@ -335,4 +335,4 @@ jolu/
 </a>
 
 
-开发验证边界见 [未验证项清单](docs/todo/2026-10-22-unverified-integrations.md)。更新默认关闭，发布时同时设置 `JOLU_UPDATES_ENABLED=1` 和 `VITE_JOLU_UPDATES_ENABLED=1`。OpenCode 统计支持 JSON / SQLite V1/V2；落盘 output 表示可见输出，Jolu 将其与独立 reasoning 相加；总量优先采用来源的 total，缺失字段保持未知。
+开发验证边界见 [未验证项清单](docs/todo/2026-10-22-unverified-integrations.md)。检查更新默认启用，构建时同时设置 `JOLU_UPDATES_ENABLED=0` 和 `VITE_JOLU_UPDATES_ENABLED=0` 可停用。OpenCode 统计支持 JSON / SQLite V1/V2；落盘 output 表示可见输出，Jolu 将其与独立 reasoning 相加；总量优先采用来源的 total，缺失字段保持未知。
