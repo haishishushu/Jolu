@@ -51,7 +51,11 @@ fn bucket(value: &Value, key: String, name: String, total_key: &str) -> QuotaWin
     let unit = text(value, "unit").unwrap_or_else(|| "credits".into());
     QuotaWindow {
         key, window_name: name, used_percent: percent(value, "percentage"),
-        amount_text: number(value, "used").zip(number(value, total_key)).map(|(used, total)| format!("{used} / {total} {unit}")),
+        amount_text: match (number(value, "used"), number(value, total_key)) {
+            (Some(used), Some(total)) => Some(format!("{used} / {total} {unit}")),
+            (None, Some(total)) => Some(format!("总额度 {total} {unit}；已用未知")),
+            _ => None,
+        },
         remaining_text: number(value, "remaining").map(|remaining| format!("剩余 {remaining} {unit}")),
         // expiresAt 是套餐/资源包到期，不是额度重置。
         resets_at: None,
@@ -145,6 +149,32 @@ fn response_json(response: reqwest::blocking::Response) -> Result<Value, QuotaSt
     serde_json::from_slice(&bytes).map_err(|_| failed("Qoder 响应格式无效"))
 }
 
+fn verified_user(value: &Value, expected: Option<&str>) -> Result<(String, Option<String>), String> {
+    let id = text(value, "id").or_else(|| text(value, "user_id")).or_else(|| text(value, "uid"))
+        .ok_or("Qoder 授权账号缺少用户标识")?;
+    if expected.is_some_and(|expected| id != expected) { return Err("Qoder 授权账号身份发生变化，请重新授权".into()); }
+    Ok((id, text(value, "email").or_else(|| text(value, "name"))))
+}
+
+/// 账号接口与套餐额度独立；每次核对返回身份，不能把旧会话字段当成在线验证。
+pub(crate) fn verify_session(edition: &str, session: &Session) -> Result<(), String> {
+    let (_, api, _) = endpoints(edition)?;
+    if crate::validation::isolated() { return Err("隔离环境不读取 Qoder 真实授权".into()); }
+    let expected = session.user_id.as_deref().filter(|id| !id.is_empty() && id.len() <= 320 && !id.chars().any(char::is_control))
+        .ok_or("Qoder 浏览器授权缺少账号身份，请重新授权")?;
+    if session.token.is_empty() || session.token.len() > 65536 || session.token.chars().any(char::is_control)
+        || session.expires_at.as_ref().is_some_and(|raw| chrono::DateTime::parse_from_rfc3339(raw)
+            .map_or(true, |at| at <= chrono::Utc::now())) {
+        return Err("Qoder 浏览器授权已失效，请重新授权".into());
+    }
+    let response = crate::quota::client().map_err(|_| "无法创建 Qoder 身份验证客户端")?
+        .get(format!("{api}/api/v1/userinfo")).header("Accept", "application/json").bearer_auth(&session.token)
+        .send().map_err(|_| "无法核实 Qoder 授权账号，请检查网络后重试")?;
+    let user = response_json(response).map_err(|_| "Qoder 授权账号校验失败，请重试或重新授权")?;
+    verified_user(&user, Some(expected))?;
+    Ok(())
+}
+
 pub(crate) fn query(edition: &str, token: &str) -> QuotaState {
     (|| {
         let (_, api, _) = endpoints(edition).map_err(|_| unsupported("未知 Qoder 版本"))?;
@@ -211,15 +241,63 @@ pub(crate) fn poll_login(edition: &str, nonce: &str, verifier: &str) -> Result<O
     let response = client.get(format!("{api}/api/v1/userinfo")).header("Accept", "application/json").bearer_auth(&token)
         .send().map_err(|_| "无法核实 Qoder 授权账号，请重试")?;
     let user = response_json(response).map_err(|_| "Qoder 授权账号校验失败，请重新授权")?;
-    let user_id = text(&user, "id").or_else(|| text(&user, "user_id")).or_else(|| text(&user, "uid")).ok_or("Qoder 授权账号缺少用户标识")?;
+    let (user_id, account) = verified_user(&user, None)?;
     let expires_at = value.get("expires_at").and_then(expiry).or_else(|| value["expires_in"].as_i64().filter(|s| *s > 0).and_then(chrono::TimeDelta::try_seconds).and_then(|delta| chrono::Utc::now().checked_add_signed(delta)).map(|date| date.to_rfc3339()));
-    Ok(Some(Session { token, refresh_token: Some(refresh_token), expires_at, account: text(&user, "email").or_else(|| text(&user, "name")), user_id: Some(user_id) }))
+    Ok(Some(Session { token, refresh_token: Some(refresh_token), expires_at, account, user_id: Some(user_id) }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[ignore = "鼠鼠已授权：只读查询两区活动，仅输出白名单活动字段，不领取、不输出账号或凭证"]
+    fn checkin_campaign_read_only_probe() {
+        let client = crate::net::blocking_builder().redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(20)).build().expect("probe client");
+        for edition in ["cn", "global"] {
+            let Ok(session) = local_session(edition) else {
+                println!("Qoder {edition}: local session unavailable");
+                continue;
+            };
+            let (_, api, _) = endpoints(edition).unwrap();
+            let response = client.get(format!("{api}/sash/api/v1/me/campaigns"))
+                .bearer_auth(&session.token).header("Accept", "application/json")
+                .header("Cosy-ClientType", "10").header("User-Agent", "Qoder")
+                .send().expect("campaign probe request");
+            println!("Qoder {edition}: http={}", response.status().as_u16());
+            if !response.status().is_success() { continue; }
+            let mut bytes = Vec::new();
+            response.take(1024 * 1024 + 1).read_to_end(&mut bytes).expect("bounded response");
+            assert!(bytes.len() <= 1024 * 1024);
+            let value: Value = serde_json::from_slice(&bytes).expect("campaign JSON");
+            let campaigns = value.get("campaigns").or_else(|| value.pointer("/data/campaigns"))
+                .or_else(|| value.get("data")).unwrap_or(&value).as_array();
+            let Some(campaigns) = campaigns else { println!("Qoder {edition}: campaign array absent"); continue; };
+            for campaign in campaigns {
+                let mut output = serde_json::Map::new();
+                for key in ["campaignId", "campaignKey", "actionType", "claimStatus", "startAt", "endAt", "benefit", "unavailableReason"] {
+                    if let Some(value) = campaign.get(key) { output.insert(key.into(), value.clone()); }
+                }
+                let placements = campaign.get("placements").and_then(Value::as_array).map(|placements| placements.iter().map(|placement| {
+                    let mut content = serde_json::Map::new();
+                    for language in ["zh", "en"] {
+                        let mut fields = serde_json::Map::new();
+                        for key in ["title", "detailUrl", "description", "buttonText"] {
+                            if let Some(value) = placement.get("content").and_then(|v| v.get(language)).and_then(|v| v.get(key)) {
+                                fields.insert(key.into(), value.clone());
+                            }
+                        }
+                        content.insert(language.into(), Value::Object(fields));
+                    }
+                    json!({"type":placement.get("type"),"content":content})
+                }).collect::<Vec<_>>());
+                output.insert("placements".into(), json!(placements));
+                println!("Qoder {edition} activity: {}", Value::Object(output));
+            }
+        }
+    }
 
     #[test]
     fn local_login_requires_valid_unexpired_account_state() {
@@ -230,6 +308,16 @@ mod tests {
         assert!(matches!(parse_local_auth(&value,now),Err(QuotaState::Unauthorized{..})));
         value["expiresAt"]=json!("invalid");
         assert!(parse_local_auth(&value,now).is_err());
+    }
+
+    #[test]
+    fn browser_identity_verification_rejects_missing_or_different_users() {
+        let value = json!({"id":"synthetic-user","email":"person@example.invalid"});
+        assert!(verified_user(&value, Some("synthetic-user")).is_ok());
+        assert!(verified_user(&value, Some("other-user")).is_err());
+        assert!(verified_user(&json!({"email":"person@example.invalid"}), None).is_err());
+        assert!(verified_user(&json!({"id":"  "}), None).is_err());
+        assert!(verified_user(&json!({"uid":"synthetic-user"}), Some("synthetic-user")).is_ok());
     }
 
     #[test]
@@ -250,6 +338,19 @@ mod tests {
         assert_eq!(windows[3].used_percent, Some(25.0));
         assert!(windows.iter().all(|window| window.resets_at.is_none()));
         assert!(account.unwrap().expires_at.is_some());
+    }
+
+    #[test]
+    fn partial_total_keeps_explicit_total_without_inventing_used() {
+        let state = parse_usage(&json!({"displayMode":"qoder","qoderUsage":{
+            "userType":"pro","userQuota":{"total":100,"remaining":40,"unit":"credits"},
+            "orgResourcePackage":{"cap":0,"remaining":0,"unit":"credits"}}}));
+        let QuotaState::Ok { windows, .. } = state else { panic!("expected desktop quota") };
+        assert_eq!(windows[0].amount_text.as_deref(), Some("总额度 100 credits；已用未知"));
+        assert_eq!(windows[0].remaining_text.as_deref(), Some("剩余 40 credits"));
+        assert_eq!(windows[1].amount_text.as_deref(), Some("总额度 0 credits；已用未知"));
+        assert_eq!(windows[1].remaining_text.as_deref(), Some("剩余 0 credits"));
+        assert!(windows.iter().all(|window| window.used_percent.is_none()));
     }
 
     #[test]

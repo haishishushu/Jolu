@@ -10,8 +10,10 @@ import {
   writeSidebarCollapsed,
 } from "./mainNavigation.ts"
 
-test("侧栏模块顺序与 Jolu.pen 画板 01 一致", () => {
-  assert.deepEqual(PRIMARY_PAGES.map((item) => item.label), ["灵动岛", "供应商", "用量统计", "会话线程", "自动化", "Skills 管理"])
+test("签到在供应商同级下方，与 Jolu.pen 模块 I 导航一致", () => {
+  assert.deepEqual(PRIMARY_PAGES.map((item) => item.label), ["灵动岛", "供应商", "一键签到", "用量统计", "会话线程", "自动化", "Skills 管理"])
+  assert.equal(resolveOpenPage("checkin", null), "checkin")
+  assert.equal(resolveOpenPage("last", "checkin"), "checkin")
   assert.equal(pageLabel("settings"), "设置")
 })
 
@@ -50,4 +52,7 @@ test("托盘打开主窗口按默认打开页面设置换算", () => {
 
 test("点击任务通知打开自动化页", () => {
   assert.equal(pageForIntent({ kind: "automation", task_id: 24 }), "automation")
+})
+test("点击余额通知打开供应商账号管理", () => {
+  assert.equal(pageForIntent({ kind: "providers", connection_id: "synthetic-api" }), "providers")
 })

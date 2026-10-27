@@ -8,14 +8,16 @@ import { PROVIDERS, connectionProviderId, connectionProviderEntry, editSaveState
 import { accountQueries, quotaValue, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "@/lib/accountDisplay"
 import { accountCardPolicy } from "@/lib/accountCardPolicy"
 import { remainingPercent } from "@/lib/quota"
-import { removeAccountWithReplacement } from "@/lib/accountActions"
+import { removeAccounts, removeAccountWithReplacement } from "@/lib/accountActions"
 import { useConnections } from "@/hooks/useConnections"
+import { useAccountSelection } from "@/hooks/useAccountSelection"
 import { useSettings } from "@/hooks/useSettings"
 import { useBalance, useQuota, type BalanceResult, type QuotaResult } from "@/hooks/useQuota"
 import { SelectField } from "@/components/ui/SelectField"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { ModelPicker } from "@/components/providers/ConnectDialog"
+import { AccountBatchToolbar, BatchAccountDeleteDialog, type BatchAccountTarget } from "@/components/providers/AccountBatchControls"
 import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
 import type { Connection, ConnectionKind, PlatformId } from "@/types"
@@ -52,10 +54,11 @@ type Conn = ReturnType<typeof useConnections>
  * 账号管理（Jolu.pen 画板 07–10、23、25）：订阅账号看额度，API Key 账号看余额与消费。
  * 「当前使用」以本机 CLI 实际在用的凭证为准，按供应商分别设置。
  */
-export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
+export function AccountsPanel({ conn, onConnect, target, onTargetHandled }: {
   conn: Conn
   onConnect: (platform: ProviderId) => void
-  onBrowseProviders: () => void
+  target?: { connectionId: string; nonce: number } | null
+  onTargetHandled?: () => void
 }) {
   const [hidden, setHidden] = useState(() => {
     try { return localStorage.getItem(PRIVACY_KEY) === "true" } catch { return false }
@@ -77,7 +80,12 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
   const [removing, setRemoving] = useState<Connection | null>(null)
   const [promoting, setPromoting] = useState<Connection | null>(null)
   const [editing, setEditing] = useState<Connection | null>(null)
+  const [batchTargets, setBatchTargets] = useState<BatchAccountTarget[] | null>(null)
+  const [batchBusy, setBatchBusy] = useState(false)
+  const batchRunning = useRef(false)
   const gridRef=useRef<HTMLDivElement>(null)
+  const handledTarget = useRef<number | null>(null)
+  const [locatedId, setLocatedId] = useState<string | null>(null)
   useEffect(()=>{gridRef.current?.scrollTo({top:0})},[platform,query,kind])
 
   useEffect(() => {
@@ -89,13 +97,43 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
 
   const accounts = conn.connections
   const visible = useMemo(() => filterAccounts(accounts, platform, query, kind), [accounts, platform, query,kind])
+  const selection = useAccountSelection(visible)
+  const batchToolbar = <AccountBatchToolbar selection={selection} total={visible.length} disabled={batchBusy || conn.loading || !!conn.error || !!removing || !!promoting || !!editing} onDelete={() => {
+    if (batchRunning.current) return
+    setBatchTargets(visible.filter(account => selection.selected.has(account.id)).map(account => ({
+      id: account.id, label: account.baseName, provider: connectionProviderEntry(account).name, current: current.includes(account.id),
+    })))
+  }} />
   const currentCount = accounts.filter((a) => current.includes(a.id)).length
+  useEffect(() => {
+    if (target) { setPlatform(null); setKind(null); setQuery("") }
+  }, [target])
+  useEffect(() => {
+    if (!target || handledTarget.current === target.nonce || conn.loading || conn.error || platform || kind || query) return
+    if (!accounts.some(account => account.id === target.connectionId)) {
+      handledTarget.current = target.nonce
+      toast.warn("该账号已不存在", "账号可能已被删除，请在账号管理中检查")
+      onTargetHandled?.()
+      return
+    }
+    const element = [...(gridRef.current?.querySelectorAll<HTMLElement>("[data-account-id]") ?? [])].find(card => card.dataset.accountId === target.connectionId)
+    if (!element) return
+    element.scrollIntoView({ block: "nearest", behavior: cfg.settings.reduce_motion ? "auto" : "smooth" })
+    setLocatedId(target.connectionId)
+    handledTarget.current = target.nonce
+    onTargetHandled?.()
+  }, [target, conn.loading, conn.error, accounts, platform, kind, query, toast, onTargetHandled, cfg.settings.reduce_motion])
+  useEffect(() => {
+    if (!locatedId) return
+    const timer = window.setTimeout(() => setLocatedId(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [locatedId])
 
-  if (!conn.loading && !conn.error && !accounts.length) {
+  if (!conn.loading && !conn.error && !accounts.length && !batchTargets) {
     return (
       <>
-        <Header total={0} current={0} onAdd={onBrowseProviders} hidden={hidden} onTogglePrivacy={togglePrivacy} />
-        <EmptyState title="还没有账号" desc="连接供应商后，账号的额度、余额与消费会显示在这里。" action={<JoluButton variant="primary" onClick={onBrowseProviders}><Plus aria-hidden className="!text-[#071B10]" />连接供应商</JoluButton>} />
+        <Header total={0} current={0} onAdd={() => onConnect("claude")} hidden={hidden} onTogglePrivacy={togglePrivacy} />
+        <EmptyState title="还没有账号" desc="添加账号后，账号的额度、余额与消费会显示在这里。" action={<JoluButton variant="primary" onClick={() => onConnect("claude")}><Plus aria-hidden className="!text-[#071B10]" />添加账号</JoluButton>} />
       </>
     )
   }
@@ -103,8 +141,9 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
   return (
     <PrivacyContext.Provider value={hidden}>
       <div className="flex min-h-0 flex-1 flex-col gap-3" data-account-panel>
-      <Header total={accounts.length} current={currentCount} onAdd={onBrowseProviders} hidden={hidden} onTogglePrivacy={togglePrivacy} />
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
+      <Header total={accounts.length} current={currentCount} onAdd={() => onConnect(platform ?? "claude")} hidden={hidden} onTogglePrivacy={togglePrivacy} addDisabled={selection.active || batchBusy} disabled={batchBusy} batchControl={!selection.active ? batchToolbar : undefined} />
+      {selection.active && batchToolbar}
+      <fieldset disabled={batchBusy} className="flex shrink-0 flex-wrap items-center gap-2">
         <label className="flex h-[34px] w-[220px] items-center gap-2 rounded-lg border border-jolu-border px-3 focus-within:border-jolu-accent">
           <Search aria-hidden className="size-4 shrink-0 text-jolu-muted" />
           <input type={hidden ? "password" : "text"} autoComplete="off" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户名、邮箱、连接名称" aria-label="搜索账号" className="min-w-0 flex-1 bg-transparent text-xs text-jolu-text outline-none placeholder:text-jolu-muted" />
@@ -119,12 +158,12 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
           <FilterChip key={id} active={platform === id} onClick={() => setPlatform(id)}><span aria-hidden className="grid size-4 shrink-0 place-items-center"><PlatformLogo platform={providerEntry(id).platformId} size={16} /></span>{providerEntry(id).name}</FilterChip>
         ))}
         <MoreFilter accounts={accounts.filter(account=>!kind || account.kind===kind)} value={platform} onChange={setPlatform} />
-      </div>
+      </fieldset>
 
       {conn.error && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-[10px] bg-jolu-danger-soft px-4 py-2.5 text-xs text-jolu-danger">
           <span>账号列表读取失败：{hidden ? redactAccountMessage(conn.error) : conn.error}</span>
-          <JoluButton size="sm" variant="danger-soft" onClick={() => void conn.reload()}>重新读取</JoluButton>
+          <JoluButton size="sm" variant="danger-soft" disabled={batchBusy} onClick={() => void conn.reload()}>重新读取</JoluButton>
         </div>
       )}
       {conn.loading && !accounts.length && <p role="status" className="text-xs text-jolu-muted">正在读取账号…</p>}
@@ -132,11 +171,17 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
       {visible.length ? (
         <div className="relative min-h-0 flex-1">
         <div ref={gridRef} role="list" aria-label="账号列表" data-account-grid className="absolute inset-0 grid grid-cols-4 content-start gap-3 overflow-y-auto pr-1" style={{gridAutoRows:"calc((100% - 12px) / 2)",scrollbarGutter:"stable"}}>
-          {visible.map((account) => (
+          {visible.map((account, index) => (
             <AccountCard
               key={`${account.id}:${account.status}`}
               account={account}
               current={current.includes(account.id)}
+              located={locatedId === account.id}
+              selecting={selection.active}
+              selected={selection.selected.has(account.id)}
+              disabled={batchBusy}
+              selectionLabel={hidden ? `选择账号 ${index + 1}` : `选择账号 ${account.baseName}`}
+              onToggle={() => { if (!batchRunning.current) selection.toggle(account.id) }}
               onRemove={() => setRemoving(account)}
               onPromote={() => setPromoting(account)}
               onEdit={() => setEditing(account)}
@@ -154,12 +199,29 @@ export function AccountsPanel({ conn, onConnect, onBrowseProviders }: {
           title="没有找到匹配的账号"
           desc="切换账号类型、供应商，或清除搜索条件。"
           action={<>
-            <JoluButton variant="neutral" onClick={() => { setQuery(""); setPlatform(null); setKind(null) }}>清除筛选</JoluButton>
-            <JoluButton variant="soft" onClick={() => platform ? onConnect(platform) : onBrowseProviders()}><Plus aria-hidden />添加账号</JoluButton>
+            <JoluButton variant="neutral" disabled={batchBusy} onClick={() => { setQuery(""); setPlatform(null); setKind(null) }}>清除筛选</JoluButton>
+            <JoluButton variant="soft" disabled={selection.active || batchBusy} onClick={() => onConnect(platform ?? "claude")}><Plus aria-hidden />添加账号</JoluButton>
           </>}
         />
       )}
       <p className="flex shrink-0 items-center justify-between gap-3 text-[10px] text-jolu-muted"><span>仅显示供应商实际提供的信息；完整额度与服务信息见详情。</span><span className="shrink-0">共 {visible.length} 个{visible.length > 8 ? " · 滚轮查看更多" : ""}</span></p>
+
+      {batchTargets && <BatchAccountDeleteDialog targets={batchTargets} hidden={hidden} onClose={() => { if (!batchRunning.current) setBatchTargets(null) }} onConfirm={async ids => {
+        if (batchRunning.current) throw new Error("正在删除账号，请稍候")
+        const allowed = new Set(batchTargets.map(account => account.id))
+        if (ids.some(id => !allowed.has(id))) throw new Error("删除目标已变化，请关闭确认后重新选择")
+        batchRunning.current = true
+        setBatchBusy(true)
+        try {
+          const result = await removeAccounts(ids, api.removeConnection)
+          selection.discard(result.deletedIds)
+          await conn.reload()
+          return result
+        } finally {
+          batchRunning.current = false
+          setBatchBusy(false)
+        }
+      }} />}
 
       {removing && (
         <RemoveDialog
@@ -219,18 +281,19 @@ function islandUsers(id: string, settings: ReturnType<typeof useSettings>["setti
   return users
 }
 
-function Header({ total, current, onAdd, hidden, onTogglePrivacy }: { total: number; current: number; onAdd: () => void; hidden: boolean; onTogglePrivacy: () => void }) {
+function Header({ total, current, onAdd, hidden, onTogglePrivacy, batchControl, addDisabled = false, disabled = false }: { total: number; current: number; onAdd: () => void; hidden: boolean; onTogglePrivacy: () => void; batchControl?: ReactNode; addDisabled?: boolean; disabled?: boolean }) {
   return (
-    <div className="flex h-9 shrink-0 items-center justify-between">
+    <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-3">
       <div className="flex items-baseline gap-3">
         <h2 className="text-[22px] font-semibold text-jolu-text">账号管理</h2>
         <span className="text-xs text-jolu-muted">{total} 个账号 · {current} 个当前使用</span>
       </div>
       <div className="flex items-center gap-2">
-        <JoluButton variant="outline" aria-pressed={hidden} onClick={onTogglePrivacy}>
+        {batchControl}
+        <JoluButton variant="outline" disabled={disabled} aria-pressed={hidden} onClick={onTogglePrivacy}>
           {hidden ? <ScanEye aria-hidden strokeWidth={1.6} /> : <EyeClosed aria-hidden strokeWidth={1.6} />}{hidden ? "显示敏感信息" : "隐藏敏感信息"}
         </JoluButton>
-        <JoluButton variant="primary" onClick={onAdd}><Plus aria-hidden className="!text-[#071B10]" />添加账号</JoluButton>
+        <JoluButton variant="primary" disabled={disabled || addDisabled} onClick={onAdd}><Plus aria-hidden className="!text-[#071B10]" />添加账号</JoluButton>
       </div>
     </div>
   )
@@ -301,9 +364,15 @@ function EmptyState({ title, desc, action }: { title: string; desc: string; acti
   )
 }
 
-function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }: {
+function AccountCard({ account, current, located, selecting = false, selected = false, disabled = false, selectionLabel, onToggle, onRemove, onPromote, onEdit, onResume }: {
   account: Connection
   current: boolean
+  located?: boolean
+  selecting?: boolean
+  selected?: boolean
+  disabled?: boolean
+  selectionLabel?: string
+  onToggle?: () => void
   onRemove: () => void
   onPromote: () => void
   onEdit: () => void
@@ -329,8 +398,9 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
   const emptyReason=isApi && balance.state && balance.state.state!=="ok" ? balance.state.reason : quota.state && quota.state.state!=="ok" ? quota.state.reason : "供应商未返回可展示的额度或余额"
   const name = displayName(account, hidden)
   return (
-    <article role="listitem" data-account-card className={cn("flex h-full min-h-0 min-w-0 flex-col gap-1.5 rounded-xl border bg-jolu-bg p-3", current ? "border-jolu-accent" : "border-jolu-border")}>
+    <article role="listitem" data-account-card data-account-id={account.id} data-account-located={located ? "true" : undefined} className={cn("flex h-full min-h-0 min-w-0 flex-col gap-1.5 rounded-xl border bg-jolu-bg p-3", current ? "border-jolu-accent" : "border-jolu-border", located && "ring-2 ring-jolu-accent ring-inset")}>
       <div className="flex h-8 shrink-0 items-center gap-2">
+        {selecting && <input type="checkbox" aria-label={selectionLabel ?? "选择账号"} checked={selected} disabled={disabled} onChange={onToggle} className="size-4 shrink-0 cursor-pointer accent-jolu-accent disabled:cursor-default" />}
         <span className="grid size-6 shrink-0 place-items-center"><PlatformLogo platform={account.platformId} size={22} /></span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[13px] font-semibold text-jolu-text" title={hidden ? undefined : account.baseName}>{name !== account.baseName ? <PrivacyMosaic label="账号名称" length={account.baseName.length} /> : name}</span>
@@ -342,10 +412,10 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
       {isApi && account.baseUrl && <SensitiveValue label="服务地址" icon={Globe} value={account.baseUrl} compact />}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden" data-account-summary>
         {(!isApi || policy.expiresAt) && <SubscriptionExpiry account={account} quota={quota} compact />}
-        {paused ? <div className="flex flex-col items-start gap-2 rounded-lg bg-jolu-side p-2.5 text-[11px] text-jolu-muted"><span>已暂停查询，配置与历史保留。</span><JoluButton size="sm" variant="soft" disabled={!isTauri} onClick={onResume}>恢复查询</JoluButton></div> : <>
+        {paused ? <div className="flex flex-col items-start gap-2 rounded-lg bg-jolu-side p-2.5 text-[11px] text-jolu-muted"><span>已暂停查询，配置与历史保留。</span><JoluButton size="sm" variant="soft" disabled={!isTauri || selecting || disabled} onClick={onResume}>恢复查询</JoluButton></div> : <>
           {policy.showBalance && <ApiMetrics account={account} balance={balance} compact />}
           {policy.showQuota && (!isApi || !policy.showBalance) && <SubscriptionMetrics account={account} quota={quota} compact limit={isApi ? 1 : 2} />}
-          {!isApi && policy.resetCredits && <ResetCreditsMetrics quota={quota} compact />}
+          {!isApi && policy.resetCredits && <ResetCreditsMetrics quota={quota} compact disabled={disabled} />}
           {!policy.showQuota && !policy.showBalance && !policy.resetCredits && <p className="line-clamp-3 text-[11px] leading-relaxed text-jolu-muted">{hidden ? redactAccountMessage(emptyReason) : emptyReason}</p>}
         </>}
         {isApi && <div className="mt-auto flex min-w-0 shrink-0 flex-col gap-1.5">
@@ -353,7 +423,7 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
           {account.masked && <SensitiveValue label="Key 标识" icon={KeyRound} value={account.masked} compact />}
         </div>}
       </div>
-      <CardActions account={account} paused={paused} refresh={refresh} hasQuota={policy.showQuota} canPromote={canPromote} onPromote={onPromote} onEdit={onEdit} onRemove={onRemove} onDetails={()=>setDetailsOpen(true)} />
+      <CardActions account={account} paused={paused} refresh={refresh} hasQuota={policy.showQuota} canPromote={canPromote} readOnly={selecting || disabled} onPromote={onPromote} onEdit={onEdit} onRemove={onRemove} onDetails={()=>setDetailsOpen(true)} />
       {detailsOpen && <ConfirmShell title="账号详情" subtitle={`${displayName(account,hidden)} · ${entry.name}`} onClose={()=>setDetailsOpen(false)} busy={false} footer={<JoluButton variant="neutral" onClick={()=>setDetailsOpen(false)}>关闭</JoluButton>}>
         <div className="flex max-h-[calc(100dvh-250px)] min-h-0 flex-col gap-4 overflow-y-auto pr-1" data-account-details>
           {email && <SensitiveValue label="邮箱 / 账号" value={email} />}
@@ -361,7 +431,7 @@ function AccountCard({ account, current, onRemove, onPromote, onEdit, onResume }
           {paused ? <p className="text-xs text-jolu-muted">已暂停查询，额度与余额不更新。</p> : <>
             {(policy.showQuota || account.kind === "auth") && <SubscriptionMetrics account={account} quota={quota} />}
             {queries.balance && <ApiMetrics account={account} balance={balance} />}
-            {policy.resetCredits && <ResetCreditsMetrics quota={quota} />}
+            {policy.resetCredits && <ResetCreditsMetrics quota={quota} disabled={disabled} />}
           </>}
           {account.baseUrl && <SensitiveValue label="Base URL" icon={Globe} value={account.baseUrl} />}
           {account.protocol && <Stat label="服务协议" value={protocolLabel(account.protocol)} />}
@@ -429,14 +499,14 @@ function SubscriptionMetrics({ account, quota, compact=false, limit=2 }: { accou
 }
 
 /** 没有真实重置卡对象就不挂载此区域，零值仍正常显示。 */
-function ResetCreditsMetrics({ quota,compact=false }: { quota: QuotaResult; compact?:boolean }) {
+function ResetCreditsMetrics({ quota,compact=false,disabled=false }: { quota: QuotaResult; compact?:boolean;disabled?:boolean }) {
   const [checkingCards, setCheckingCards] = useState(false)
   const credits = quota.state?.state === "ok" ? quota.state.account?.reset_credits : null
   if(!credits) return null
   const text=resetCreditsText(credits,compact)
   return <div className="flex shrink-0 items-center gap-1.5 rounded-[7px] bg-jolu-side px-2 py-1 text-[10px] text-jolu-muted">
     <Ticket aria-hidden className="size-3.5 shrink-0" /><span className="shrink-0">重置卡</span><span className="min-w-0 flex-1 truncate" title={resetCreditsText(credits)}>{text}</span>
-    <JoluButton size="sm" variant="soft" className={compact?"!size-6 !p-0":undefined} aria-label="查询重置卡" disabled={!isTauri || checkingCards || quota.loading} onClick={()=>{setCheckingCards(true);void quota.refresh().finally(()=>setCheckingCards(false))}}>{checkingCards ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}{!compact&&"查询"}</JoluButton>
+    <JoluButton size="sm" variant="soft" className={compact?"!size-6 !p-0":undefined} aria-label="查询重置卡" disabled={disabled || !isTauri || checkingCards || quota.loading} onClick={()=>{setCheckingCards(true);void quota.refresh().finally(()=>setCheckingCards(false))}}>{checkingCards ? <LoaderCircle aria-hidden className="animate-spin" /> : <RefreshCw aria-hidden />}{!compact&&"查询"}</JoluButton>
   </div>
 }
 
@@ -476,12 +546,13 @@ function ApiMetrics({ account, balance,compact=false }: { account: Connection; b
   </>
 }
 
-function CardActions({ account, paused, refresh, hasQuota, canPromote, onPromote, onEdit, onRemove,onDetails }: {
+function CardActions({ account, paused, refresh, hasQuota, canPromote, readOnly = false, onPromote, onEdit, onRemove,onDetails }: {
   account: Connection
   paused: boolean
   refresh: QuotaResult | BalanceResult | null
   hasQuota: boolean
   canPromote: boolean
+  readOnly?: boolean
   onPromote: () => void
   onEdit: () => void
   onRemove: () => void
@@ -493,6 +564,7 @@ function CardActions({ account, paused, refresh, hasQuota, canPromote, onPromote
         {paused ? "暂停查询" : refresh?.stale ? "刷新失败 · 上次结果" : refresh?.fetchedAt ? formatSyncedAt(refresh.fetchedAt, new Date(), hasQuota ? "" : "余额") : account.lastSyncText}
       </span>
       <JoluButton size="sm" variant="neutral" className="!px-2" aria-label="查看账号详情" onClick={onDetails}>详情</JoluButton>
+      {!readOnly && <>
       {canPromote && <Tip label="设置为使用"><JoluButton size="sm" variant="soft" className="!w-8 !px-0" aria-label="设置为使用" disabled={!isTauri} onClick={onPromote}><Check aria-hidden /><span className="sr-only">设置为使用</span></JoluButton></Tip>}
       {refresh && <RefreshButton label={hasQuota ? "刷新当前账号" : "刷新余额"} result={refresh} />}
       {/* 编辑入口位置待确认：Jolu.pen 画板 27 有编辑弹窗，但账号卡片上未画入口 */}
@@ -516,6 +588,7 @@ function CardActions({ account, paused, refresh, hasQuota, canPromote, onPromote
           <Trash2 aria-hidden className="size-4" />
         </button>
       </Tip>
+      </>}
     </div>
   )
 }

@@ -32,6 +32,12 @@ mod pricing;
 mod proxy;
 mod proxy_config;
 mod quota;
+mod checkin_types;
+mod checkin_stats;
+mod checkin_workbuddy;
+mod checkin_qoder;
+mod checkin_trae;
+mod daily_checkin;
 mod coding_plan;
 mod grok_quota;
 mod zcode_quota;
@@ -429,6 +435,7 @@ static COLLECTION_STATUS: LazyLock<Mutex<CollectionStatus>> = LazyLock::new(|| M
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum MainIntent {
+    Providers { connection_id: String },
     Overview { settings: settings::Settings },
     Settings { section: String },
     About { version: String },
@@ -1526,7 +1533,7 @@ async fn connection_balance(app: tauri::AppHandle, db: State<'_, Db>, id: String
     let changed = with_database(pool, move |conn| connections::record_query_result(conn, &update_id, &expected, outcome)).await?;
     if changed { let _ = app.emit("connections-changed", ()); }
     // 仅仍属于当前凭证的余额可以触发提醒。
-    if let quota::BalanceState::Ok { balance, currency, .. } = &state { notify::check_balance(&app, &id, &c.name, *balance, currency); }
+    if let quota::BalanceState::Ok { balance, currency, .. } = &state { notify::check_balance(&app, &id, &c.name, &c.platform, *balance, currency); }
     Ok(state)
 }
 
@@ -2101,7 +2108,7 @@ async fn read_local_connections(app: tauri::AppHandle, db: State<'_, Db>, platfo
         Ok::<_, String>((inputs, prepared))
     }).await.map_err(|e| e.to_string())??;
     let result = with_database(db.0.clone(), move |conn| {
-        // 用户在添加时填了名称就覆盖自动生成名；校验失败在这里整体报错，不写库
+        // 订阅自动识别账号；API Key 可用自定义服务名，校验失败则不写库。
         let inputs = connections::with_custom_name(inputs, name)?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut summary = LocalReadSummary { added: 0, existing: 0, warnings: vec![] };
@@ -2885,6 +2892,9 @@ pub fn run() {
             connection_kind,
             source_metrics,
             list_connections,
+            daily_checkin::daily_checkin_overview,
+            daily_checkin::daily_checkin_status,
+            daily_checkin::daily_checkin_claim,
             add_connection,
             update_connection,
             enable_connection,
@@ -2961,6 +2971,7 @@ pub fn run() {
             set_theme,
             set_display_preferences,
             set_balance_alert,
+            notify::take_app_notices,
             set_retention_days,
             cleanup_preview,
             cleanup_history,

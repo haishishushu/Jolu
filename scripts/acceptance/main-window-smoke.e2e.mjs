@@ -1,4 +1,4 @@
-// 主窗口冒烟验收：通过 WebView2 远程调试口驱动隔离运行的开发版应用，依次打开侧栏七个页面。
+// 主窗口冒烟验收：通过 WebView2 远程调试口驱动隔离运行的开发版应用，依次打开侧栏八个页面。
 // 每页检查：没有「读取失败」「扫描失败」「刷新失败」；「正在读取」在 10 秒内消失；期间控制台没有 error、页面没有未捕获异常。
 // 截图保存到 output/acceptance/main-window/<页面>.png。
 // 前置：按 README「隔离桌面流程」启动应用，并在能解析 `playwright` 或 `playwright-core` 的目录下运行。
@@ -16,6 +16,7 @@ const SETTLE_MS = 1_500
 const PAGES = [
   ["island", "灵动岛"],
   ["providers", "供应商"],
+  ["checkin", "一键签到"],
   ["usage", "用量统计"],
   ["sessions", "会话线程"],
   ["automation", "自动化"],

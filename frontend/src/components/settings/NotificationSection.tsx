@@ -10,24 +10,23 @@ import { ActionButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 type Cfg = ReturnType<typeof useSettings>
 type SetDirty = (key: string, dirty: boolean) => void
 
-/** 通知（画板 94）：免打扰、余额提醒与自动化任务提醒；系统通知由后端发出；当前插件版本不支持 Windows 点击回调，正文写明任务名 */
+/** 通知（画板 94）：免打扰、余额提醒与自动化任务提醒；前台显示卡片，后台系统通知支持定位账号或任务。 */
 export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: SetDirty }) {
   const toast = useToast()
   const s = cfg.settings
   const disabled = !cfg.ready
   const saved = s.balance_alert_threshold
-  const [amount, setAmount] = useState(saved == null ? "5.00" : saved.toFixed(2))
-  const [currency, setCurrency] = useState(s.balance_alert_currency)
+  const [amount, setAmount] = useState(String(saved ?? 5))
+  const currency = s.balance_alert_currency
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
-    if (saved != null) setAmount(saved.toFixed(2))
-    setCurrency(s.balance_alert_currency)
-  }, [saved, s.balance_alert_currency])
+    if (saved != null) setAmount(String(saved))
+  }, [saved])
 
   const value = parseThreshold(amount)
-  const dirty = saved != null && (value !== saved || currency !== s.balance_alert_currency)
+  const dirty = saved != null && value !== saved
   useEffect(() => { setDirty("balance-alert", dirty) }, [dirty, setDirty])
   useEffect(() => () => setDirty("balance-alert", false), [setDirty])
 
@@ -78,13 +77,12 @@ export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: Set
               <span className="text-[13px] font-medium text-jolu-text">提醒阈值</span>
               <span className="text-[11px] text-jolu-muted">按账户原币种比较，不自动换算汇率。</span>
             </div>
-            <span className={cn("inline-flex h-[34px] items-center rounded-lg border bg-jolu-bg pl-3 pr-2 focus-within:border-jolu-accent", message ? "border-jolu-danger" : "border-jolu-border")}>
-              <input aria-label="提醒阈值" inputMode="decimal" value={amount} disabled={busy}
+            <span className={cn("inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-lg border bg-jolu-bg px-3 focus-within:border-jolu-accent", message ? "border-jolu-danger" : "border-jolu-border")}>
+              <input aria-label="提醒阈值" inputMode="decimal" value={amount} disabled={disabled || busy}
                 onChange={(e) => { setAmount(e.target.value); setMessage(null) }}
-                className="tnum w-16 bg-transparent text-right text-xs text-jolu-text outline-none" />
-              <input aria-label="币种" value={currency} maxLength={3} disabled={busy}
-                onChange={(e) => { setCurrency(e.target.value.toUpperCase()); setMessage(null) }}
-                className="ml-1.5 w-9 bg-transparent text-xs text-jolu-text outline-none" />
+                style={{ width: `calc(${Math.max(1, amount.length)}ch + 2px)`, maxWidth: "28ch" }}
+                className="tnum min-w-0 shrink-0 bg-transparent p-0 text-right text-xs text-jolu-text outline-none" />
+              <span aria-label="币种" className="select-none text-xs text-jolu-muted">{currency}</span>
             </span>
             <ActionButton tone="soft" busy={busy} disabled={disabled || value === null || (saved != null && !dirty)} onClick={() => value !== null && save(value)}>保存阈值</ActionButton>
           </div>
@@ -122,7 +120,7 @@ export function NotificationSection({ cfg, setDirty }: { cfg: Cfg; setDirty: Set
 
       <div className="flex items-start gap-2.5 rounded-[9px] bg-jolu-side p-3.5 text-[11px] text-jolu-muted">
         <Info aria-hidden className="size-4 shrink-0" />
-        系统通知权限关闭时显示引导入口；免打扰期间不重复弹出提醒。
+        余额提醒仅比较相同币种；免打扰期间不弹出通知，结束后不补弹。
       </div>
     </>
   )

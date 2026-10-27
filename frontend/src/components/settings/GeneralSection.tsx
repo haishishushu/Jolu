@@ -47,9 +47,9 @@ export function GeneralSection({ cfg }: { cfg: Cfg }) {
 
   const refreshNow = () => {
     setRefreshing(true)
-    api.islandAction("refresh")
+    return api.islandAction("refresh")
       .then(() => setRefreshedAt(new Date()))
-      .catch((reason) => toast.danger("刷新失败", String(reason)))
+      .catch((reason) => toast.show({ tone: "danger", title: "刷新失败", detail: String(reason), action: { label: "重新刷新", onClick: refreshNow } }))
       .finally(() => setRefreshing(false))
   }
 

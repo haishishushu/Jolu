@@ -254,17 +254,18 @@ function RowMenu({ name, canDestroy, onDestroy }: { name: string; canDestroy: bo
 function ActionButton({ action, icon, label, done }: { action: "refresh" | "reset_layout"; icon: ReactNode; label: string; done: string }) {
   const toast = useToast()
   const [busy, setBusy] = useState(false)
+  const run = () => {
+    setBusy(true)
+    return api.islandAction(action)
+      .then(() => toast.success(done))
+      .catch((reason) => toast.show({ tone: "danger", title: `${label}失败`, detail: String(reason), action: { label: "重试", onClick: run } }))
+      .finally(() => setBusy(false))
+  }
   return (
     <button
       type="button"
       disabled={busy || !isTauri}
-      onClick={() => {
-        setBusy(true)
-        void api.islandAction(action)
-          .then(() => toast.success(done))
-          .catch((reason) => toast.danger(`${label}失败`, String(reason)))
-          .finally(() => setBusy(false))
-      }}
+      onClick={() => void run()}
       className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-jolu-side px-2.5 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-45 [&_svg]:text-jolu-muted"
     >
       {busy ? <LoaderCircle aria-hidden className="size-4 animate-spin" /> : icon}

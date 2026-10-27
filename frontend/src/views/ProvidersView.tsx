@@ -1,14 +1,13 @@
 import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Blocks, Code, Hexagon, Info, Plus, UsersRound } from "lucide-react"
-import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { PROVIDERS, canConnect, connectionBadge, connectionProviderId, type ProviderId, type ProviderEntry } from "@/lib/providerCatalog"
 import { useConnections } from "@/hooks/useConnections"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { Tip } from "@/components/ui/Tip"
-import { ConnectDialog } from "@/components/providers/ConnectDialog"
+import { AccountConnectDialog } from "@/components/providers/AccountConnectDialog"
 import { AccountsPanel } from "@/components/providers/AccountsPanel"
 import type { Connection } from "@/types"
 
@@ -17,23 +16,11 @@ export type ProvidersTab = "connect" | "accounts"
 /**
  * 供应商页（Jolu.pen 模块 B）：「供应商连接」画板 05 与「账号管理」画板 07–10 两个页签。
  */
-export function ProvidersView({ initialTab = "connect" }: { initialTab?: ProvidersTab }) {
-  const [tab, setTab] = useState<ProvidersTab>(initialTab)
+export function ProvidersView({ initialTab = "connect", accountTarget, onAccountTargetHandled }: { initialTab?: ProvidersTab; accountTarget?: { connectionId: string; nonce: number } | null; onAccountTargetHandled?: () => void }) {
+  const [tab, setTab] = useState<ProvidersTab>(accountTarget ? "accounts" : initialTab)
   const conn = useConnections()
   const [connecting, setConnecting] = useState<ProviderId | null>(null)
-
-  /**
-   * 订阅连接保存：本机读取入库的连接默认暂停查询（旧界面需手动启用）。新稿里点「保存连接」即表示同意接入，
-   * 所以只恢复这次新增的连接；已存在的连接保持原状态。
-   */
-  const saveLocal = async (platform: string, kind: "auth" | "api", name?: string, edition?: string) => {
-    const before = new Set((await api.listConnections()).map((c) => c.id))
-    const summary = await conn.readLocal(platform, kind, name, edition)
-    const added = (await api.listConnections()).filter((c) => !before.has(c.id) && c.platform === platform && c.kind === kind && (!edition || c.edition === edition))
-    await Promise.all(added.map((c) => api.setConnectionPaused(c.id, false)))
-    if (added.length) await conn.reload()
-    return summary
-  }
+  useEffect(() => { if (accountTarget) setTab("accounts") }, [accountTarget])
 
   return (
     <div className={cn("flex w-full flex-col gap-3", tab === "accounts" && "h-full min-h-0")}>
@@ -46,15 +33,15 @@ export function ProvidersView({ initialTab = "connect" }: { initialTab?: Provide
       {conn.loading && !conn.connections.length && !conn.error ? <LoadingSurface className={tab === "accounts" ? "min-h-0 flex-1" : undefined} layout={tab === "connect" ? "providers" : "accounts"} label="正在读取供应商连接" /> : tab === "connect" ? (
         <ConnectGrid counts={countByPlatform(conn.connections)} loading={conn.loading} error={conn.error} onConnect={setConnecting} onRetry={() => void conn.reload()} />
       ) : (
-        <AccountsPanel conn={conn} onConnect={setConnecting} onBrowseProviders={() => setTab("connect")} />
+        <AccountsPanel conn={conn} onConnect={setConnecting} target={accountTarget} onTargetHandled={onAccountTargetHandled} />
       )}
       </ContentTransition>
 
       {connecting && (
-        <ConnectDialog
+        <AccountConnectDialog
           platform={connecting}
-          actions={{ connections: conn.connections, readLocal: saveLocal, add: conn.add }}
           onClose={() => setConnecting(null)}
+          onSaved={() => void conn.reload()}
         />
       )}
     </div>

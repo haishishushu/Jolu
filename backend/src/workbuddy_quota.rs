@@ -11,7 +11,7 @@
 //! 纪律：只读查询语义的 POST（请求体为空对象）；地址固定为官方域名，不按文件里的域名拼接；
 //! 新版 sym-v1 凭证通过对应官方客户端运行时在内存中解码；不刷新、不写回令牌。
 
-use crate::quota::{self, AccountMetadata, HttpOutcome, QuotaState, QuotaWindow};
+use crate::quota::{self, AccountMetadata, HttpOutcome, QuotaAmountRange, QuotaState, QuotaWindow};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -223,10 +223,12 @@ fn parse_summary(body: &Value, now: chrono::DateTime<chrono::Utc>) -> QuotaState
         return QuotaState::Failed { reason: "WorkBuddy 积分响应缺少资源包列表".into() };
     };
     let (mut total, mut remaining, mut seen) = (0.0, 0.0, false);
+    let mut amount_ranges = Vec::new();
+    let mut has_partial_package = false;
     let mut reset: Option<chrono::DateTime<chrono::FixedOffset>> = None;
     let mut plan = ["/data", "/data/data", "/data/Response/Data", "/data/data/Response/Data"].iter()
         .find_map(|prefix| text(body.pointer(prefix)?, "SubscriptionPackageName")).map(str::to_string);
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         // 官网还可能返回其他单位的资源，不能把次数、容量等累加成积分。
         if let Some(unit) = item.get("CapacityUnit").filter(|unit| !unit.is_null()) {
             match unit.as_str() {
@@ -244,8 +246,27 @@ fn parse_summary(body: &Value, now: chrono::DateTime<chrono::Utc>) -> QuotaState
         let (Ok(size), Ok(left), Ok(used)) = (capacity(item, "Size"), capacity(item, "Remain"), capacity(item, "Used")) else {
             return invalid();
         };
-        let Some(size) = size.or_else(|| left.zip(used).map(|(l, u)| l + u)) else { return invalid() };
-        let Some(left) = left.or_else(|| used.map(|used| size - used)) else { return invalid() };
+        if size.is_none() && left.is_none() { return invalid(); }
+        amount_ranges.push(QuotaAmountRange {
+            key: format!("workbuddy:package:{index}"),
+            name: text(item, "SubscriptionPackageName").map(str::to_string)
+                .unwrap_or_else(|| format!("积分资源包 {}", index + 1)),
+            total: size,
+            remaining: left,
+            unit: "credits".into(),
+            used,
+            calculated_remaining: None,
+            unlimited: false,
+        });
+        if plan.is_none() { plan = text(item, "SubscriptionPackageName").map(str::to_string); }
+        let Some(size) = size.or_else(|| left.zip(used).map(|(l, u)| l + u)) else {
+            has_partial_package = true;
+            continue;
+        };
+        let Some(left) = left.or_else(|| used.map(|used| size - used)) else {
+            has_partial_package = true;
+            continue;
+        };
         if !size.is_finite() || left < 0.0 || left > size || used.is_some_and(|used| {
             used > size || (size - left - used).abs() > 1e-9 * size.max(1.0)
         }) {
@@ -256,10 +277,12 @@ fn parse_summary(body: &Value, now: chrono::DateTime<chrono::Utc>) -> QuotaState
         remaining += left;
         if !total.is_finite() || !remaining.is_finite() { return invalid(); }
         if left > 0.0 { if let Some(end) = end { reset = Some(reset.map_or(end, |r| r.min(end))); } }
-        if plan.is_none() { plan = text(item, "SubscriptionPackageName").map(str::to_string); }
     }
-    if !seen {
-        return QuotaState::Ok { windows: Vec::new(), plan, account: None };
+    // 存在不完整资源包时，只返回各包已知的原始值，不把其余包的合计冒充完整账号额度。
+    if !seen || has_partial_package {
+        return QuotaState::Ok { windows: Vec::new(), plan, account: Some(AccountMetadata {
+            amount_ranges: Some(amount_ranges), ..AccountMetadata::default()
+        }) };
     }
     let used = total - remaining;
     let window = QuotaWindow {
@@ -271,7 +294,9 @@ fn parse_summary(body: &Value, now: chrono::DateTime<chrono::Utc>) -> QuotaState
         // CycleEndTime 是本周期最后一秒，下一秒才重置
         resets_at: reset.and_then(|end| end.checked_add_signed(chrono::Duration::seconds(1))).map(|end| end.to_rfc3339()),
     };
-    QuotaState::Ok { windows: vec![window], plan, account: None }
+    QuotaState::Ok { windows: vec![window], plan, account: Some(AccountMetadata {
+        amount_ranges: Some(amount_ranges), ..AccountMetadata::default()
+    }) }
 }
 
 // WorkBuddy 官方客户端 account.js 的付费/免费资源包编码；仅用于查询周期，不据此推断套餐。
@@ -386,7 +411,7 @@ fn query(session: Session) -> QuotaState {
         };
         let mut state = parse_summary(&value, chrono::Utc::now());
         if let QuotaState::Ok { windows,account, .. } = &mut state {
-            *account = Some(AccountMetadata { email, ..AccountMetadata::default() });
+            account.get_or_insert_with(AccountMetadata::default).email = email;
             if let Some(window)=windows.iter_mut().find(|window|window.key=="credits"&&window.resets_at.is_none()) {
                 window.resets_at=cycle_reset(&client,base,&token,&headers,&value);
             }
@@ -426,6 +451,28 @@ fn source_session(dir: &Path, source_id: &str, now: chrono::DateTime<chrono::Utc
     let value = serde_json::from_str::<Value>(&raw)
         .map_err(|_| QuotaState::Failed { reason: "WorkBuddy 登录文件格式无法识别".into() })?;
     resolve_session(edition, value, now)
+}
+
+/// 签到仅在后端借用已验证的国内会话，不实现 Debug/序列化，不暴露到前端。
+pub(crate) struct CheckinCredentials {
+    pub(crate) token: String,
+    pub(crate) headers: Vec<(&'static str, String)>,
+    pub(crate) account: Option<String>,
+}
+
+pub(crate) fn native_checkin_credentials() -> Result<CheckinCredentials, QuotaState> {
+    if crate::validation::isolated() {
+        return Err(QuotaState::Unauthorized { reason: "隔离环境不读取本机 WorkBuddy 登录".into() });
+    }
+    let dir = auth_dir().ok_or_else(|| QuotaState::Unauthorized { reason: "无法定位 WorkBuddy 登录目录".into() })?;
+    checkin_credentials(source_session(&dir, "native:workbuddy:main", chrono::Utc::now())?)
+}
+
+fn checkin_credentials(session: Session) -> Result<CheckinCredentials, QuotaState> {
+    match session {
+        Session::Ready { token, headers, email, .. } => Ok(CheckinCredentials { token, headers, account: email }),
+        _ => Err(QuotaState::Unauthorized { reason: "未读取到有效 WorkBuddy 登录".into() }),
+    }
 }
 
 pub(crate) fn source_quota(source_id: &str) -> QuotaState {
@@ -482,6 +529,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn checkin_credentials_keep_account_from_the_same_verified_session() {
+        for (token, uid, email) in [
+            ("synthetic-first", "synthetic-user-one", Some("first@example.invalid")),
+            ("synthetic-second", "synthetic-user-two", Some("second@example.invalid")),
+            ("synthetic-no-email", "synthetic-user-three", None),
+        ] {
+            let session = parse_session(Edition::Cn, &json!({
+                "auth":{"accessToken":token,"domain":"www.workbuddy.cn"},
+                "account":{"uid":uid,"email":email}
+            }), now());
+            let credentials = checkin_credentials(session)
+                .unwrap_or_else(|_| panic!("合成会话应有效"));
+            assert_eq!(credentials.token, token);
+            assert!(credentials.headers.contains(&("X-User-Id", uid.into())));
+            assert_eq!(credentials.account.as_deref(), email);
+        }
+    }
+
+    #[test]
     fn browser_authorization_requires_correct_region_and_unexpired_session() {
         let session=crate::workbuddy_browser_auth::Session{token:"synthetic-session".into(),domain:"www.workbuddy.cn".into(),user_id:"user".into(),enterprise_id:None,email:None,expires_at:Some(1)};
         assert!(matches!(authorized_quota("unknown",&session),QuotaState::Unsupported{..}));
@@ -499,6 +565,97 @@ mod tests {
         let QuotaState::Ok { windows, .. } = parse_summary(&body, now()) else { panic!() };
         assert_eq!(windows[0].amount_text.as_deref(), Some("60.00 / 100.00 credits"));
         assert_eq!(windows[0].remaining_text.as_deref(), Some("剩余 40.00 credits"));
+    }
+
+    #[test]
+    fn amount_ranges_keep_missing_source_capacities_unknown() {
+        for (item, total, remaining, used) in [
+            (json!({"CycleTotalCapacity":100,"CycleUsedCapacity":60}), json!(100.0), Value::Null, Some(60.0)),
+            (json!({"CycleRemainCapacity":40,"CycleUsedCapacity":60}), Value::Null, json!(40.0), Some(60.0)),
+            (json!({"CycleTotalCapacity":0,"CycleRemainCapacity":0}), json!(0.0), json!(0.0), None),
+        ] {
+            let value = serde_json::to_value(parse_summary(&json!({"code":0,"data":{"Packages":[item]}}), now())).unwrap();
+            assert_eq!(value["state"], "ok");
+            let mut expected = json!([{
+                "key":"workbuddy:package:0", "name":"积分资源包 1", "total":total,
+                "remaining":remaining, "unit":"credits", "unlimited":false
+            }]);
+            if let Some(used) = used { expected[0]["used"] = json!(used); }
+            assert_eq!(value["account"]["amount_ranges"], expected);
+        }
+    }
+
+    #[test]
+    fn amount_ranges_keep_a_package_with_only_total() {
+        let body = json!({"code":0,"data":{"Packages":[{"CycleTotalCapacity":100}]}});
+        let value = serde_json::to_value(parse_summary(&body, now())).unwrap();
+        assert_eq!(value["state"], "ok");
+        assert_eq!(value["account"]["amount_ranges"], json!([
+            {"key":"workbuddy:package:0","name":"积分资源包 1","total":100.0,"remaining":null,"unit":"credits","unlimited":false}
+        ]));
+        assert_eq!(value["windows"], json!([]));
+    }
+
+    #[test]
+    fn amount_ranges_keep_remaining_only_without_reporting_a_partial_aggregate() {
+        for packages in [
+            json!([{"CycleRemainCapacity":40}]),
+            json!([{"CycleRemainCapacity":40},{"CycleTotalCapacity":50,"CycleRemainCapacity":20}]),
+        ] {
+            let value = serde_json::to_value(parse_summary(&json!({"code":0,"data":{"Packages":packages}}), now())).unwrap();
+            assert_eq!(value["state"], "ok");
+            assert_eq!(value["account"]["amount_ranges"][0], json!({
+                "key":"workbuddy:package:0","name":"积分资源包 1","total":null,"remaining":40.0,"unit":"credits","unlimited":false
+            }));
+            assert_eq!(value["windows"], json!([]));
+            if packages.as_array().unwrap().len() == 2 {
+                assert_eq!(value["account"]["amount_ranges"][1], json!({
+                    "key":"workbuddy:package:1","name":"积分资源包 2","total":50.0,"remaining":20.0,"unit":"credits","unlimited":false
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn amount_ranges_preserve_each_live_credit_package_and_precision() {
+        let body = json!({"code":0,"data":{"Packages":[
+            {"SubscriptionPackageName":"套餐积分","CapacityUnit":"credits","CycleCapacitySizePrecise":"100.123456","CycleCapacityRemainPrecise":"40.123456","PackageCode":"private-code","Uid":"private-user","DeviceId":"private-device"},
+            {"CapacityUnit":"requests","CycleTotalCapacity":1000,"CycleRemainCapacity":900},
+            {"SubscriptionPackageName":"签到奖励","CapacityUnit":"CREDITS","CycleTotalCapacity":20,"CycleRemainCapacity":0},
+            {"CapacityUnit":"credits","CycleTotalCapacity":50,"CycleRemainCapacity":50,"CycleEndTime":"2026-10-01 00:00:00"},
+            {"CapacityUnit":"bytes"}
+        ]}});
+        let value = serde_json::to_value(parse_summary(&body, now())).unwrap();
+        assert_eq!(value["account"]["amount_ranges"], json!([
+            {"key":"workbuddy:package:0","name":"套餐积分","total":100.123456,"remaining":40.123456,"unit":"credits","unlimited":false},
+            {"key":"workbuddy:package:2","name":"签到奖励","total":20.0,"remaining":0.0,"unit":"credits","unlimited":false}
+        ]));
+        assert_eq!(value["windows"][0]["amount_text"], "80.00 / 120.12 credits");
+        assert_eq!(value["windows"][0]["remaining_text"], "剩余 40.12 credits");
+    }
+
+    #[test]
+    fn account_query_preserves_amount_ranges_when_adding_authorized_email() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base: &'static str = Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).unwrap();
+            assert!(std::str::from_utf8(&request[..count]).unwrap().starts_with("POST /billing/meter/get-user-resource-summary "));
+            let body = json!({"code":0,"data":{"Packages":[{"CycleTotalCapacity":100,"CycleRemainCapacity":0}]}}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let value = serde_json::to_value(query(Session::Ready {
+            edition: Edition::Cn, token: "synthetic-token".into(), base,
+            headers: vec![("X-User-Id", "synthetic-user".into())], email: Some("person@example.invalid".into()),
+        })).unwrap();
+        server.join().unwrap();
+        assert_eq!(value["account"]["email"], "person@example.invalid");
+        assert_eq!(value["account"]["amount_ranges"], json!([
+            {"key":"workbuddy:package:0","name":"积分资源包 1","total":100.0,"remaining":0.0,"unit":"credits","unlimited":false}
+        ]));
     }
 
     #[test]
@@ -634,9 +791,9 @@ mod tests {
     }
 
     #[test]
-    fn summary_rejects_missing_invalid_and_partial_capacities() {
+    fn summary_rejects_missing_or_invalid_capacities() {
         for item in [
-            json!({"CycleTotalCapacity":100}),
+            json!({"CycleUsedCapacity":60}),
             json!({"CycleTotalCapacity":100,"CycleRemainCapacity":-1}),
             json!({"CycleTotalCapacity":100,"CycleRemainCapacity":101}),
             json!({"CycleTotalCapacity":100,"CycleUsedCapacity":101}),

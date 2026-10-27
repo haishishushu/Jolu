@@ -13,13 +13,16 @@ assert.ok(['localhost','127.0.0.1'].includes(new URL(origin).hostname))
    const rows=entries.map(([id,platform,edition,kind])=>({id,platform,edition,kind,name:id==='codex'?'codex@example.test':id,label:'浏览器授权',masked:kind==='api'?'sk-****test':'',status:'connected',last_sync_text:'刚刚同步',base_url:kind==='api'?'https://synthetic.example/v1':null,model:kind==='api'?'synthetic-model':null,effort:null,context_1m:null,protocol:kind==='api'?'openai':null,service:null,account_email:kind==='auth'?`${id}@example.test`:null}))
    const win=(key,remaining=null)=>({key,window_name:key,used_percent:remaining===null?25:null,remaining_text:remaining,resets_at:'2026-11-30T10:00:00Z',amount_text:null})
    const settings={refresh_minutes:5,island_clones:[],default_page:'providers',last_page:'providers',main_zoom:100,list_density:'comfortable',reduce_motion:false,theme:'light',island_visible:true}
-   window.fixture={calls:[],callbacks:{},rows,expired:false,settings}
+   window.fixture={calls:[],callbacks:{},listeners:{},pendingNotices:[],nextIntent:null,rows,expired:false,settings}
+   window.fixture.emit=(event,payload)=>{for(const entry of Object.values(window.fixture.listeners))if(entry.event===event)window.fixture.callbacks[entry.handler]({event,id:entry.handler,payload})}
+   window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}}
    window.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'main'}},transformCallback:callback=>{const id=Object.keys(window.fixture.callbacks).length+1;window.fixture.callbacks[id]=callback;return id},unregisterCallback:()=>{},invoke:async(command,args)=>{
     window.fixture.calls.push({command,...args})
-    if(command==='plugin:event|listen')return 1
-    if(command==='plugin:event|unlisten')return
+    if(command==='plugin:event|listen'){window.fixture.listeners[args.handler]={event:args.event,handler:args.handler};return args.handler}
+    if(command==='plugin:event|unlisten'){delete window.fixture.listeners[args.eventId];return}
     if(command==='get_settings')return settings
-    if(command==='take_main_intent')return null
+    if(command==='take_main_intent'){const next=window.fixture.nextIntent;window.fixture.nextIntent=null;return next}
+    if(command==='take_app_notices')return window.fixture.pendingNotices.splice(0)
     if(command==='main_panel_ready'||command==='remember_page')return
     if(command==='plugin:window|is_visible')return true
     if(command==='plugin:window|is_minimized'||command==='plugin:window|is_maximized')return false
@@ -38,6 +41,7 @@ assert.ok(['localhost','127.0.0.1'].includes(new URL(origin).hostname))
    }}
   })
   await page.route('**/src/hooks/useSettings.ts*',r=>r.fulfill({contentType:'application/javascript',body:'export function useSettings(){return {settings:window.fixture.settings,ready:true}}'}))
+  await page.route('**/src/views/AutomationView.tsx*',r=>r.fulfill({contentType:'application/javascript',body:"import React from '/node_modules/.vite/deps/react.js';export function AutomationView(props){return React.createElement('div',{'data-notice-task-target':props.target?.taskId},'任务定位 '+props.target?.taskId)}"}))
   await page.route('**/account-cards-check',r=>r.fulfill({contentType:'text/html',body:`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="root"></div><script type="module">import R from '/@react-refresh';R.injectIntoGlobalHook(window);window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>t=>t;window.__vite_plugin_react_preamble_installed__=true;await import('/account-cards-module');</script></body></html>`}))
   await page.route('**/account-cards-module',r=>r.fulfill({contentType:'application/javascript',body:`
     import React from '/node_modules/.vite/deps/react.js';import ReactDOM from '/node_modules/.vite/deps/react-dom_client.js';
@@ -187,6 +191,61 @@ assert.ok(['localhost','127.0.0.1'].includes(new URL(origin).hostname))
   await page.getByRole('button',{name:'显示敏感信息',exact:true}).click()
   await cards.first().getByText('codex@example.test',{exact:true}).first().waitFor()
   assert.equal(await cards.locator('.privacy-mosaic').count(),0)
+  const notices=page.locator('[data-toast-tone]')
+  const enqueue=values=>page.evaluate(values=>{window.fixture.pendingNotices.push(...values);window.fixture.emit('app-notice',null)},values)
+  async function clearNotices(){
+    while(await notices.count()){
+      const id=await notices.first().getAttribute('data-toast-id'),item=page.locator(`[data-toast-id="${id}"]`)
+      try{await item.locator('button[aria-label^="关闭提示"]').click({timeout:1500})}catch(error){if(await item.count())throw error}
+      await item.waitFor({state:'detached'})
+    }
+  }
+  await clearNotices()
+  await page.waitForFunction(()=>Object.values(window.fixture.listeners).some(entry=>entry.event==='app-notice'))
+  await page.getByRole('button',{name:'Claude Code',exact:true}).click()
+  const balanceNotice={id:100,kind:'balance',connection_id:'api',connection_name:'开发连接',platform:'codex',remaining:8.5,currency:'USD',threshold:10}
+  await enqueue([balanceNotice])
+  await enqueue([balanceNotice])
+  const amountCard=page.locator('[data-balance-notice="true"]')
+  await amountCard.waitFor()
+  assert.equal(await amountCard.count(),1)
+  assert.match(await amountCard.locator('[data-balance-amount]').innerText(),/\$8\.50/)
+  await page.evaluate(()=>document.documentElement.classList.remove('dark'))
+  await page.screenshot({path:path.join(output,'balance-amount-card-light.png')})
+  await page.evaluate(()=>document.documentElement.classList.add('dark'))
+  await page.screenshot({path:path.join(output,'balance-amount-card-dark.png')})
+  await amountCard.getByRole('button',{name:'查看账号'}).click()
+  await page.locator('[data-account-id="api"][data-account-located="true"]').waitFor()
+  assert.equal(await cards.count(),14,'通知定位清除不相容的供应商/账号筛选')
+  await page.waitForFunction(()=>document.querySelector('[data-account-grid]').scrollTop>0)
+  await clearNotices()
+  const task=state=>({id:{resumed:101,completed:102,failed:103}[state],kind:'task',task_id:7,state,platform:'Claude Code',task_name:'通知验收任务',reason:state==='failed'?'合成失败原因':null})
+  await enqueue(['resumed','completed','failed'].map(task))
+  for(const [title,tone] of [['任务已继续','info'],['任务已完成','success'],['任务失败','danger']]){
+    const card=notices.filter({has:page.getByText(title,{exact:true})});await card.waitFor();assert.equal(await card.getAttribute('data-toast-tone'),tone)
+  }
+  await page.waitForFunction(()=>[...document.querySelectorAll('[data-toast-tone]')].every(item=>Number(getComputedStyle(item).opacity)>=0.99))
+  await page.screenshot({path:path.join(output,'task-notices.png')})
+  await clearNotices()
+  await cards.first().getByRole('button',{name:'查看账号详情',exact:true}).click()
+  const details=page.getByRole('dialog',{name:'账号详情',exact:true})
+  await details.waitFor()
+  await enqueue([{...task('failed'),id:104}])
+  await notices.filter({has:page.getByText('任务失败',{exact:true})}).getByRole('button',{name:'查看任务'}).click()
+  assert.equal(await details.count(),1,'通知操作不丢弃当前表单或详情弹窗')
+  await page.getByText('请先关闭当前弹窗',{exact:true}).waitFor()
+  await details.getByRole('button',{name:'关闭',exact:true}).last().click()
+  await details.waitFor({state:'detached'})
+  await page.getByRole('button',{name:'继续查看',exact:true}).click()
+  await page.locator('[data-notice-task-target="7"]').waitFor()
+  await clearNotices()
+  await page.evaluate(()=>{window.fixture.nextIntent={kind:'providers',connection_id:'custom'};window.fixture.emit('main-intent',null)})
+  await page.locator('[data-account-id="custom"][data-account-located="true"]').waitFor()
+  await enqueue([{...balanceNotice,id:105,connection_id:'deleted-api'}])
+  await page.getByRole('button',{name:'查看账号',exact:true}).click()
+  await page.getByText('该账号已不存在',{exact:true}).waitFor()
+  assert.deepEqual(errors,[])
+  console.log('PASS: balance amount card, event backfill/dedup, account filter reset and scroll target, task notice tones/actions, modal-safe deferred navigation, native click intent and deleted account')
   console.log('PASS: real main-window layout, eight first-screen cards, distinct Auth/API cards, type/provider/search intersections and clear, details, real zero, privacy-safe API metadata and scoped queries')
  }finally{await browser.close()}
 })().catch(error=>{console.error(error);process.exitCode=1})

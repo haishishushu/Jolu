@@ -193,6 +193,23 @@ pub struct QuotaWindow {
     pub resets_at: Option<String>,
 }
 
+/// 来源明确给出的独立额度范围；缺失的总量或剩余量不从其他字段推算。
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaAmountRange {
+    pub key: String,
+    pub name: String,
+    pub total: Option<f64>,
+    pub remaining: Option<f64>,
+    pub unit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<f64>,
+    /// 仅在来源总量、已用量均明确且相容时提供，界面必须标注计算。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calculated_remaining: Option<f64>,
+    /// 来源明确表示不限量，不能与缺总量混为一类。
+    pub unlimited: bool,
+}
+
 /// 账号信息保留来源。令牌快照只能提供历史到期记录，不能证明当前订阅有效。
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountMetadata {
@@ -204,10 +221,13 @@ pub struct AccountMetadata {
     /// 来源返回或本机客户端记录的账号标识（邮箱 / 用户名）；连接本身没有邮箱时用于展示
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// 精确额度的原始范围，供需要区分来源与推算值的展示使用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_ranges: Option<Vec<QuotaAmountRange>>,
 }
 impl Default for AccountMetadata {
     fn default() -> Self {
-        Self { subscription_status: "unknown", expires_at: None, subscription_source: "unavailable", observed_at: None, reset_credits: None, email: None }
+        Self { subscription_status: "unknown", expires_at: None, subscription_source: "unavailable", observed_at: None, reset_credits: None, email: None, amount_ranges: None }
     }
 }
 

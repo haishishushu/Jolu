@@ -19,6 +19,8 @@
 `*.e2e.mjs` 用 Playwright 的 `connectOverCDP` 直接连接 9337，不经过 playwright-cli，公共部分在 `cdp.mjs`（操作前核验数据库位于 `<仓库>/output/acceptance/profile/` 下，且所在目录有 `.acceptance-profile` 标记，否则直接退出）。仓库不依赖 Playwright：先在 output 下准备一个目录，例如 `output/acceptance/node` 里执行 `npm install playwright-core`，再在该目录里用绝对路径运行脚本。可选环境变量：`JOLU_CDP`（默认 `http://127.0.0.1:9337`）、`JOLU_DEV_URL`（默认 `http://localhost:5173`）。
 
 - `main-window-smoke.e2e.mjs`：经托盘同一路径（`menu_action open_main`）打开主窗口，依次点击侧栏七个页面。每页要求「正在读取」10 秒内消失、不出现「读取失败」「扫描失败」「刷新失败」（包括 toast）、控制台没有 error 且没有未捕获异常；截图保存到 output/acceptance/main-window/<页面>.png。任一页失败时退出码为 1，输出里列出每页的问题。
+- `app-notices-desktop.e2e.mjs`：需要隔离桌面及 `gateway.py`，验证真实余额查询→金额卡片→账号定位、持续低余额不重复、仅主窗口读取通知、免打扰抑制及结束后不补弹。只创建并清理本机合成网关连接、只修改隔离阈值；截图在 `output/acceptance/app-notices/`。不运行真实自动化或发送模型请求。
+- `reset-window-layout.e2e.mjs`：点击主面板「重置位置」，再经菜单与主面板命令重复重置，检查本体与分身解除停靠、隐藏主面板后仍可重置、默认尺寸恢复，以及窗口与 IPC 持续响应。仅在带标记的隔离实例运行；原生操作限时 8 秒，死锁时明确失败。
 - `four-connection-cost.e2e.mjs`：新建指向 `gateway.py` 的 Claude API 连接并设为灵动岛连接，把灵动岛切到自由位置，向隔离数据库 `requests` 表写入两条合成记录（每条 claude-sonnet-4 输入 100 万 Token，按价目表估算 $3.00）。每次写入后「恢复连接」，触发一次全局 `refresh-requested`（导入完成时发出的也是这个事件）。核对费用在同一个 DOM 节点上依次增加 $3.00；断开连接后显示「连接已断开，当前仅显示本机统计」，且仍保留所选连接。写库不经过导入代码：`import_data_file` 会弹系统文件框，无法自动化。所以「本机今日 Token」不会随之变化，脚本也不检查它。
 
 5173 被其他程序占用时，不要结束对方进程：用 `TAURI_CONFIG` 覆盖 devUrl，编译到单独的 target 目录。如果另一个 Jolu 正在运行，单实例锁会让隔离实例启动后立即退出，这时要同时覆盖 identifier。然后用 `-Executable` 启动：
@@ -44,6 +46,8 @@ Remove-Item Env:JOLU_DEV_URL                                 # 验收结束后�
 
 ## 账号与更新组件回归
 
+- `node scripts/acceptance/notification-threshold.cjs`：默认开发预览 5173（`JOLU_COMPONENT_URL` 可覆盖，仅限本机），挂载真实通知设置组件，以内存桥接验证整数显示、灰色固定币种、数字宽度伸缩、最大合法金额完整可见、小数与草稿保留、阈值保存和无效值。只使用合成设置，不修改真实通知偏好；浅深色截图位于 `output/acceptance/notification-threshold/`。
+- `node scripts/acceptance/toast-cards.cjs`：使用独立无头 Edge 和真实通知组件，验证右上角三张卡片、排队后才计时、3/6 秒与持续错误、重复合并、关闭、鼠标和焦点独立暂停、原因展开、重试动作与再次失败保留错误、表单内键盘访问、Esc 和鼠标关闭不误关表单、浅深色、窄窗口与减少动效。默认开发预览 5314（`JOLU_COMPONENT_URL` 可覆盖，仅限本机）；不访问真实后端。截图位于 `output/acceptance/toast-cards/`。
 - `node scripts/acceptance/account-refresh.cjs`：使用 5193 Vite 开发服务器（`JOLU_PREVIEW_URL` 可覆盖，仅限本机）、Edge 和上述 playwright-core。挂载真实账号面板、额度 hook 与 API 桥接，只替换原生调用为合成 Promise；验证刷新一个账号不改变另一张卡片，成功更新重置卡次数，失败保留旧值并标注。不会连接真实桌面、读取凭据或查询上游服务。
 - `node scripts/acceptance/account-metadata.cjs`：需已启动 5193 前端服务及 `output/acceptance/node` 中的 playwright-core，使用 Edge 无头浏览器注入合成额度；检查四列、5 小时/周窗口、订阅快照、重置卡真实零和隐私显示。不会查询真实账号，也不执行账号切换。
 - `node scripts/acceptance/account-quota-sources.cjs`：同样使用 5193 前端服务与合成桥接；覆盖真实重置卡对象才出现查询入口、服务未返回字段、单卡查询归属，以及套餐 Key 额度与余额并存、真实零、自定义供应商额度和余额、旧值标记与不支持状态。截图保存在 `output/playwright/account-sources-*.png`。
@@ -111,3 +115,18 @@ node scripts/acceptance/lazy-jumps-preview.e2e.mjs
 ## 本地登录与浏览器授权入口
 
 `provider-authorization.cjs` 使用真实 React 连接弹窗与合成 Tauri 桥接，在独立无头 Edge 中验证全部 12 个订阅入口、六版本的 family/edition 传递、查询通过且填写名称后保存、待授权禁止保存、关闭后迟到授权取消；另验证真实供应商页的 13 张卡片及浅深色截图。不读取真实凭证、不打开真实授权页面、不调用模型。默认连接本机开发预览 `http://localhost:5314`，可用 `JOLU_COMPONENT_URL` 指定其他本机端口；截图位于 `output/acceptance/provider-auth/`。这仅证明组件交互，不能替代系统默认浏览器和真实供应商授权验证。
+
+## 一键签到
+
+- `node scripts/acceptance/account-connect-dialogs.cjs`：默认本机 Vite 5173（`JOLU_COMPONENT_URL` 可覆盖），独立无头 Edge、真实账号管理与签到组件、合成 IPC。验证顶部按钮顺序、卡片无加号、添加账号先选供应商、自动查询不弹窗、手动刷新成功/失败在右侧通知且无居中弹窗，以及去连接原地弹窗、版本预选、保存刷新、Trae 两账号、保存防连点与冻结。含品牌图标的浅深色及窄屏截图，位于 `output/acceptance/account-connect-dialogs/`。不读取真实凭证、不打开真实授权页、不发送领取请求。
+- `node scripts/acceptance/daily-checkin.cjs`：默认本机 Vite 5318（`JOLU_COMPONENT_URL` 可覆盖），独立 Edge、真实主窗口与签到页、合成 IPC。验证六版能力、身份去重与参数、零奖励、失败继续、防连点、切页续跑、隐私、空/错误恢复、窄屏和浅深色；也复现主窗口就绪前隐藏状态的启动回归。不读取真实账号、不发领取请求。
+- `daily-checkin-desktop.e2e.mjs`：按隔离流程构建并启动应用；在 `output/acceptance/node` 运行绝对脚本路径，前端非 5173 时设置 `JOLU_DEV_URL`。只在带标记数据库插入六个合成本机连接；验证主窗口命令限制、脱敏、隔离拒绝读取真实登录/领取、默认页与实际 WebView。每次应使用新隔离目录。
+- 真实 `native_claim_once` 为默认忽略测试，且必须额外提供仅该测试进程生效的 `JOLU_RUN_REAL_CHECKIN=1`。只有获明确授权后运行，实际状态 Ready 才领取一次，随后只读复核；不得当作普通回归反复执行。协议、已执行结果及尚缺样本见 `docs/verification/2026-10-27-daily-checkin.md`。
+
+账号统计 A：`daily-checkin.cjs` 同时核对周/月/累计、零奖励与未知金额、无历史记录、逐包原始额度优先于旧汇总、Qoder 多范围不相加、仅按领取事件的连接 ID 刷新额度。`account-connect-dialogs.cjs` 核对手动刷新强制更新额度，以及状态查询中途切页后不新发强制额度请求。使用 `JOLU_COMPONENT_URL=http://localhost:5173` 可复用本机独立预览；A 卡片与整页的浅深色合成截图分别为 `output/acceptance/daily-checkin/statistics-a-card-*.png` 和 `statistics-a-*.png`。这些截图为合成 IPC 数据，不能替代真实账号额度或领奖验收。
+
+2026-10-27 补充：上述脚本已覆盖订阅只读账号/免填名称、宽屏四列、官方日期与活动累计、明确计算的可用量及不限量、官方日期缺失时本机项的来源，以及每账号删除的取消、失败、执行冻结、防连点和历史保留。非手动签到版本的已连接账号也有删除入口。`provider-authorization.cjs` 的 12 个订阅入口均无需手填名称。验收边界见 `docs/verification/2026-10-27-checkin-account-identity-data.md`。
+
+统一摘要调整：`daily-checkin.cjs` 另核对主卡固定字段、底部「详情｜签到状态｜删除」同行、右侧详情不增加请求、刷新保持、窄屏/Esc/隐私及单删确认。截图为 `account-details-*.png`、`account-actions-dark.png` 和 `statistics-a-*.png`。原摘要阶段记录见 `docs/verification/2026-10-27-checkin-card-summary-details.md`，最新批量流程见下文。
+
+两页批量删除：`node scripts/acceptance/bulk-account-management.cjs` 默认本机 Vite 5173（`JOLU_COMPONENT_URL` 可覆盖），独立无头 Edge 挂载真实账号管理组件、共享选择与确认，注入合成 IPC。覆盖筛选裁剪与全选、空选择、取消、固定目标 ID、暂停项、当前账号不切换、失败继续、只重试失败、关闭后保留失败勾选、隐私、连点冻结、未选账号及历史保留、通知定位及删空恢复；截图位于 `output/acceptance/bulk-account-management/`。`daily-checkin.cjs` 同时覆盖签到页全部保存连接的选择（含暂停、重复身份、未知版本）、精确删除、部分失败重试、防连点/关闭、历史保留及空卡片连接冻结，截图增加 `bulk-*.png`。所有删除只作用于脚本内存数据，绝不调用真实桌面删除或修改原工具登录。

@@ -1,4 +1,4 @@
-//! 系统通知（画板 94 / D-10）：任务提醒与低余额提醒。
+//! 操作通知（画板 94 / D-10）：前台卡片与后台系统通知共用任务和余额提醒规则。
 //!
 //! - 只在 Rust 端发通知，前端没有通知权限；Windows 没有运行时通知权限，画板上的「引导入口」不做。
 //! - 免打扰期间一律不弹；任务通知按「额度恢复与任务继续」「任务完成与失败」两个开关分别判断。
@@ -8,9 +8,9 @@
 //! - 开发模式下 Windows 通知显示 PowerShell 的名字和图标（插件只给安装版设置 AppUserModelID），属已知限制。
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{atomic::{AtomicU64, Ordering}, LazyLock, Mutex};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::settings::Settings;
@@ -24,8 +24,32 @@ pub enum TaskNotice {
 
 /// 失败原因在通知正文里最多保留的字数
 const REASON_LIMIT: usize = 60;
-/// 通知附带的任务 ID；余额通知不携带任务 ID，因此不会触发任务跳转。
+/// 通知附带的任务 ID；余额通知使用独立的连接 ID 定位账号。
 const TASK_KEY: &str = "task_id";
+const CONNECTION_KEY: &str = "connection_id";
+
+#[derive(Clone, serde::Serialize)]
+pub struct AppNotice {
+    id: u64,
+    #[serde(flatten)]
+    body: NoticeBody,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NoticeBody {
+    Balance { connection_id: String, connection_name: String, platform: String, remaining: f64, currency: String, threshold: f64 },
+    Task { task_id: i64, state: &'static str, platform: String, task_name: String, reason: Option<String> },
+}
+
+static NEXT_NOTICE: AtomicU64 = AtomicU64::new(1);
+static PENDING_NOTICES: LazyLock<Mutex<Vec<AppNotice>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn clicked_connection_id(action: &tauri_plugin_notification::ActionPerformed) -> Option<String> {
+    if action.action_id() != "tap" { return None; }
+    action.notification()?.extra().get(CONNECTION_KEY)?.as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)).map(str::to_owned)
+}
 
 fn clicked_task_id(action: &tauri_plugin_notification::ActionPerformed) -> Option<i64> {
     if action.action_id() != "tap" { return None; }
@@ -36,12 +60,14 @@ fn clicked_task_id(action: &tauri_plugin_notification::ActionPerformed) -> Optio
 pub fn register_click_handler(app: &AppHandle) -> tauri_plugin_notification::Result<()> {
     let handle = app.clone();
     app.notification().on_action(move |action| {
-        let Some(task_id) = clicked_task_id(action) else { return };
+        let intent = if let Some(task_id) = clicked_task_id(action) { crate::MainIntent::Automation { task_id } }
+            else if let Some(connection_id) = clicked_connection_id(action) { crate::MainIntent::Providers { connection_id } }
+            else { return };
         let target = handle.clone();
         if let Err(error) = handle.run_on_main_thread(move || {
-            crate::show_main_with_intent(&target, crate::MainIntent::Automation { task_id });
+            crate::show_main_with_intent(&target, intent);
         }) {
-            eprintln!("[通知] 打开任务失败：{error}");
+            eprintln!("[通知] 打开对应页面失败：{error}");
         }
     })
 }
@@ -116,14 +142,68 @@ fn show(app: &AppHandle, title: String, body: String, task_id: Option<i64>) {
 pub fn notify_task(app: &AppHandle, task_id: i64, kind: TaskNotice, platform: &str, task_name: &str) {
     let Some(cfg) = app.try_state::<crate::Cfg>() else { return };
     if !should_notify(&cfg.0.get(), &kind) { return; }
-    let (title, body) = task_message(&kind, platform, task_name);
-    show(app, title, body, Some(task_id));
+    let (state, reason) = match kind {
+        TaskNotice::Resumed => ("resumed", None),
+        TaskNotice::Completed => ("completed", None),
+        TaskNotice::Failed { reason } => ("failed", Some(short_reason(&reason))),
+    };
+    dispatch(app, NoticeBody::Task { task_id, state, platform: platform.into(), task_name: mask_secrets(task_name), reason });
+}
+
+fn allowed(settings: &Settings, notice: &AppNotice) -> bool {
+    if settings.dnd { return false; }
+    match &notice.body {
+        NoticeBody::Balance { threshold, currency, .. } => settings.balance_alert_threshold == Some(*threshold) && settings.balance_alert_currency == *currency,
+        NoticeBody::Task { state, .. } => if *state == "resumed" { settings.notify_task_resumed } else { settings.notify_task_finished },
+    }
+}
+
+/// 只允许主窗口读取，不广播金额；订阅建立后补读启动期间先到达的提醒。
+#[tauri::command]
+pub fn take_app_notices(app: AppHandle, window: tauri::WebviewWindow) -> Result<Vec<AppNotice>, String> {
+    if window.label() != crate::MAIN { return Err("仅主窗口可读取操作通知".into()); }
+    let settings = app.state::<crate::Cfg>().0.get();
+    let mut pending = PENDING_NOTICES.lock().map_err(|_| "通知队列暂不可用")?;
+    Ok(pending.drain(..).filter(|notice| allowed(&settings, notice)).collect())
+}
+
+fn native_notice(app: &AppHandle, notice: &AppNotice) {
+    match &notice.body {
+        NoticeBody::Balance { connection_id, connection_name, remaining, currency, .. } => {
+            let (title, body) = balance_message(connection_name, *remaining, currency);
+            if let Err(error) = app.notification().builder().title(title).body(body).extra(CONNECTION_KEY, connection_id.clone()).show() {
+                eprintln!("[通知] 发送失败：{error}");
+            }
+        }
+        NoticeBody::Task { task_id, state, reason, platform, task_name } => {
+            let kind = match *state { "resumed" => TaskNotice::Resumed, "completed" => TaskNotice::Completed, _ => TaskNotice::Failed { reason: reason.clone().unwrap_or_default() } };
+            let (title, body) = task_message(&kind, platform, task_name);
+            show(app, title, body, Some(*task_id));
+        }
+    }
+}
+
+fn deliver(foreground: bool, in_app: impl FnOnce() -> bool, native: impl FnOnce()) {
+    if !foreground || !in_app() { native(); }
+}
+
+fn dispatch(app: &AppHandle, body: NoticeBody) {
+    let notice = AppNotice { id: NEXT_NOTICE.fetch_add(1, Ordering::Relaxed), body };
+    let foreground = crate::MAIN_READY.load(Ordering::Acquire) && app.get_webview_window(crate::MAIN)
+        .is_some_and(|window| window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) && !window.is_minimized().unwrap_or(true));
+    deliver(foreground, || {
+        if let Ok(mut pending) = PENDING_NOTICES.lock() { pending.push(notice.clone()); } else { return false; }
+        // 不持队列锁调用窗口接口，避免与主窗口读取互相等待。
+        if app.emit_to(crate::MAIN, "app-notice", ()).is_ok() { return true; }
+        if let Ok(mut pending) = PENDING_NOTICES.lock() { pending.retain(|item| item.id != notice.id); }
+        false
+    }, || native_notice(app, &notice));
 }
 
 static BALANCES: LazyLock<Mutex<BalanceMemory>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 余额刷新后调用：跌破阈值时提醒一次（重启后第一次读到低于阈值会再提醒一次）
-pub fn check_balance(app: &AppHandle, connection_id: &str, connection_name: &str, remaining: f64, currency: &str) {
+pub fn check_balance(app: &AppHandle, connection_id: &str, connection_name: &str, platform: &str, remaining: f64, currency: &str) {
     let Some(cfg) = app.try_state::<crate::Cfg>() else { return };
     let settings = cfg.0.get();
     let alert = {
@@ -131,13 +211,45 @@ pub fn check_balance(app: &AppHandle, connection_id: &str, connection_name: &str
         balance_alert(&mut memory, &settings, connection_id, remaining, currency)
     };
     if !alert { return; }
-    let (title, body) = balance_message(connection_name, remaining, currency);
-    show(app, title, body, None);
+    let Some(threshold) = settings.balance_alert_threshold else { return };
+    dispatch(app, NoticeBody::Balance { connection_id: connection_id.into(), connection_name: mask_secrets(connection_name), platform: platform.into(), remaining, currency: currency.trim().to_ascii_uppercase(), threshold });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_uses_one_channel_and_falls_back_on_in_app_failure() {
+        use std::cell::Cell;
+        for (foreground, accepted, expected_in_app, expected_native) in [(true, true, 1, 0), (true, false, 1, 1), (false, true, 0, 1)] {
+            let in_app = Cell::new(0);
+            let native = Cell::new(0);
+            deliver(foreground, || { in_app.set(in_app.get()+1); accepted }, || native.set(native.get()+1));
+            assert_eq!((in_app.get(), native.get()), (expected_in_app, expected_native));
+        }
+    }
+    #[test]
+    fn balance_click_accepts_only_a_valid_connection_target() {
+        let action = |kind: &str, extra: serde_json::Value| serde_json::from_value::<tauri_plugin_notification::ActionPerformed>(serde_json::json!({"actionId":kind,"notification":{"id":1,"extra":extra}})).unwrap();
+        assert_eq!(clicked_connection_id(&action("tap", serde_json::json!({"connection_id":"synthetic-api"}))).as_deref(), Some("synthetic-api"));
+        for extra in [serde_json::json!({}), serde_json::json!({"connection_id":""}), serde_json::json!({"connection_id":12}), serde_json::json!({"connection_id":"bad\nvalue"})] {
+            assert!(clicked_connection_id(&action("tap", extra)).is_none());
+        }
+        assert!(clicked_connection_id(&action("dismiss", serde_json::json!({"connection_id":"synthetic-api"}))).is_none());
+    }
+    #[test]
+    fn pending_notice_respects_current_settings_and_has_no_credentials() {
+        let balance = AppNotice { id:1, body: NoticeBody::Balance { connection_id:"synthetic-api".into(), connection_name:"开发连接".into(), platform:"claude".into(), remaining:8.5, currency:"USD".into(), threshold:10.0 } };
+        let mut s = settings(); s.balance_alert_threshold=Some(10.0); s.balance_alert_currency="USD".into();
+        assert!(allowed(&s,&balance));
+        s.dnd=true; assert!(!allowed(&s,&balance)); s.dnd=false;
+        s.balance_alert_threshold=Some(20.0); assert!(!allowed(&s,&balance));
+        let value=serde_json::to_value(balance).unwrap();
+        assert_eq!(value["kind"],"balance"); assert_eq!(value["remaining"],8.5);
+        assert!(value.get("secret").is_none() && value.get("token").is_none());
+        let resumed=AppNotice { id:2, body:NoticeBody::Task { task_id:7,state:"resumed",platform:"Claude Code".into(),task_name:"测试任务".into(),reason:None } };
+        assert!(allowed(&s,&resumed)); s.notify_task_resumed=false; assert!(!allowed(&s,&resumed));
+    }
 
     #[test]
     fn task_click_requires_tap_and_positive_integer_id() {

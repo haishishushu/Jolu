@@ -268,6 +268,73 @@ fn text(value: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn token_expiry(result: &Value, now: chrono::DateTime<chrono::Utc>) -> Result<String, String> {
+    let millis = result["TokenExpireAt"].as_i64().ok_or(ERROR)?;
+    // 官方 marscode/util.xxe：绝对期限已落后时，使用服务端返回的毫秒时长。
+    let millis = if millis < now.timestamp_millis() {
+        match result["TokenExpireDuration"].as_i64().filter(|v| *v > 0) {
+            Some(duration) => now.timestamp_millis().checked_add(duration).ok_or(ERROR)?,
+            None => millis,
+        }
+    } else {
+        millis
+    };
+    chrono::DateTime::from_timestamp_millis(millis)
+        .filter(|expiry| *expiry > now)
+        .map(|expiry| expiry.to_rfc3339())
+        .ok_or_else(|| ERROR.into())
+}
+
+fn verified_user(value: &Value, expected: Option<&str>) -> Result<(String, Option<String>), String> {
+    if value["ResponseMetadata"]
+        .get("Error")
+        .is_some_and(|error| !error.is_null())
+    {
+        return Err(ERROR.into());
+    }
+    let result = &value["Result"];
+    let id = text(result, "UserID")
+        .or_else(|| result["UserID"].as_u64().map(|v| v.to_string()))
+        .filter(|id| !id.trim().is_empty() && id.len() <= 320 && id != "0")
+        .ok_or(ERROR)?;
+    if expected.is_some_and(|expected| expected != id) {
+        return Err(ERROR.into());
+    }
+    let account = text(result, "NonPlainTextEmail")
+        .or_else(|| text(result, "ScreenName"))
+        .filter(|account| !account.trim().is_empty() && account.len() <= 320);
+    Ok((id, account))
+}
+
+/// 保存后仅以自己的凭证实时核实个人身份；额度支持情况不代表登录是否有效。
+pub(crate) fn verify_session(edition: &str, session: &Session) -> Result<(), String> {
+    if crate::validation::isolated() {
+        return Err("隔离验收不验证真实 Trae 授权".into());
+    }
+    if !matches!((edition, session.host.as_str()),
+        ("cn", "https://api.trae.cn") |
+        ("global", "https://growsg-normal.trae.ai" | "https://grow-normal.traeapi.us"))
+        || session.token.is_empty()
+        || session.token.len() >= 64 * 1024
+        || session.token.chars().any(char::is_control)
+        || session.user_id.trim().is_empty()
+        || session.user_id.len() > 320
+        || session.user_id.chars().any(char::is_control)
+        || session.user_id == "0"
+        || !chrono::DateTime::parse_from_rfc3339(&session.expires_at)
+            .is_ok_and(|expiry| expiry > chrono::Utc::now())
+    {
+        return Err(ERROR.into());
+    }
+    let user = post(
+        &session.host,
+        "/cloudide/api/v3/trae/GetUserInfo",
+        &json!({"ReqSource":"IDE", "IDEVersion":version(edition)}),
+        Some(&session.token),
+    )?;
+    verified_user(&user, Some(&session.user_id)).map(|_| ())
+}
+
 fn respond(stream: &mut TcpStream, status: &str, origin: Option<&str>, message: &str) {
     let cors = origin.map(|o| format!("Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n")).unwrap_or_default();
     let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\n{cors}Content-Length: {}\r\n\r\n{message}", message.len());
@@ -366,7 +433,10 @@ fn post(host: &str, path: &str, body: &Value, token: Option<&str>) -> Result<Val
         return Err(ERROR.into());
     }
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
-    if value["ResponseMetadata"]["Error"].is_object() {
+    if value["ResponseMetadata"]
+        .get("Error")
+        .is_some_and(|error| !error.is_null())
+    {
         return Err(ERROR.into());
     }
     Ok(value)
@@ -395,26 +465,18 @@ fn exchange(pending: &Pending, values: &HashMap<String, String>) -> Result<Sessi
         None,
     )?;
     let token = text(&result["Result"], "Token").ok_or(ERROR)?;
-    let millis = result["Result"]["TokenExpireAt"].as_i64().ok_or(ERROR)?;
-    let expiry = chrono::DateTime::from_timestamp_millis(millis)
-        .filter(|t| *t > chrono::Utc::now())
-        .ok_or(ERROR)?;
+    let expires_at = token_expiry(&result["Result"], chrono::Utc::now())?;
     let user = post(
         host,
         "/cloudide/api/v3/trae/GetUserInfo",
         &json!({"ReqSource":"IDE", "IDEVersion":version(&pending.edition)}),
         Some(&token),
     )?;
-    let user_id = text(&user["Result"], "UserID")
-        .or_else(|| user["Result"]["UserID"].as_u64().map(|v| v.to_string()))
-        .filter(|id| !id.trim().is_empty() && id.len() <= 320 && id != "0")
-        .ok_or(ERROR)?;
-    let account =
-        text(&user["Result"], "NonPlainTextEmail").or_else(|| text(&user["Result"], "ScreenName"));
+    let (user_id, account) = verified_user(&user, None)?;
     Ok(Session {
         token,
         host: host.into(),
-        expires_at: expiry.to_rfc3339(),
+        expires_at,
         account,
         user_id,
     })
@@ -450,6 +512,45 @@ pub(crate) fn poll(pending: &mut Pending) -> Result<Option<Session>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn token_expiry_matches_official_millisecond_duration_fallback() {
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        let future = now + chrono::Duration::minutes(5);
+        assert_eq!(
+            token_expiry(&json!({"TokenExpireAt":future.timestamp_millis()}), now).unwrap(),
+            future.to_rfc3339()
+        );
+        assert_eq!(
+            token_expiry(&json!({"TokenExpireAt":now.timestamp_millis()-1,"TokenExpireDuration":60000}), now).unwrap(),
+            (now + chrono::Duration::minutes(1)).to_rfc3339()
+        );
+        for value in [
+            json!({"TokenExpireAt":now.timestamp_millis()-1}),
+            json!({"TokenExpireAt":now.timestamp_millis()-1,"TokenExpireDuration":0}),
+            json!({"TokenExpireAt":now.timestamp_millis()-1,"TokenExpireDuration":-1}),
+            json!({"TokenExpireDuration":60000}),
+        ] {
+            assert!(token_expiry(&value, now).is_err());
+        }
+    }
+
+    #[test]
+    fn official_user_identity_is_required_and_bound_to_saved_session() {
+        let response = json!({"Result":{"UserID":"synthetic-user","NonPlainTextEmail":"s***@example.invalid"}});
+        let verified = verified_user(&response, Some("synthetic-user")).unwrap();
+        assert_eq!(verified.0, "synthetic-user");
+        assert_eq!(verified.1.as_deref(), Some("s***@example.invalid"));
+        assert!(verified_user(&response, Some("another-user")).is_err());
+        assert!(verified_user(&json!({"Result":{"UserID":123456789}}), Some("123456789")).is_ok());
+        for invalid in [
+            json!({"Result":{"ScreenName":"synthetic-user"}}),
+            json!({"Result":{"UserID":" "}}),
+            json!({"Result":{"UserID":0}}),
+            json!({"Result":{"UserID":"synthetic-user"},"ResponseMetadata":{"Error":{"Code":"20324"}}}),
+        ] {
+            assert!(verified_user(&invalid, None).is_err());
+        }
+    }
     #[test]
     fn official_login_url_keeps_pkce_verifier_private_and_binds_callback() {
         let url = Url::parse(
@@ -529,5 +630,123 @@ mod tests {
         );
         assert!(region("cn", "usttp").is_err());
         assert!(region("global", "https://attacker.invalid").is_err());
+    }
+
+    #[test]
+    #[ignore = "显式执行：只读已保存 Trae 浏览器凭证、官方身份/额度与签到状态，绝不领取"]
+    fn saved_sessions_read_only_smoke() {
+        assert!(!crate::validation::isolated(), "隔离验收不读取真实授权");
+        let path = std::env::var_os("JOLU_TRAE_AUTH_DATABASE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
+                    .join("dev.ningz.jolu/usage.db")
+            });
+        let db = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap_or_else(|_| panic!("无法只读打开 Jolu 账号数据库"));
+        let mut query = db
+            .prepare("SELECT id,secret FROM connections WHERE platform='trae' AND kind='auth' AND secret LIKE 'jolu-browser:v1:%'")
+            .unwrap();
+        let rows: Vec<(String, String)> = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!rows.is_empty(), "未找到已保存的 Trae 浏览器账号");
+        for (id, sealed) in rows {
+            let credential = crate::provider_browser_auth::load(&id, "trae", &sealed)
+                .unwrap_or_else(|_| panic!("Trae 已保存凭证无法解封"));
+            let crate::provider_browser_auth::Credential::Trae { edition, session } = credential else {
+                panic!("Trae 已保存凭证类型不匹配");
+            };
+            let verified = verify_session(&edition, &session).is_ok();
+            let quota = crate::trae_quota::authorized_quota(&edition, &session);
+            let quota_state = match quota {
+                crate::quota::QuotaState::Ok { .. } => "ok",
+                crate::quota::QuotaState::Unauthorized { .. } => "unauthorized",
+                crate::quota::QuotaState::Unsupported { .. } => "unsupported",
+                crate::quota::QuotaState::Forbidden { .. } => "forbidden",
+                crate::quota::QuotaState::RateLimited { .. } => "rate_limited",
+                crate::quota::QuotaState::Failed { .. } => "failed",
+            };
+            println!("Trae {edition}: fresh_identity_verified={verified} quota_state={quota_state}");
+            assert!(verified, "Trae 已保存浏览器账号实时身份核验未通过；原始信息不输出");
+            if edition == "cn" {
+                let account = crate::checkin_trae::Account::from_browser(&edition, &session)
+                    .unwrap_or_else(|outcome| panic!("Trae CN 浏览器签到构建：{:?}", outcome.state));
+                let outcome = account.status();
+                println!("Trae CN browser: checkin_state={:?} has_official_period={}", outcome.state, outcome.period_key.is_some());
+                assert!(matches!(outcome.state,
+                    crate::checkin_types::State::Ready | crate::checkin_types::State::Claimed | crate::checkin_types::State::Inactive),
+                    "Trae CN 浏览器签到只读状态未通过；原始信息不输出");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "显式执行：要求至少两个已保存的不同国内网页账号，只读官方身份和签到状态，绝不领取"]
+    fn saved_cn_multiple_accounts_read_only_smoke() {
+        assert!(!crate::validation::isolated(), "隔离验收不读取真实授权");
+        let sessions = {
+            let path = std::env::var_os("JOLU_TRAE_AUTH_DATABASE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
+                    .join("dev.ningz.jolu/usage.db"));
+            let db = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap_or_else(|_| panic!("无法只读打开 Jolu 账号数据库"));
+            let mut query = db.prepare("SELECT id,secret FROM connections WHERE platform='trae' AND kind='auth' AND secret LIKE 'jolu-browser:v1:%'").unwrap();
+            let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let mut sessions = Vec::new();
+            for (id, sealed) in rows {
+                let credential = crate::provider_browser_auth::load(&id, "trae", &sealed)
+                    .unwrap_or_else(|_| panic!("Trae 已保存凭证无法解封"));
+                if let crate::provider_browser_auth::Credential::Trae { edition, session } = credential {
+                    if edition == "cn" { sessions.push(session); }
+                }
+            }
+            sessions
+        };
+        let identities: std::collections::HashSet<_> = sessions.iter().map(|session| &session.user_id).collect();
+        println!("Trae CN browser: saved_connections={} distinct_accounts={}", sessions.len(), identities.len());
+        assert!(identities.len() >= 2, "真实多账号验收需要至少两个不同国内网页账号；当前样本不足，不请求领取");
+        assert_eq!(identities.len(), sessions.len(), "同一国内网页身份存在重复连接");
+        for (index, session) in sessions.iter().enumerate() {
+            assert!(verify_session("cn", session).is_ok(), "第 {} 个账号实时身份校验失败；原始信息不输出", index + 1);
+            let account = crate::checkin_trae::Account::from_browser("cn", session)
+                .unwrap_or_else(|outcome| panic!("第 {} 个国内网页账号构建失败：{:?}", index + 1, outcome.state));
+            let outcome = account.status();
+            println!("Trae CN browser #{}: identity_verified=true state={:?} official_period={} device_limit={}",
+                index + 1, outcome.state, outcome.period_key.is_some(), outcome.message.contains("设备今日已签到"));
+            assert!(matches!(outcome.state, crate::checkin_types::State::Ready
+                | crate::checkin_types::State::Claimed | crate::checkin_types::State::Inactive),
+                "第 {} 个账号签到状态未通过；原始信息不输出", index + 1);
+            assert!(outcome.period_key.is_some(), "第 {} 个账号缺少官方签到周期", index + 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "显式执行：本机 CN 个人凭证仅在内存构造 Session，读取身份与浏览器分支签到状态，不保存、不领取"]
+    fn cn_personal_session_read_only_smoke() {
+        let (_, auth) = crate::trae_quota::source_auth("native:trae:cn")
+            .unwrap_or_else(|_| panic!("Trae CN 本机个人凭证不可用；原始信息不输出"));
+        let session = Session {
+            token: auth["token"].as_str().unwrap().into(),
+            host: auth["host"].as_str().unwrap().into(),
+            expires_at: auth["expiredAt"].as_str().unwrap().into(),
+            account: None,
+            user_id: auth["userId"].as_str().unwrap().into(),
+        };
+        assert!(verify_session("cn", &session).is_ok(), "Trae CN 个人实时身份未通过；原始信息不输出");
+        let account = crate::checkin_trae::Account::from_browser("cn", &session)
+            .unwrap_or_else(|outcome| panic!("Trae CN 浏览器分支构建：{:?}", outcome.state));
+        let outcome = account.status();
+        println!("Trae CN in-memory personal session: fresh_identity_verified=true checkin_state={:?} has_official_period={}", outcome.state, outcome.period_key.is_some());
+        assert!(matches!(outcome.state,
+            crate::checkin_types::State::Ready | crate::checkin_types::State::Claimed | crate::checkin_types::State::Inactive),
+            "Trae CN 浏览器分支只读状态未通过；原始信息不输出");
     }
 }

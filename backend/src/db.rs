@@ -254,6 +254,7 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     // 本地代理按凭证指纹把请求归到具体连接；未经代理的记录保持 NULL，统计默认仍按平台合并。
     let _ = conn.execute("ALTER TABLE requests ADD COLUMN connection_id TEXT", []);
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_requests_connection ON requests(connection_id, ts);")?;
+    crate::daily_checkin::init(conn)?;
     Ok(())
 }
 

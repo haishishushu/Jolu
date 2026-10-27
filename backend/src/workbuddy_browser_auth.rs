@@ -124,7 +124,7 @@ pub(crate) fn begin(edition: &str) -> Result<PendingLogin, String> {
 }
 
 fn parse_token(edition: Edition, status: u16, body: &Value) -> Result<Option<Token>, String> {
-    if body.get("code").and_then(Value::as_i64) == Some(11217) { return Ok(None); }
+    if status == 200 && body.get("code").and_then(Value::as_i64) == Some(11217) { return Ok(None); }
     if status != 200 || body.get("code").and_then(Value::as_i64) != Some(0) {
         return Err("WorkBuddy 登录授权失败或已过期，请重新授权".into());
     }
@@ -145,7 +145,7 @@ fn parse_token(edition: Edition, status: u16, body: &Value) -> Result<Option<Tok
 }
 
 fn parse_account(token: &Token, status: u16, body: &Value) -> Result<Option<Session>, String> {
-    if body.get("code").and_then(Value::as_i64) == Some(12151) { return Ok(None); }
+    if status == 200 && body.get("code").and_then(Value::as_i64) == Some(12151) { return Ok(None); }
     if status != 200 || body.get("code").and_then(Value::as_i64) != Some(0) {
         return Err("WorkBuddy 未能验证授权账号，请重新授权".into());
     }
@@ -154,6 +154,42 @@ fn parse_account(token: &Token, status: u16, body: &Value) -> Result<Option<Sess
     let enterprise_id = text(data, "enterpriseId", 1024);
     let email = text(data, "email", 320).or_else(|| text(data, "nickname", 320));
     Ok(Some(Session { token: token.value.clone(), domain: token.domain.clone(), user_id, enterprise_id, email, expires_at: token.expires_at }))
+}
+
+fn verify_account_response(edition: Edition, session: &Session, status: u16, body: &Value) -> Result<(), String> {
+    if status != 200 || body.get("code").and_then(Value::as_i64) != Some(0) {
+        return Err("WorkBuddy 授权账号校验失败，请重试或重新授权".into());
+    }
+    let matches = |account: &Value| text(account, "uid", 1024).as_deref() == Some(session.user_id.as_str())
+        && text(account, "enterpriseId", 1024).as_deref() == session.enterprise_id.as_deref();
+    let found = match edition {
+        Edition::Cn => matches(&body["data"]),
+        Edition::Ai => body.pointer("/data/accounts").and_then(Value::as_array)
+            .is_some_and(|accounts| accounts.iter().any(matches)),
+    };
+    if !found { return Err("WorkBuddy 授权账号身份发生变化，请重新授权".into()); }
+    Ok(())
+}
+
+/// CN 核实当前账号；AI 按官方续期路径读取账号列表并绑定已选择的身份。
+pub(crate) fn verify_session(edition: &str, session: &Session) -> Result<(), String> {
+    let edition = Edition::parse(edition)?;
+    if crate::validation::isolated() { return Err("隔离环境不读取 WorkBuddy 真实授权".into()); }
+    if !edition.allows_domain(&session.domain.to_ascii_lowercase())
+        || session.token.is_empty() || session.token.len() > 32768
+        || !session.token.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._~+/-=".contains(&byte))
+        || session.user_id.trim().is_empty() || session.user_id.len() > 1024 || session.user_id.chars().any(char::is_control)
+        || session.enterprise_id.as_ref().is_some_and(|id| id.trim().is_empty() || id.len() > 1024 || id.chars().any(char::is_control))
+        || session.expires_at.is_some_and(|at| at <= chrono::Utc::now().timestamp_millis()) {
+        return Err("WorkBuddy 浏览器授权已失效或区域不匹配，请重新授权".into());
+    }
+    let client = crate::quota::client().map_err(|_| "无法创建 WorkBuddy 身份验证客户端")?;
+    let path = match edition { Edition::Cn => "/v2/plugin/account", Edition::Ai => "/v2/plugin/accounts" };
+    let request = client.get(format!("{}{path}", edition.base())).bearer_auth(&session.token)
+        .header("Accept", "application/json").header("X-Domain", &session.domain)
+        .header("X-No-User-Id", "true").header("X-No-Enterprise-Id", "true").header("X-No-Department-Info", "true");
+    let (status, body) = request_json(request)?;
+    verify_account_response(edition, session, status, &body)
 }
 
 /// 单次轮询；None 表示官网尚未完成登录/账号选择，不在此函数内等待或切换账号。
@@ -225,5 +261,24 @@ mod tests {
         let session = parse_account(&token, 200, &json!({"code":0,"data":{"uid":"synthetic-user","email":"test@example.invalid"}})).unwrap().unwrap();
         assert_eq!(session.user_id, "synthetic-user");
         assert_eq!(session.email.as_deref(), Some("test@example.invalid"));
+    }
+    #[test]
+    fn pending_business_codes_do_not_hide_http_authentication_errors() {
+        assert!(parse_token(Edition::Cn, 401, &json!({"code":11217})).is_err());
+        let token = Token { value: "synthetic-token".into(), domain: "www.workbuddy.cn".into(), expires_at: None };
+        assert!(parse_account(&token, 401, &json!({"code":12151})).is_err());
+    }
+    #[test]
+    fn fresh_identity_verification_requires_matching_user_and_enterprise_context() {
+        let session = Session { token: "synthetic-token".into(), domain: "www.workbuddy.cn".into(),
+            user_id: "synthetic-user".into(), enterprise_id: None, email: None, expires_at: None };
+        assert!(verify_account_response(Edition::Cn, &session, 200, &json!({"code":0,"data":{"uid":"synthetic-user"}})).is_ok());
+        assert!(verify_account_response(Edition::Cn, &session, 401, &json!({"code":0,"data":{"uid":"synthetic-user"}})).is_err());
+        assert!(verify_account_response(Edition::Cn, &session, 200, &json!({"code":0,"data":{"uid":"other-user"}})).is_err());
+        let accounts = json!({"code":0,"data":{"accounts":[{"uid":"synthetic-user","enterpriseId":"enterprise"},{"uid":"synthetic-user"}]}});
+        assert!(verify_account_response(Edition::Ai, &session, 200, &accounts).is_ok());
+        let enterprise_only = json!({"code":0,"data":{"accounts":[{"uid":"synthetic-user","enterpriseId":"enterprise"}]}});
+        assert!(verify_account_response(Edition::Ai, &session, 200, &enterprise_only).is_err());
+        assert!(verify_account_response(Edition::Ai, &session, 200, &json!({"code":0,"data":{"accounts":[]}})).is_err());
     }
 }

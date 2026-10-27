@@ -11,6 +11,8 @@ import { ToastProvider, ToastViewport } from "@/components/ui/Toast"
 import { TipProvider } from "@/components/ui/Tip"
 import { PANEL_HEIGHT, PANEL_WIDTH, TitleBar } from "@/components/panel/Chrome"
 import { PageHeader, REPO_URL } from "@/components/panel/PageHeader"
+import { AppNotices } from "@/components/panel/AppNotices"
+import type { NoticeTarget } from "@/lib/appNotices"
 import { dateKey } from "@/lib/usageStats"
 import { SideNav } from "@/components/panel/SideNav"
 import { UpdateProvider } from "@/components/panel/UpdateContext"
@@ -22,6 +24,7 @@ import type { UsageRequest } from "./UsageView"
 
 const IslandView = createLazyPage(() => import("./IslandView").then((m) => ({ default: m.IslandView })), "灵动岛", "island")
 const ProvidersView = createLazyPage(() => import("./ProvidersView").then((m) => ({ default: m.ProvidersView })), "供应商", "providers", true)
+const CheckinView = createLazyPage(() => import("./CheckinView").then((m) => ({ default: m.CheckinView })), "一键签到", "cards")
 const SessionsView = createLazyPage(() => import("./SessionsView").then((m) => ({ default: m.SessionsView })), "会话线程", "sessions")
 const AutomationView = createLazyPage(() => import("./AutomationView").then((m) => ({ default: m.AutomationView })), "自动化", "tasks")
 const SkillsView = createLazyPage(() => import("./SkillsView").then((m) => ({ default: m.SkillsView })), "Skills 管理", "table")
@@ -41,6 +44,9 @@ export function MainPanelWindow({
   embedded?: boolean
 }) {
   const [page, setPage] = useState<MainPage>(initialPage)
+  // 首次进入才加载；之后保持挂载，使批量签到在切页时仍可继续并保留结果。
+  const checkinVisited = useRef(initialPage === "checkin")
+  if (page === "checkin") checkinVisited.current = true
   const [collapsed, setCollapsed] = useState(() => readSidebarCollapsed())
   const [navigationRequest, setNavigationRequest] = useState(0)
   /** 托盘 / 菜单要定位的设置分区（旧分区 id，由设置页换算成新分类） */
@@ -52,6 +58,10 @@ export function MainPanelWindow({
   /** 会话线程「创建自动化」带入自动化新建页的会话（画板 72） */
   const [automationPrefill, setAutomationPrefill] = useState<AutomationPrefill | null>(null)
   const [automationTarget, setAutomationTarget] = useState<AutomationTarget | null>(null)
+  const [accountTarget, setAccountTarget] = useState<{ connectionId: string; nonce: number } | null>(null)
+  const clearAccountTarget = useCallback(() => setAccountTarget(null), [])
+  const [deferredNotice, setDeferredNotice] = useState<NoticeTarget | null>(null)
+  const clearDeferredNotice = useCallback(() => setDeferredNotice(null), [])
   const clearAutomationTarget = useCallback(() => setAutomationTarget(null), [])
   const [usageRequest, setUsageRequest] = useState<UsageRequest | null>(null)
   const [opening, setOpening] = useState(embedded && isTauri)
@@ -133,6 +143,10 @@ export function MainPanelWindow({
         setAbout(intent.version)
         return
       }
+      if ((intent.kind === "providers" || intent.kind === "automation") && document.querySelector('[role="dialog"]:not([data-state="closed"]), [role="alertdialog"]:not([data-state="closed"])')) {
+        setDeferredNotice(intent.kind === "providers" ? { kind: "account", id: intent.connection_id, nonce: Date.now() } : { kind: "task", id: intent.task_id, nonce: Date.now() })
+        return
+      }
       initialPending.current = false
       setAbout(null)
       if (intent.kind === "overview") {
@@ -143,6 +157,7 @@ export function MainPanelWindow({
       } else setPage(pageForIntent(intent))
       if (intent.kind === "settings") setSettingsSection(intent.section)
       if (intent.kind === "automation") setAutomationTarget({ taskId: intent.task_id, nonce: Date.now() })
+      if (intent.kind === "providers") setAccountTarget({ connectionId: intent.connection_id, nonce: Date.now() })
       if (intent.kind !== "overview") setNavigationRequest((value) => value + 1)
     }
     const consumeIntent = () => void api.takeMainIntent().then(applyIntent).catch(() => {})
@@ -174,12 +189,14 @@ export function MainPanelWindow({
   useEffect(() => {
     if (!isTauri) return
     let stopped = false
+    let visibilityRevision = 0
     const offs: Array<() => void> = []
     const update = async () => {
+      const currentRevision = ++visibilityRevision
       const { getCurrentWindow } = await import("@tauri-apps/api/window")
       const current = getCurrentWindow()
       const [visible, minimized] = await Promise.all([current.isVisible(), current.isMinimized()])
-      if (!stopped) setPanelActive(visible && !minimized && document.visibilityState !== "hidden")
+      if (!stopped && currentRevision === visibilityRevision) setPanelActive(visible && !minimized && document.visibilityState !== "hidden")
     }
     const onVisibility = () => void update()
     document.addEventListener("visibilitychange", onVisibility)
@@ -199,7 +216,8 @@ export function MainPanelWindow({
       document.removeEventListener("visibilitychange", onVisibility)
       offs.forEach((off) => off())
     }
-  }, [])
+    // 就绪命令显示窗口后再读一次；丢弃启动时隐藏窗口的迟到结果。
+  }, [opening])
 
   const toggleSidebar = () => {
     setCollapsed((value) => {
@@ -210,6 +228,12 @@ export function MainPanelWindow({
 
   return (
     <ToastProvider>
+    <AppNotices
+      deferredTarget={deferredNotice}
+      onDeferredHandled={clearDeferredNotice}
+      onOpenAccount={connectionId => { navigate("providers"); setAccountTarget({ connectionId, nonce: Date.now() }) }}
+      onOpenTask={taskId => { navigate("automation"); setAutomationTarget({ taskId, nonce: Date.now() }) }}
+    />
     <UpdateProvider>
     <TipProvider>
     <div
@@ -253,7 +277,8 @@ export function MainPanelWindow({
                   }}
                 />
               )}
-              {page === "providers" && <ProvidersView />}
+              {page === "providers" && <ProvidersView accountTarget={accountTarget} onAccountTargetHandled={clearAccountTarget} />}
+              {checkinVisited.current && <div hidden={page !== "checkin"}><CheckinView active={page === "checkin" && panelActive} /></div>}
               {page === "settings" && <SettingsPage section={settingsSection} navigationRequest={navigationRequest} onOpenSkills={() => navigate("skills")} />}
               {/* 模块 E · 自动化 */}
               {page === "automation" && (
@@ -276,8 +301,8 @@ export function MainPanelWindow({
         </main>
       </div>
 
-      {/* 提示相对整个主窗口上方居中，不随侧栏宽度偏移。 */}
-      <ToastViewport className="top-16" />
+      {/* 操作通知固定在主窗口右上角，不随页面滚动或侧栏宽度变化。 */}
+      <ToastViewport />
       {aboutPresence.rendered && <AboutDialog version={aboutPresence.rendered} exiting={aboutPresence.exiting} onClose={() => setAbout(null)} />}
       <UpdateDialog onViewTasks={() => navigate("automation")} />
     </div>

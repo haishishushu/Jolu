@@ -5,17 +5,18 @@
  * 便于 node --test 直接验证。
  */
 
-export type MainPage = "island" | "providers" | "usage" | "sessions" | "automation" | "skills" | "settings"
+export type MainPage = "island" | "providers" | "checkin" | "usage" | "sessions" | "automation" | "skills" | "settings"
 
 export interface MainPageItem {
   id: MainPage
   label: string
 }
 
-/** 侧栏上部的六个模块；「设置」固定在侧栏底部，单独列出 */
+/** 侧栏上部的七个模块；「设置」固定在侧栏底部，单独列出。签到位置见模块 I。 */
 export const PRIMARY_PAGES: readonly MainPageItem[] = [
   { id: "island", label: "灵动岛" },
   { id: "providers", label: "供应商" },
+  { id: "checkin", label: "一键签到" },
   { id: "usage", label: "用量统计" },
   { id: "sessions", label: "会话线程" },
   { id: "automation", label: "自动化" },
@@ -28,7 +29,7 @@ export function pageLabel(page: MainPage): string {
   return page === "settings" ? SETTINGS_PAGE.label : PRIMARY_PAGES.find((item) => item.id === page)?.label ?? ""
 }
 
-/** 设置「默认打开页面」（画板 86）：上次访问的页面，或七个页面之一 */
+/** 设置「默认打开页面」：上次访问的页面，或八个页面之一。 */
 export type DefaultPage = "last" | MainPage
 
 const MAIN_PAGES: readonly MainPage[] = [...PRIMARY_PAGES.map((item) => item.id), SETTINGS_PAGE.id]
@@ -40,7 +41,7 @@ function isMainPage(value: string | null | undefined): value is MainPage {
   return typeof value === "string" && (MAIN_PAGES as readonly string[]).includes(value)
 }
 
-/** 下拉框选项：「上次访问的页面」加七个页面（侧栏顺序，设置在最后） */
+/** 下拉框选项：「上次访问的页面」加八个页面（侧栏顺序，设置在最后）。 */
 export const DEFAULT_PAGE_OPTIONS: readonly { value: DefaultPage; label: string }[] = [
   { value: "last", label: "上次访问的页面" },
   ...MAIN_PAGES.map((id) => ({ value: id, label: pageLabel(id) })),
@@ -54,12 +55,14 @@ export function resolveOpenPage(defaultPage: string, lastPage: string | null): M
 
 /** 托盘 / 菜单的跳转意图；结构与后端 MainIntent 一致（关于弹窗不切页面，不在这里处理） */
 export type NavigationIntent =
+  | { kind: "providers"; connection_id: string }
   | { kind: "overview"; settings?: { default_page?: string; last_page?: string | null } }
   | { kind: "settings"; section: string }
-  /** 点击任务通知：打开自动化页并选中该任务的详情。当前插件版本不支持 Windows 点击回调，后端暂不发出，升级 Tauri 后接上 */
+  /** 点击任务通知：打开自动化页并选中对应任务。 */
   | { kind: "automation"; task_id: number }
 
 export function pageForIntent(intent: NavigationIntent): MainPage {
+  if (intent.kind === "providers") return "providers"
   if (intent.kind === "overview") return resolveOpenPage(intent.settings?.default_page ?? "last", intent.settings?.last_page ?? null)
   if (intent.kind === "automation") return "automation"
   if (intent.section === "island") return "island"

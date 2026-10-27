@@ -178,7 +178,7 @@ fn model_list_skips_null_models() {
 /// 趋势的每个桶都要带齐四个分项，费用按桶单独估算
 #[test]
 fn trend_points_carry_breakdown_and_per_bucket_cost() {
-    let now = Local::now().timestamp_millis();
+    let now = Local.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).single().unwrap().timestamp_millis();
     let conn = seeded(&[
         rec("codex", "c1", now - 3_600_000, Some("gpt-5"), Some(1_000), Some(500), Some(0), Some(800), Some(1_500)),
     ]);
@@ -198,7 +198,7 @@ fn trend_points_carry_breakdown_and_per_bucket_cost() {
 /// 价目表覆盖不到的模型让整桶费用作废，不悄悄按 0 元计入
 #[test]
 fn unpriced_model_makes_bucket_cost_unknown() {
-    let now = Local::now().timestamp_millis();
+    let now = Local.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).single().unwrap().timestamp_millis();
     let conn = seeded(&[
         rec("claude", "a1", now - 3_600_000, Some("某个未知模型"), Some(10), Some(5), Some(0), Some(0), Some(15)),
     ]);

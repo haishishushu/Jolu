@@ -226,6 +226,14 @@ mod rename_tests {
         // 超长名称：整体拒绝，不让半合法输入落到库里
         assert!(with_custom_name(vec![input("Claude API Key")], Some("长".repeat(81))).is_err());
     }
+    #[test]
+    fn local_subscription_names_ignore_frontend_custom_names() {
+        let input = NewConnection { service: None, platform: "claude".into(), kind: "auth".into(),
+            name: "Claude 官方订阅".into(), secret: None, base_url: None, model: None,
+            effort: None, context_1m: None, protocol: None };
+        let output = with_custom_name(vec![input], Some("前端任意名称".into())).unwrap();
+        assert_eq!(output[0].name, "Claude 官方订阅");
+    }
 }
 
 #[cfg(test)]
@@ -1376,20 +1384,21 @@ pub fn update_params(
     Ok(())
 }
 
-/// 「添加连接」读取本机配置时应用用户填写的连接名称。
-/// 名称只填了空白视为未填，保留自动生成名；超长名称整体拒绝。
+/// API Key 可手填服务名称；订阅只采用匹配凭证的官方账号或已探测的来源名称。
 pub fn with_custom_name(
     inputs: Vec<NewConnection>,
     name: Option<String>,
 ) -> Result<Vec<NewConnection>, String> {
-    let Some(name) = name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else {
-        return Ok(inputs);
-    };
-    let name = validate_name(name)?;
-    Ok(inputs
-        .into_iter()
-        .map(|input| NewConnection { name: name.clone(), ..input })
-        .collect())
+    inputs.into_iter().map(|mut input| {
+        if input.kind == "auth" {
+            if let Some(account) = input.secret.as_deref().and_then(|secret| crate::login_detect::account_for_secret(&input.platform, secret)) {
+                input.name = account.chars().take(80).collect();
+            }
+        } else if let Some(name) = name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+            input.name = validate_name(name)?;
+        }
+        Ok(input)
+    }).collect()
 }
 
 /// 「获取」的结果（§6.3 的四种状态里，后端只负责成功/未找到）

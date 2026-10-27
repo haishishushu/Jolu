@@ -43,10 +43,11 @@ export interface ConnectActions {
  * 自定义供应商（D-11）复用 API Key 结构，多一个「协议」选择；模型接口不可用时改为手填模型 ID，
  * 后端以「获取模型成功」或「手填模型」作为接口可达的依据，不查余额。
  */
-export function ConnectDialog({ platform: initialPlatform, actions, onClose: onDismiss }: {
+export function ConnectDialog({ platform: initialPlatform, actions, onClose: onDismiss, onSaved }: {
   platform: ProviderId
   actions: ConnectActions
   onClose: () => void
+  onSaved?: () => void
 }) {
   const { open: dialogOpen, close: onClose } = useDialogClose(onDismiss)
   const toast = useToast()
@@ -58,6 +59,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const [name, setName] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
   // 订阅
   const [detecting, setDetecting] = useState(false)
   const [detection, setDetection] = useState<LoginDetectionDto | null>(null)
@@ -105,6 +107,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   const hasDraft = Boolean(name.trim() || secret.trim() || actualDetection || browser.pending)
 
   const switchPlatform = (next: ProviderId) => {
+    if (savingRef.current) return
     const nextEntry = providerEntry(next)
     // 更换平台不携带原平台的密钥与检测结果（画板 29）
     modelRequest.current++
@@ -131,7 +134,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
   }
 
   const detect = async () => {
-    if (detecting) return
+    if (detecting || savingRef.current) return
     const request = ++loginRequest.current
     browser.cancel()
     setDetecting(true)
@@ -210,7 +213,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
     }
   }
 
-  const nameError = validateConnectionName(name, actions.connections, provider, kind)
+  const nameError = mode === "apiKey" ? validateConnectionName(name, actions.connections, provider, kind) : null
   const urlError = baseUrl.trim() && !/^https?:\/\/[^\s/]+/i.test(baseUrl.trim()) ? "请输入完整地址，例如 https://api.example.com/v1" : null
   const canSave = !saving && !nameError && (mode === "subscription"
     ? Boolean(actualDetection?.found) && !browser.pending && !detecting
@@ -218,18 +221,20 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
       && (platform !== "zcode" || (!fetching && !verifying && (!manualModel || verifyResult?.ok === true))))
 
   const save = async () => {
-    if (!canSave) return
+    if (!canSave || savingRef.current) return
+    savingRef.current = true
     setSaving(true)
     setError(null)
     try {
       if (mode === "subscription") {
         if (browser.detection?.found) {
-          await browser.save(name.trim())
-          toast.success(`已连接 ${entry.name}`, "浏览器账号已通过真实额度查询，凭证加密保存在本机")
+          await browser.save("")
+          onSaved?.()
+          toast.success(`已连接 ${entry.name}`, "已保存账号，可继续添加同一供应商的其他账号")
           onClose()
           return
         }
-        const summary = await actions.readLocal(platform, "auth", name.trim(), entry.edition)
+        const summary = await actions.readLocal(platform, "auth", undefined, entry.edition)
         if (!summary.added && !summary.existing) throw new Error("未读取到可保存的登录，请重新检测")
         toast.success(summary.added ? `已连接 ${entry.name}` : "该账号已连接，无需重复添加", summary.warnings?.join("；"))
       } else {
@@ -238,18 +243,20 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
           ? (manualModel ? "模型 ID 为手动填写，未经模型接口验证；余额将在账号管理中独立查询" : "已通过模型接口验证；余额将在账号管理中独立查询")
           : "接口可达已验证；模型调用权限与额度分别展示")
       }
+      onSaved?.()
       onClose()
     } catch (reason) {
       // 失败保留输入（画板 29）
       setError(String(reason))
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
 
   return (
     <Dialog.Root open={dialogOpen} onOpenChange={(open) => {
-      if (open || saving) return
+      if (open || savingRef.current) return
       // 关闭、Esc 时有草稿先确认（画板 27「未保存更改」）
       if (hasDraft) setConfirmDiscard(true)
       else onClose()
@@ -271,7 +278,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
             </Dialog.Close>
           </div>
 
-          <div className="-mx-1 flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-1">
+          <fieldset disabled={saving} className="-mx-1 flex min-h-0 min-w-0 flex-1 flex-col gap-3.5 overflow-y-auto border-0 px-1 py-0">
             <div className="flex h-10 items-center gap-2.5">
               <span className="grid size-7 place-items-center"><PlatformLogo platform={platform} size={22} /></span>
               <span className="text-sm font-semibold text-jolu-text">{entry.name}</span>
@@ -280,6 +287,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
               <PlatformSwitcher
                 current={provider}
                 onPick={(next) => {
+                  if (savingRef.current) return
                   if (next === provider) return
                   if (hasDraft) setPendingPlatform(next)
                   else switchPlatform(next)
@@ -289,8 +297,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
             {pendingPlatform && (
               <div role="alert" className="flex items-center gap-3 rounded-[10px] border border-jolu-border bg-jolu-side px-4 py-2.5 text-xs text-jolu-text">
                 <span className="min-w-0 flex-1">更换为 {providerEntry(pendingPlatform).name} 会清空已填写的内容与检测结果。</span>
-                <JoluButton size="sm" variant="outline" onClick={() => setPendingPlatform(null)}>继续填写</JoluButton>
-                <JoluButton size="sm" variant="soft" onClick={() => switchPlatform(pendingPlatform)}>更换平台</JoluButton>
+                <JoluButton size="sm" variant="outline" disabled={saving} onClick={() => setPendingPlatform(null)}>继续填写</JoluButton>
+                <JoluButton size="sm" variant="soft" disabled={saving} onClick={() => switchPlatform(pendingPlatform)}>更换平台</JoluButton>
               </div>
             )}
 
@@ -302,7 +310,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                     type="button"
                     role="tab"
                     aria-selected={mode === value}
-                    onClick={() => { if (value !== mode) { invalidateModels(); setMode(value); setError(null) } }}
+                    onClick={() => { if (!savingRef.current && value !== mode) { invalidateModels(); setMode(value); setError(null) } }}
                     className={cn(
                       "flex-1 rounded-md text-[13px] outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
                       mode === value ? "bg-jolu-bg font-semibold text-jolu-on" : "text-jolu-muted hover:text-jolu-text",
@@ -314,11 +322,15 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
               </div>
             ) : reason && <p className="text-xs text-jolu-muted">{reason}</p>}
 
-            <Field label={custom ? "名称 *" : "连接名称 *"} hint={mode === "apiKey" ? "用于区分多个账号或服务，不影响供应商配置。" : actualDetection?.found && !name.trim() ? "请填写连接名称后保存。" : undefined} error={name && nameError ? nameError : null}>
-              {(id) => (
-                <TextInput id={id} value={name} onChange={setName} placeholder={mode === "subscription" ? "例如：个人订阅" : custom ? "例如：公司内部网关" : "例如：工作 API"} />
-              )}
-            </Field>
+            {mode === "subscription" ? (
+              <Field label="账号" hint={actualDetection?.found ? "账号来自本机登录或官方授权，保存时自动识别。" : "读取本地登录或完成浏览器授权后显示账号。"}>
+                {(id) => <TextInput id={id} value={actualDetection?.account ?? ""} onChange={() => {}} readOnly placeholder={actualDetection?.found ? "未获取账号标识" : "尚未获取账号"} />}
+              </Field>
+            ) : (
+              <Field label={custom ? "名称 *" : "连接名称 *"} hint="用于区分多个账号或服务，不影响供应商配置。" error={name && nameError ? nameError : null}>
+                {(id) => <TextInput id={id} value={name} onChange={setName} placeholder={custom ? "例如：公司内部网关" : "例如：工作 API"} />}
+              </Field>
+            )}
 
             {platform==="opencode" && <label className="text-xs text-jolu-text">模型服务<SelectField label="模型服务" className="mt-2 h-10 w-full" value={service} options={OPENCODE_SERVICES.map(s=>({value:s.id,label:s.label}))} onValueChange={value=>{const selected=OPENCODE_SERVICES.find(s=>s.id===value)!;setService(selected.id);setMode(selected.mode);setBaseUrl(selected.baseUrl);setSecret("");setDetection(null);invalidateModels()}} /></label>}
             {mode === "subscription" ? (
@@ -333,7 +345,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                 browserMessage={browser.message}
                 browserSupported={browser.supported}
                 browserReady={!!browser.detection?.found}
-                onBrowser={() => { ++loginRequest.current; setDetection(null); setError(null); void browser.start() }}
+                onBrowser={() => { if (savingRef.current) return; ++loginRequest.current; setDetection(null); setError(null); void browser.start() }}
                 tabs={tabs}
               />
               </>
@@ -463,12 +475,12 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
               </>
             )}
           {(error || browser.error) && <p role="alert" className="text-xs text-jolu-danger">{error || browser.error}</p>}
-          </div>
+          </fieldset>
           {confirmDiscard && (
             <div role="alertdialog" aria-label="放弃未保存的更改？" className="flex items-center gap-3 rounded-[10px] border border-jolu-border bg-jolu-side px-4 py-3 text-xs text-jolu-text">
               <span className="min-w-0 flex-1"><b className="font-semibold">放弃未保存的更改？</b> 已填写的内容不会保存。</span>
-              <JoluButton size="sm" variant="outline" onClick={() => setConfirmDiscard(false)}>继续编辑</JoluButton>
-              <JoluButton size="sm" variant="danger-soft" onClick={onClose}>放弃更改</JoluButton>
+              <JoluButton size="sm" variant="outline" disabled={saving} onClick={() => setConfirmDiscard(false)}>继续编辑</JoluButton>
+              <JoluButton size="sm" variant="danger-soft" disabled={saving} onClick={onClose}>放弃更改</JoluButton>
             </div>
           )}
 
@@ -528,7 +540,8 @@ function SubscriptionSection({ providerName, detecting, detection, onDetect, tab
             <Info label="凭证标识" value={detection.masked ?? "未获取"} />
             <Info label="套餐" value={detection.plan ?? "未获取"} />
           </div>
-          <span className="text-[11px] text-jolu-muted">{browserReady ? "账号已通过真实额度查询；保存后凭证加密保存在本机。" : "账号与套餐以本机客户端记录为准，未记录时显示「未获取」。"}</span>
+          <span className="text-[11px] text-jolu-muted">{browserReady ? "账号已通过官方身份验证；套餐与额度按平台实际能力显示。" : "账号与套餐以本机客户端记录为准，未记录时显示「未获取」。"}</span>
+          {browserReady && detection.message && <span className="text-[11px] leading-relaxed text-jolu-muted">{detection.message}</span>}
         </div>
         <div className="flex gap-2.5">
           {detectButton}
@@ -544,7 +557,7 @@ function SubscriptionSection({ providerName, detecting, detection, onDetect, tab
       <div className="flex flex-col gap-3.5 rounded-[10px] bg-jolu-side p-5">
         <LogIn aria-hidden className="size-6 text-jolu-text" />
         <span className="text-base font-semibold text-jolu-text">使用 {providerName} 账号连接</span>
-        <span className="text-xs text-jolu-muted">{browserSupported ? "读取官方客户端的本地登录，或使用系统默认浏览器完成官方授权。" : "读取官方客户端的本地登录；此供应商的浏览器授权待接入。"}</span>
+        <span className="text-xs text-jolu-muted">{browserSupported ? "读取官方客户端的当前登录，或在浏览器授权页切换账号，分别保存多个账号。" : "读取官方客户端的本地登录；此供应商的浏览器授权待接入。"}</span>
         <div className="flex gap-2.5">
           {detectButton}
           {browserButton}

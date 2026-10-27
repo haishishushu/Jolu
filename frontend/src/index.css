@@ -539,13 +539,17 @@
    新条能从当前帧接续，不会各自跳回起点；退场时长与 toastQueue 的 TOAST_EXIT_MS 一致。 */
 .motion-toast {
   opacity: 1;
-  transform: translateY(0) scale(1);
+  transform: translateY(0);
   transition: opacity 160ms ease, transform 180ms var(--motion-ease);
 }
 .motion-toast[data-state="closed"] {
   opacity: 0;
-  transform: translateY(-4px) scale(0.98);
+  transform: translateY(-4px);
   transition-duration: 140ms;
+}
+html.reduce-motion .motion-toast { transform: none; transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .motion-toast { transform: none; transition: none; }
 }
 .motion-popover {
   opacity: 1;
@@ -567,7 +571,7 @@
   .motion-overlay { opacity: 0; }
   .motion-dialog { transform: translateY(8px) scale(0.98); }
   .motion-popover { opacity: 0; transform: translateY(var(--popover-offset, -4px)); }
-  .motion-toast { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  .motion-toast { opacity: 0; transform: translateY(-6px); }
 }
 .motion-select-chevron { transition: transform 160ms var(--motion-ease); }
 [data-state="open"] > .motion-select-chevron { transform: rotate(180deg); }

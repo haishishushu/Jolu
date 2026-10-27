@@ -118,7 +118,7 @@ pub fn monitor_id(id: &str) -> Option<&str> {
 }
 
 /// 探测已在数据库锁外完成；这里仅登记所选来源，不执行外部程序或网络请求。
-pub(crate) fn register_accounts(conn:&Connection,platform:&str,name:Option<&str>,accounts:Vec<crate::login_detect::NativeAccount>) -> Result<(usize,usize,Vec<String>),String> {
+pub(crate) fn register_accounts(conn:&Connection,platform:&str,_name:Option<&str>,accounts:Vec<crate::login_detect::NativeAccount>) -> Result<(usize,usize,Vec<String>),String> {
         if !matches!(platform,"qoder"|"workbuddy"|"trae") { return Err("账号来源平台无效".into()); }
         if accounts.is_empty() || accounts.iter().any(|account| !matches!((platform,account.source_id),
             ("qoder","native:qoder:cn"|"native:qoder:global")|("workbuddy","native:workbuddy:main"|"native:workbuddy:ai")|("trae","native:trae:cn"|"native:trae:ide"))) {
@@ -127,30 +127,26 @@ pub(crate) fn register_accounts(conn:&Connection,platform:&str,name:Option<&str>
         let mut added=0;
         let mut existing=0;
         for account in accounts {
-            let display=crate::connections::validate_name(name.unwrap_or(account.name))?;
-            let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms) VALUES(?1,?2,'auth',?3,'本机来源','','connected',?4)",
-                params![format!("monitor:{}",account.source_id),platform,display,chrono::Utc::now().timestamp_millis()]).map_err(|_|"保存本机账号失败")?;
+            let official = account.account.as_deref().map(str::trim).filter(|value| !value.is_empty() && value.len() <= 320 && !value.chars().any(char::is_control));
+            let display=crate::connections::validate_name(&official.unwrap_or(account.name).chars().take(80).collect::<String>())?;
+            let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,account_email) VALUES(?1,?2,'auth',?3,'本机来源','','connected',?4,?5)",
+                params![format!("monitor:{}",account.source_id),platform,display,chrono::Utc::now().timestamp_millis(),official]).map_err(|_|"保存本机账号失败")?;
             added+=changed;
             existing+=usize::from(changed==0);
         }
         Ok((added,existing,vec![]))
 }
 
-pub fn register(conn:&Connection,platform:&str,name:Option<&str>) -> Result<(usize,usize,Vec<String>),String> {
+pub fn register(conn:&Connection,platform:&str,_name:Option<&str>) -> Result<(usize,usize,Vec<String>),String> {
     if matches!(platform,"qoder"|"workbuddy"|"trae") { return Err("请先在数据库锁外读取对应区域的本地登录".into()); }
     if platform=="opencode" {
         if !crate::opencode::openai_logged_in(){return Err("请先在 OpenCode 中登录 OpenAI".into())}
-        let name=crate::connections::validate_name(name.unwrap_or("OpenCode · OpenAI"))?;
+        let name=crate::connections::validate_name("OpenCode · OpenAI")?;
         let n=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,service) VALUES('monitor:native:opencode:openai','opencode','auth',?1,'OpenAI 订阅','','connected',?2,'openai')",params![name,chrono::Utc::now().timestamp_millis()]).map_err(|e|e.to_string())?;
         return Ok((n,usize::from(n==0),vec!["只读关联本机登录；不复制或刷新 OAuth 凭证".into()]));
     }
     if !crate::platforms::native(platform) {
         return Err("不是本机来源平台".into());
-    }
-    if let Some(name) = name {
-        if name.trim().is_empty() || name.chars().count() > 80 {
-            return Err("连接名称应为 1 到 80 个字符".into());
-        }
     }
     let found: Vec<_> = sources(platform)
         .into_iter()
@@ -162,7 +158,7 @@ pub fn register(conn:&Connection,platform:&str,name:Option<&str>) -> Result<(usi
             .and_then(|s| s.reason.clone())
             .unwrap_or_else(|| "未发现可用本机来源".into()));
     }
-    register_sources(conn, found, name)
+    register_sources(conn, found, None)
 }
 fn register_sources(
     conn: &Connection,
@@ -918,6 +914,18 @@ pub fn scan_changed(db: &mut impl Store, changed: &[PathBuf]) -> ScanResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_subscription_names_use_prepared_account_and_preserve_existing_name() {
+        let db = crate::db::open(Path::new(":memory:")).unwrap();
+        let account = || crate::login_detect::NativeAccount { source_id: "native:qoder:cn", name: "Qoder 国内版", account: Some("verified@example.test".into()) };
+        register_accounts(&db, "qoder", Some("前端任意名称"), vec![account()]).unwrap();
+        let row = crate::connections::list(&db).unwrap().remove(0);
+        assert_eq!(row.name, "verified@example.test");
+        assert_eq!(row.account_email.as_deref(), Some("verified@example.test"));
+        db.execute("UPDATE connections SET name='保留旧名'", []).unwrap();
+        register_accounts(&db, "qoder", Some("第二次任意名称"), vec![account()]).unwrap();
+        assert_eq!(crate::connections::list(&db).unwrap()[0].name, "保留旧名");
+    }
     #[test]
     fn prepared_native_accounts_register_without_local_probe_and_preserve_pause() {
         let db=crate::db::open(Path::new(":memory:")).unwrap();

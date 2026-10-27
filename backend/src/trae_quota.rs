@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use crate::quota::{AccountMetadata, QuotaState, QuotaWindow};
+use crate::quota::{AccountMetadata, QuotaAmountRange, QuotaState, QuotaWindow};
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
@@ -53,7 +53,7 @@ fn unauthorized(reason: &str) -> QuotaState {
 }
 
 // 只接受经实机验证的普通 tc 格式；未知版本/私有模式不猜测、不暴力尝试。
-fn decrypt_auth(encoded: &str) -> Option<Value> {
+pub(crate) fn decrypt_auth(encoded: &str) -> Option<Value> {
     if encoded.len() > 128 * 1024 {
         return None;
     }
@@ -137,6 +137,28 @@ fn window(
     }
 }
 
+fn amount_range(
+    key: String,
+    name: String,
+    used: Option<f64>,
+    total: Option<f64>,
+    unit: &str,
+    unlimited: bool,
+) -> QuotaAmountRange {
+    QuotaAmountRange {
+        key,
+        name,
+        total,
+        used,
+        unlimited,
+        remaining: None,
+        calculated_remaining: if unlimited { None } else {
+            total.zip(used).filter(|(t, u)| u <= t).map(|(t, u)| t - u)
+        },
+        unit: unit.into(),
+    }
+}
+
 fn parse_usage(value: &Value) -> QuotaState {
     if let Some(code) = value.get("code") {
         if code.as_i64() != Some(0) {
@@ -159,10 +181,14 @@ fn parse_usage(value: &Value) -> QuotaState {
         .find(|p| p["entitlement_base_info"]["product_extra"]["subscription_extra"].is_object())
         .and_then(|p| label(p, "display_desc"));
     let mut windows = Vec::new();
+    let mut amount_ranges = Vec::new();
     if let Some(summary) = value.get("usage_summary").filter(|v| v.is_object()) {
         let used = number(summary, "consumed_amount");
         let total = number(summary, "total_amount");
         if used.is_some() || total.is_some() {
+            amount_ranges.push(amount_range(
+                "trae:credits".into(), "积分汇总".into(), used, total, "积分", false,
+            ));
             windows.push(window(
                 "trae:credits".into(),
                 "积分额度".into(),
@@ -172,7 +198,8 @@ fn parse_usage(value: &Value) -> QuotaState {
             ));
         }
     }
-    if windows.is_empty() {
+    let has_summary = !windows.is_empty();
+    {
         let dollar_billing = value["is_dollar_usage_billing"].as_bool() == Some(true);
         for (index, pack) in packs.iter().enumerate() {
             let quota = &pack["entitlement_base_info"]["quota"];
@@ -224,8 +251,22 @@ fn parse_usage(value: &Value) -> QuotaState {
             };
             for &(limit_key, usage_key, name, unit) in fields {
                 let total = number(quota, limit_key);
-                let used = number(usage, usage_key);
-                if quota[limit_key].as_i64() == Some(-1) {
+                let unlimited = quota[limit_key].as_i64() == Some(-1);
+                let used = if usage_key == "premium_model_fast_request_usage" {
+                    number(usage, "premium_model_fast_amount").or_else(|| number(usage, usage_key))
+                } else {
+                    number(usage, usage_key)
+                };
+                if total.is_some() || used.is_some() || unlimited {
+                    amount_ranges.push(amount_range(
+                        format!("trae:{index}:{limit_key}"),
+                        format!("{title} · {name}"), used, total, unit, unlimited,
+                    ));
+                }
+                if has_summary {
+                    continue;
+                }
+                if unlimited {
                     windows.push(QuotaWindow {
                         key: format!("trae:{index}:{limit_key}"),
                         window_name: format!("{title} · {name}"),
@@ -258,6 +299,7 @@ fn parse_usage(value: &Value) -> QuotaState {
         account: Some(AccountMetadata {
             subscription_source: "live",
             observed_at: Some(chrono::Utc::now().to_rfc3339()),
+            amount_ranges: Some(amount_ranges),
             ..AccountMetadata::default()
         }),
     }
@@ -292,7 +334,7 @@ fn query_auth(auth: &Value) -> QuotaState {
     let response = match client
         .post(host)
         .header("Authorization", format!("Cloud-IDE-JWT {token}"))
-        .json(&serde_json::json!({"require_usage":true}))
+        .json(&serde_json::json!({"require_usage":true,"req_source":1}))
         .send()
     {
         Ok(response) => response,
@@ -421,7 +463,7 @@ fn auth_identity(auth: &Value) -> String {
     format!("{:x}", hash.finalize())
 }
 
-fn source_auth(source_id: &str) -> Result<(PathBuf, Value), QuotaState> {
+pub(crate) fn source_auth(source_id: &str) -> Result<(PathBuf, Value), QuotaState> {
     if crate::validation::isolated() {
         return Err(unauthorized("隔离环境不读取本机 Trae 登录"));
     }
@@ -520,6 +562,76 @@ mod tests {
         assert_eq!(windows[0].used_percent, Some(0.0));
         assert_eq!(windows[0].amount_text.as_deref(), Some("0 / 4600 积分"));
         assert!(windows[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn amount_ranges_preserve_summary_and_each_package_with_explicit_calculation() {
+        let result = parse_usage(&json!({
+            "usage_summary":{"consumed_amount":250.125,"total_amount":4700},
+            "user_entitlement_pack_list":[
+                {"display_desc":"每日签到","entitlement_base_info":{"quota":{"credits_limit":100}},"usage":{"credits_amount":20.125}},
+                {"display_desc":"注册奖励","entitlement_base_info":{"quota":{"credits_limit":4000}},"usage":{"credits_amount":230}},
+                {"display_desc":"快速请求","entitlement_base_info":{"quota":{"premium_model_fast_request_limit":10}},"usage":{"premium_model_fast_amount":3}}
+            ]
+        }));
+        let value = serde_json::to_value(result).unwrap();
+        let ranges = value["account"]["amount_ranges"].as_array().expect("must expose raw quota ranges");
+        assert_eq!(ranges.len(), 4);
+        for (range, total, used, calculated) in [
+            (&ranges[0], 4700.0, 250.125, 4449.875),
+            (&ranges[1], 100.0, 20.125, 79.875),
+            (&ranges[2], 4000.0, 230.0, 3770.0),
+            (&ranges[3], 10.0, 3.0, 7.0),
+        ] {
+            assert_eq!(range["total"], json!(total));
+            assert_eq!(range["used"], json!(used));
+            assert_eq!(range["remaining"], Value::Null, "calculated values must not masquerade as direct source fields");
+            assert_eq!(range["calculated_remaining"], json!(calculated));
+        }
+    }
+
+    #[test]
+    fn amount_ranges_keep_missing_and_incompatible_usage_unknown() {
+        for (summary, expected) in [
+            (json!({"total_amount":4700}), None),
+            (json!({"total_amount":0,"consumed_amount":0}), Some(0.0)),
+            (json!({"total_amount":10,"consumed_amount":11}), None),
+            (json!({"total_amount":10,"consumed_amount":-1}), None),
+        ] {
+            let value = serde_json::to_value(parse_usage(&json!({"usage_summary":summary,"user_entitlement_pack_list":[]}))).unwrap();
+            let ranges = value["account"]["amount_ranges"].as_array().expect("must preserve incomplete raw range");
+            assert_eq!(ranges[0]["calculated_remaining"], json!(expected));
+            assert_eq!(ranges[0]["remaining"], Value::Null);
+        }
+    }
+
+    #[test]
+    fn amount_ranges_preserve_unlimited_packages_with_and_without_summary_or_usage() {
+        for summary in [None, Some(json!({"total_amount":100,"consumed_amount":0}))] {
+            for used in [None, Some(3.0)] {
+                let mut body = json!({"user_entitlement_pack_list":[{
+                    "display_desc":"不限量包",
+                    "entitlement_base_info":{"quota":{"credits_limit":-1,"premium_model_fast_request_limit":-1}},
+                    "usage":{}
+                }]});
+                if let Some(summary) = &summary { body["usage_summary"] = summary.clone(); }
+                if let Some(used) = used { body["user_entitlement_pack_list"][0]["usage"]["credits_amount"] = json!(used); }
+                let value = serde_json::to_value(parse_usage(&body)).unwrap();
+                let ranges = value["account"]["amount_ranges"].as_array().expect("unlimited quotas must have explicit ranges");
+                let credit = ranges.iter().find(|range| range["key"] == "trae:0:credits_limit")
+                    .expect("unlimited credit quota must be retained");
+                let requests = ranges.iter().find(|range| range["key"] == "trae:0:premium_model_fast_request_limit")
+                    .expect("unlimited request quota must be retained");
+                for range in [credit, requests] {
+                    assert_eq!(range["unlimited"], json!(true));
+                    assert!(range["total"].is_null());
+                    assert!(range["remaining"].is_null());
+                    assert!(range["calculated_remaining"].is_null());
+                }
+                assert_eq!(credit["used"], json!(used));
+                assert!(requests["used"].is_null());
+            }
+        }
     }
 
     #[test]
@@ -646,6 +758,55 @@ mod tests {
                     assert!(!windows.is_empty());
                 }
                 _ => panic!("Trae 只读真机查询未成功；原始认证与响应不输出"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "显式执行：仅只读国内官方额度字段，输出数值与字段是否存在，不输出身份和原始响应"]
+    fn cn_credit_fields_read_only_smoke() {
+        let (_, auth) = source_auth("native:trae:cn")
+            .unwrap_or_else(|_| panic!("Trae 国内只读登录未就绪"));
+        let client = crate::quota::client().expect("Trae 国内只读客户端未就绪");
+        for full_data in [false, true] {
+            let response = client
+                .post(endpoint("https://api.trae.cn").unwrap())
+                .header("Authorization", format!("Cloud-IDE-JWT {}", auth["token"].as_str().unwrap()))
+                .json(&json!({"require_usage":true,"req_source":1,"full_data":full_data}))
+                .send()
+                .expect("Trae 国内只读额度请求失败");
+            assert_eq!(response.status().as_u16(), 200, "Trae 国内只读额度状态异常");
+            let mut body = Vec::new();
+            response.take(MAX_BYTES + 1).read_to_end(&mut body).expect("Trae 国内只读额度读取失败");
+            assert!(body.len() as u64 <= MAX_BYTES);
+            let value: Value = serde_json::from_slice(&body).expect("Trae 国内只读额度格式异常");
+            assert!(value.get("code").is_none_or(|v| v.as_i64() == Some(0)), "Trae 国内只读额度业务异常");
+            let summary = &value["usage_summary"];
+            println!("Trae CN full_data={full_data}: summary total={:?} consumed={:?} remaining={:?} available={:?}",
+                number(summary, "total_amount"), number(summary, "consumed_amount"),
+                number(summary, "remaining_amount"), number(summary, "available_amount"));
+            let packs = value["user_entitlement_pack_list"].as_array().expect("Trae 国内只读额度包列表缺失");
+            println!("Trae CN: packs={} has_history={} has_records={}", packs.len(),
+                value.get("history").is_some(), value.get("records").is_some());
+            let QuotaState::Ok { account: Some(account), .. } = parse_usage(&value) else {
+                panic!("Trae 国内只读额度解析未成功");
+            };
+            let ranges = account.amount_ranges.expect("Trae 国内只读额度未保留原始范围");
+            let summary_range = ranges.iter().find(|range| range.key == "trae:credits")
+                .expect("Trae 国内只读额度未保留积分汇总");
+            assert!(summary_range.remaining.is_none(), "Trae 没有直接返回余额，不得伪装来源字段");
+            assert_eq!(summary_range.calculated_remaining,
+                summary_range.total.zip(summary_range.used).filter(|(t, u)| u <= t).map(|(t, u)| t - u));
+            println!("Trae CN parsed: ranges={} calculated_remaining={:?}", ranges.len(), summary_range.calculated_remaining);
+            for (index, pack) in packs.iter().enumerate() {
+                println!("Trae CN pack={index}: total={:?} used={:?} remaining={:?} available={:?} source_type={:?} has_start={} has_end={} status={:?}",
+                    number(&pack["entitlement_base_info"]["quota"], "credits_limit"),
+                    number(&pack["usage"], "credits_amount"),
+                    number(&pack["usage"], "credits_remaining"),
+                    number(&pack["usage"], "credits_available"),
+                    pack["entitlement_base_info"]["product_extra"]["package_extra"]["package_source_type"].as_i64(),
+                    pack["entitlement_base_info"].get("start_time").is_some(),
+                    pack["entitlement_base_info"].get("end_time").is_some(), pack["status"].as_i64());
             }
         }
     }

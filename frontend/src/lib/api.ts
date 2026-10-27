@@ -154,6 +154,7 @@ export interface DataInfo {
 }
 
 export type MainIntentDto =
+  | { kind: "providers"; connection_id: string }
   | { kind: "overview"; settings: AppSettings }
   | { kind: "settings"; section: string }
   | { kind: "about"; version: string }
@@ -192,6 +193,8 @@ export type QuotaStateDto =
   | { state: "failed"; reason: string }
 
 export interface AccountQuotaMetadata {
+  /** 官方明确提供的逐范围绝对数；缺失项不可从旧汇总文本反推。 */
+  amount_ranges?: { key: string; name: string; total: number | null; remaining: number | null; unit: string; used?: number | null; calculated_remaining?: number | null; unlimited?: boolean }[] | null
   subscription_status: "active" | "expired" | "inactive" | "unknown"
   expires_at: string | null
   subscription_source: "live" | "local_snapshot" | "unavailable"
@@ -399,6 +402,7 @@ export const api = {
   sourceMetrics: (platform: string, period: string, custom: CustomRange | null, model: string | null, queryEndMs: number) => invoke<SourceMetrics>("source_metrics", { platform, period, custom, model, queryEndMs }),
   mainPanelReady: () => invoke<void>("main_panel_ready"),
   takeMainIntent: () => invoke<MainIntentDto | null>("take_main_intent"),
+  takeAppNotices: () => invoke<unknown[]>("take_app_notices"),
   menuAction: (id: string) => invoke<void>("menu_action", { id }),
   menuFit: (rootHeight: number) => invoke<{ root_x: number; root_y: number; root_width: number; sub_width: number; side: "left" | "right" }>("menu_fit", { rootHeight }),
   menuShow: () => invoke<void>("menu_show"),

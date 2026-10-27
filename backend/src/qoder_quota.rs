@@ -32,7 +32,11 @@ fn parse_usage(value: &Value) -> QuotaState {
         windows.push(QuotaWindow {
             key: format!("qoder:{key}"), window_name: name.into(),
             used_percent: number(bucket, "percentage").filter(|n| *n <= 100.0),
-            amount_text: number(bucket, "used").zip(number(bucket, total_key)).map(|(used, total)| format!("{used} / {total}{unit}")),
+            amount_text: match (number(bucket, "used"), number(bucket, total_key)) {
+                (Some(used), Some(total)) => Some(format!("{used} / {total}{unit}")),
+                (None, Some(total)) => Some(format!("总额度 {total}{unit}；已用未知")),
+                _ => None,
+            },
             remaining_text: number(bucket, "remaining").map(|remaining| format!("剩余 {remaining}{unit}")),
             // expiresAt 是订阅期限，不是额度重置时刻；不进行猜测转换。
             resets_at: None,
@@ -273,6 +277,19 @@ let count=0;readline.createInterface({input:process.stdin}).on('line',line=>{
         assert_eq!(windows[1].remaining_text.as_deref(), Some("剩余 0 credits"));
         assert_eq!(windows[2].amount_text.as_deref(), Some("20 / 80 credits"));
         assert!(windows.iter().all(|window| window.resets_at.is_none()));
+    }
+
+    #[test]
+    fn partial_total_keeps_explicit_total_without_inventing_used() {
+        let state = parse_usage(&json!({"usage":{"userType":"pro",
+            "userQuota":{"total":100,"remaining":40,"unit":"credits"},
+            "orgResourcePackage":{"cap":0,"remaining":0,"unit":"credits"}}}));
+        let QuotaState::Ok { windows, .. } = state else { panic!("expected account quota") };
+        assert_eq!(windows[0].amount_text.as_deref(), Some("总额度 100 credits；已用未知"));
+        assert_eq!(windows[0].remaining_text.as_deref(), Some("剩余 40 credits"));
+        assert_eq!(windows[1].amount_text.as_deref(), Some("总额度 0 credits；已用未知"));
+        assert_eq!(windows[1].remaining_text.as_deref(), Some("剩余 0 credits"));
+        assert!(windows.iter().all(|window| window.used_percent.is_none()));
     }
 
     #[test]
