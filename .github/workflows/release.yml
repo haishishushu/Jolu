@@ -1,0 +1,168 @@
+# 发行流程（规则见 docs/release-versioning.md）：
+# main 每次推送发一个新版本；手动推送的 v* 标签必须与 tauri.conf.json 版本一致；提交信息带 [skip ci] 跳过。
+# 先建草稿发行版，四个平台构建并上传后生成 latest.json，校验通过才转为公开并标记为最新，
+# 任一平台失败则保持草稿，不影响 releases/latest/download/latest.json。
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '创建并公开发行版；关闭时只做四个平台的构建与重命名（试运行）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: 计算版本号
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            config=$(node -p "require('./backend/tauri.conf.json').version")
+            if [[ "$version" != "$config" ]]; then
+              echo "::error::标签 $GITHUB_REF_NAME 与 tauri.conf.json 版本 $config 不一致"
+              exit 1
+            fi
+          else
+            # 已有标签和发行版（含失败留下的草稿）都参与计算，失败的版本号不复用
+            { git tag --list 'v*'; gh release list --limit 200 --json tagName --jq '.[].tagName'; } > tags.txt
+            version=$(node scripts/release/next-release-version.mjs tags.txt)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "发行版本：v$version"
+      - name: 创建草稿发行版
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "Jolu $TAG" --generate-notes
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+            target: ''
+            bundles: nsis
+          - os: macos-latest
+            platform: macos-arm64
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: macos-latest
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            target: ''
+            bundles: appimage,deb
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+    steps:
+      - uses: actions/checkout@v7
+      - name: 安装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.6.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './backend -> target'
+          key: ${{ matrix.platform }}
+      - name: 安装前端依赖
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir frontend install --frozen-lockfile
+      - name: 构建并签名
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--bundles "${{ matrix.bundles }}" --config "{\"version\":\"$VERSION\"}")
+          if [[ -n "$TARGET" ]]; then args+=(--target "$TARGET"); fi
+          # 直接调用包装脚本，避免 pnpm 在 Windows 经 cmd 转发时破坏 JSON 引号
+          node scripts/dev/tauri.mjs build "${args[@]}"
+      - name: 重命名并上传到草稿发行版
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="backend/target/${TARGET:+$TARGET/}release/bundle"
+          node scripts/release/release-assets.mjs collect "$VERSION" "${{ matrix.platform }}" "$bundle" release-assets
+          if [[ "${{ github.event_name != 'workflow_dispatch' || inputs.publish }}" == "true" ]]; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            echo "试运行：不上传"; ls -la release-assets
+          fi
+
+  publish:
+    needs: [prepare, build]
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: 生成并校验 latest.json，通过后公开发行版
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sigs
+          gh release download "$TAG" --pattern '*.sig' --dir sigs
+          node scripts/release/release-assets.mjs manifest "$VERSION" "$TAG" sigs latest.json "$(git log -1 --format=%s)"
+          gh release upload "$TAG" latest.json --clobber
+          gh release view "$TAG" --json assets > release.json
+          node scripts/release/verify-release.mjs "$VERSION" "$TAG" latest.json release.json
+          gh release edit "$TAG" --draft=false --latest

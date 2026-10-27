@@ -58,7 +58,7 @@ scripts/
 - 按日期记录的文档：`YYYY-MM-DD-主题.md`，放进上面对应的目录；不要再新建 `docs/superpowers/`，Superpowers 的计划写到 `docs/plans/`，设计说明写到 `docs/specs/`。
 - 前端：组件 `PascalCase.tsx`（一个文件导出多个基础组件时用 camelCase，如 `primitives.tsx`）；hook `useXxx.ts` 放在 `hooks/`；纯逻辑 `camelCase.ts`；测试 `<源文件名>.test.mjs`，与源文件同名同目录。
 - 后端 Rust：`snake_case.rs`；脚本：`kebab-case`。
-- 发布脚本在 `scripts/release/`。恢复 GitHub Actions 工作流时，脚本路径要改成这个目录。
+- 发布脚本在 `scripts/release/`，发行工作流是 `.github/workflows/release.yml`：**每次推送 main 都会发一个新的公开版本**，不需要发版的提交在信息中加 `[skip ci]`。规则见 `docs/release-versioning.md`。
 - 检查更新默认启用；构建时同时设置 `JOLU_UPDATES_ENABLED=0` / `VITE_JOLU_UPDATES_ENABLED=0` 可停用。Release 必须附正式私钥签名的安装包与 `latest.json`，否则检查会失败。测试公钥和本地端点仅放 output 的覆盖配置，不修改生产配置。
 - 安装器使用自定义模板 `backend/windows/installer.nsi`（基于 tauri-cli 2.11.4，改动处标 `Jolu:`）：固定安装到 `%LOCALAPPDATA%\Jolu`，不显示选择目录页。升级 `@tauri-apps/cli` 时须与上游模板对照。卸载钩子会删除名为 `Jolu` 的开机自启项，本机测试安装包时先备份、测后恢复。
 

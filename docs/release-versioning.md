@@ -8,14 +8,19 @@
 
 ## 每版单独发行
 
-- `main` 的每次成功构建使用一个新的 `vX.Y.Z` 标签和同名 GitHub Release。发行版只上传该版本的安装包、签名与 `latest.json`，不再向 `continuous` 追加资源或强制移动标签。
-- 版本号取 `backend/tauri.conf.json` 与已有 `vX.Y.Z` 标签中的最高版本，再按上述规则递增。历史版本已迁移完毕，版本计算不再依赖 `continuous`。
-- 同一工作流的 Windows、macOS 和 Linux 安装包共用版本号。发布更新清单前会检查标签、清单、安装包名称和下载地址都属于这一版；任一平台缺包则不部署新清单。
-- 构建失败后已创建的标签或部分发行版不复用版本号。下一次构建取更高版本，避免旧包与新包混在一页。
-- 应用更新清单指向 `releases/download/vX.Y.Z/…`；官网显示某个版本时，对应的发行页使用 `releases/tag/vX.Y.Z`。点击该页只能看到该版本的安装包。
+发行由 `.github/workflows/release.yml` 完成。
 
-维护者手动推送 `v*` 标签时，标签必须与 `backend/tauri.conf.json` 的版本一致。发行标签不应强制改指向或复用到别的提交。只改迁移工具或文档、无需重打安装包的维护提交可以使用 GitHub Actions 的 `[skip ci]` 跳过发行。
+- `main` 的每次推送使用一个新的 `vX.Y.Z` 标签和同名 GitHub Release。发行版只上传该版本的安装包、签名与 `latest.json`。
+- 版本号取 `backend/tauri.conf.json`、已有 `vX.Y.Z` 标签与已有发行版（含草稿）中的最高版本，再按上述规则递增（`scripts/release/next-release-version.mjs`）。构建时以 `--config` 注入版本号，不改写仓库里的配置文件。
+- 维护者手动推送 `v*` 标签时，标签必须与 `backend/tauri.conf.json` 的版本一致，工作流按该版本发行。也可以用 `gh workflow run release.yml --ref vX.Y.Z` 对已有标签重新触发。发行标签不应强制改指向或复用到别的提交。
+- 只改文档或工具、无需重打安装包的提交，可以在提交信息中加 `[skip ci]` 跳过发行。
 
-## 旧发行版迁移
+## 流程与校验
 
-旧 `continuous` 中的完整安装包已迁移至 `v0.1.9` 至 `v0.1.13` 五个独立发行页，每版 8 个文件。新工作流发布了 `v0.1.14`，Pages 的 `latest.json` 指向该标签后，`continuous` 已转为草稿，仍保存原资源供核查。旧资源中没有 `v0.1.1` 至 `v0.1.8` 的可核实完整安装包，因此不补建空发行版。迁移已全部完成，一次性迁移脚本已删除。
+1. 计算版本号，按当前提交创建草稿发行版。
+2. Windows（NSIS）、macOS arm64 / x86_64（app、dmg）、Linux x86_64（AppImage、deb）四路并行构建，使用仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 签名更新包。由 `scripts/release/release-assets.mjs collect` 统一重命名为 `Jolu-vX.Y.Z-<平台>` 后上传。
+3. `release-assets.mjs manifest` 用四个平台的 `.sig` 生成 `latest.json`，下载地址指向 `releases/download/vX.Y.Z/…`。`verify-release.mjs` 核对标签、清单、安装包名称、签名文件和下载地址都属于这一版。
+4. 校验通过后，草稿转为公开并标记为最新。应用的更新端点 `releases/latest/download/latest.json` 由此指向新版本。任一平台失败时发行版保持草稿，现有更新端点不受影响。
+5. 构建失败留下的草稿不复用版本号。下一次构建取更高版本，避免旧包与新包混在一页。
+
+macOS 安装包目前没有 Apple 开发者签名和公证，首次打开需要在系统设置中手动允许。
