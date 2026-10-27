@@ -1,0 +1,32 @@
+# 首次发行与开源隐私检查
+
+日期：2026-10-27。范围：仓库公开前的隐私检查，`.github/workflows/release.yml` 首次发行，正式安装包的真机安装与更新。
+
+## 隐私检查
+
+检查对象：当前跟踪的全部文件、`main` 的全部历史差异、提交元数据、README 截图与社交预览图、设计稿文本、测试夹具和验收文档。
+
+- 密钥：没有真实的私钥、访问令牌、API Key 或密码。命中的 `sk-…`、`ghp_…`、`AKIA…`、PEM 头和 JWT 都是脱敏测试用的占位串。更新签名私钥只存放在本机和仓库 Secret 中，`.gitignore` 已排除 `*.key`。
+- 个人信息：文件中的邮箱只有 `example.*`、`.test`、`.invalid` 等保留域名；路径为 `C:\Users\me`、`demo`、`x` 或 `D:/placeholder` 等示例；没有手机号，IP 只有本机和内网测试地址。
+- 截图与夹具：README 截图、托盘菜单和灵动岛截图均为预览示例数据；`backend/tests/fixtures/handoff/*.jsonl` 为“占位：…”合成会话。
+- 发布产物：安装包由 GitHub Actions 构建，不包含开发者本机路径。
+
+### 已处理
+
+- 提交元数据中的个人邮箱：本仓库改用 GitHub 隐私邮箱提交；`main` 历史已整体改写邮箱并强推，代码树与提交时间不变。
+- 改写前的旧提交在 GitHub 上仍可按哈希访问，其中两个包含开发者本机用户路径。已整理哈希清单，由仓库所有者向 GitHub Support 申请清除缓存。本地备份标签不推送到远端。
+
+### 非隐私问题
+
+- `docs/assets/readme/tray-menu.png` 与 `docs/assets/social-preview-1280x640.png` 仍显示旧名称和旧界面，需要重新截图。
+
+## 首次发行
+
+- 手动触发的试运行在四个平台一次通过，产物按 `Jolu-vX.Y.Z-<平台>` 命名，Windows、macOS 两种架构和 AppImage 均有更新签名。
+- `v0.1.0` 由标签触发发行：共 12 个资源，`latest.json` 列出 `windows-x86_64`、`darwin-aarch64`、`darwin-x86_64`、`linux-x86_64`。`verify-release` 校验通过后公开并标记为最新。
+- 正式安装包首次安装：欢迎页 → 安装 → 安装完成 → 完成页，没有选择目录页；安装到 `%LOCALAPPDATA%\Jolu`，卸载项为 `Jolu 0.1.0`。
+- 已安装的 0.1.0 通过正式端点检查更新，提示“已是最新版本”。
+
+## 网络环境注意
+
+`github.com` 在部分网络下无法直连（本次测试环境中 `api.github.com` 可以直连，`github.com` 超时）。更新端点位于 `github.com`，联网方式为“跟随系统”且没有系统代理时，检查会失败。可以在“设置 → 网络与代理”中改用手动代理，或开启代理软件的系统代理。
