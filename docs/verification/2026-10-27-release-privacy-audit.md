@@ -18,7 +18,7 @@
 
 ### 非隐私问题
 
-- README 配图已于同日按浏览器预览示例数据重新截取，旧的 `tray-menu.png` 由右键菜单图 `context-menu.png` 取代；`docs/assets/social-preview-1280x640.png` 仍显示旧名称和旧界面，需要重新制作。
+- README 配图已于同日按浏览器预览示例数据重新截取，旧的 `tray-menu.png` 由右键菜单图 `context-menu.png` 取代；`docs/assets/social-preview-1280x640.png` 已于 2026-10-28 用 `scripts/social-preview` 重新生成（浅色、中文，主窗口截图配灵动岛与人物），需由仓库所有者在 GitHub 设置中上传。
 
 ## 首次发行
 

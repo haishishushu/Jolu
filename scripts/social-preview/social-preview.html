@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Jolu social preview</title>
+<style>
+  /* 字体与前端同源（frontend/public/fonts）；中文回退到系统雅黑 */
+  @font-face {
+    font-family: "Inter";
+    src: url("{{interFontUrl}}") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+  }
+
+  /* 颜色取自 frontend/src/index.css 的浅色 jolu-* 变量 */
+  :root {
+    --jolu-bg: #ffffff;
+    --jolu-text: #111111;
+    --jolu-muted: #727277;
+    --jolu-border: #e8e8e8;
+    --jolu-accent: #06c167;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+
+  body {
+    position: relative;
+    background:
+      radial-gradient(640px 420px at 100% 0%, #06c16714, transparent 70%),
+      radial-gradient(520px 360px at 0% 100%, #06c1670d, transparent 70%),
+      var(--jolu-bg);
+    color: var(--jolu-text);
+    font-family: "Inter", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 左侧品牌与卖点；GitHub 各处会裁边，内容留在约 40px 的安全边距内 */
+  .copy { position: absolute; left: 72px; top: 76px; width: 480px; }
+
+  .brand { display: flex; align-items: center; gap: 18px; }
+  .brand img { width: 68px; height: 68px; border-radius: 16px; }
+  .brand svg { width: 112px; height: 45px; }
+
+  h1 {
+    margin-top: 42px;
+    font-size: 54px;
+    line-height: 1.22;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+  h1 em { font-style: normal; color: var(--jolu-accent); }
+
+  ul { margin-top: 34px; list-style: none; display: grid; gap: 16px; }
+  li { display: flex; align-items: center; gap: 14px; font-size: 23px; font-weight: 500; color: #2b2b2e; }
+  li::before {
+    content: "";
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--jolu-accent);
+    box-shadow: 0 0 0 5px #06c1671f;
+    flex: none;
+  }
+
+  .foot { position: absolute; left: 72px; bottom: 56px; font-size: 17px; color: var(--jolu-muted); }
+
+  /* 右侧主窗口截图：故意越过右边缘，暗示完整桌面应用 */
+  .shot {
+    position: absolute; left: 600px; top: 64px;
+    width: 760px; height: 534px;
+    border-radius: 16px;
+    border: 1px solid var(--jolu-border);
+    box-shadow: 0 28px 70px #1111111f, 0 4px 14px #11111110;
+    overflow: hidden;
+    background: #fff;
+  }
+  .shot img { width: 100%; display: block; }
+
+  /* 灵动岛叠在截图左下：只截取卡片本体，去掉原图下方的按钮行 */
+  .island {
+    /* 原图 896×802，卡片占第 34–775 行；按 316px 宽缩放后卡片底边约在 274px */
+    position: absolute; left: 556px; top: 332px;
+    width: 316px; height: 280px;
+    overflow: hidden;
+    filter: drop-shadow(0 18px 34px #11111124);
+  }
+  .island img { width: 100%; display: block; }
+
+  /* 人物从右下角探出挥手，脚部落在画布外 */
+  .character {
+    position: absolute; left: 1008px; top: 214px;
+    height: 486px;
+    filter: drop-shadow(0 16px 28px #1111111a);
+  }
+</style>
+</head>
+<body>
+  <section class="copy">
+    <div class="brand">
+      <img src="{{iconUrl}}" alt="" />
+      <!-- 字标路径取自 frontend/src/components/brand/Wordmark.tsx -->
+      <svg viewBox="0 0 67 27" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-label="Jolu">
+        <g stroke="#111111" stroke-width="2.6">
+          <path d="M4 4h11v12c0 9-12 9-12 1" />
+          <path d="M44 3l-4 15q-1 6 5 4" />
+          <path d="M51 11l-2 7q-1 6 5 5 5-1 7-12m0 0l-2 10q0 3 4 1" />
+        </g>
+        <path d="M29 10c-9 0-11 13-3 13 9 0 12-13 3-13z" stroke="#06c167" stroke-width="2.6" />
+      </svg>
+    </div>
+
+    <h1>把 AI 编程工具<br />管在<em>一处</em></h1>
+
+    <ul>
+      <li>额度常驻桌面灵动岛</li>
+      <li>每日福利一键签到</li>
+      <li>额度用完自动续跑</li>
+    </ul>
+  </section>
+
+  <p class="foot">Windows 10 / 11 · github.com/haishishushu/Jolu</p>
+
+  <div class="shot"><img src="{{shotUrl}}" alt="" /></div>
+  <div class="island"><img src="{{islandUrl}}" alt="" /></div>
+  <img class="character" src="{{characterUrl}}" alt="" />
+</body>
+</html>

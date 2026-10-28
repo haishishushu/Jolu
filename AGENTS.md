@@ -51,7 +51,7 @@ docs/
   logo/                     品牌人物与应用图标母版（scripts/icons 的输入）
   assets/                   README 截图与社交预览图
 scripts/
-  acceptance/  dev/  icons/  installer-art/  release/
+  acceptance/  dev/  icons/  installer-art/  release/  social-preview/
 ```
 
 - 目录名和文档文件名：小写 kebab-case，不使用中文或空格。`README`、`AGENTS`、`CLAUDE` 等约定俗成的文件除外。

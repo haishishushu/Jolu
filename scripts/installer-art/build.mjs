@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { findChrome, screenshot } from "./find-chrome.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..");
@@ -37,50 +38,6 @@ function fontDataUrl(file) {
   return `data:font/woff2;base64,${base64}`;
 }
 
-/**
- * 找 Chromium。优先 playwright 装好的 headless shell，其次完整 chrome，
- * 最后退回系统 Chrome / Edge。版本目录按数字倒序取最新。
- */
-function findChrome() {
-  if (process.env.JOLU_CHROME) return process.env.JOLU_CHROME;
-
-  const pwRoot = path.join(
-    process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
-    "ms-playwright",
-  );
-  if (fs.existsSync(pwRoot)) {
-    const version = (name) => Number(name.split("-").pop()) || 0;
-    const dirs = fs
-      .readdirSync(pwRoot)
-      .filter((name) => name.startsWith("chromium"))
-      .sort((a, b) => version(b) - version(a));
-    // headless shell 必须排在完整版 chrome 前面：完整版加 --headless=new 截图会挂住不退出
-    const byPreference = [
-      ...dirs.map((dir) =>
-        path.join(pwRoot, dir, "chrome-headless-shell-win64", "chrome-headless-shell.exe"),
-      ),
-      ...dirs.flatMap((dir) => [
-        path.join(pwRoot, dir, "chrome-win64", "chrome.exe"),
-        path.join(pwRoot, dir, "chrome-win", "chrome.exe"),
-      ]),
-    ];
-    const hit = byPreference.find((file) => fs.existsSync(file));
-    if (hit) return hit;
-  }
-
-  const system = [
-    String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-    String.raw`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
-    String.raw`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-    String.raw`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-  ].find((file) => fs.existsSync(file));
-  if (system) return system;
-
-  throw new Error(
-    "找不到 Chromium。先跑一次 playwright 安装浏览器，或设置 JOLU_CHROME 指向 chrome.exe。",
-  );
-}
-
 function render(chrome, target, tmpDir, tokens) {
   const html = fs
     .readFileSync(path.join(here, target.source), "utf8")
@@ -94,26 +51,14 @@ function render(chrome, target, tmpDir, tokens) {
   fs.writeFileSync(pagePath, html, "utf8");
 
   const pngPath = path.join(tmpDir, `${path.parse(target.output).name}.png`);
-  const args = [
-    "--disable-gpu",
-    "--hide-scrollbars",
-    "--allow-file-access-from-files",
-    "--no-first-run",
-    "--no-default-browser-check",
-    `--user-data-dir=${path.join(tmpDir, "profile")}`,
-    `--force-device-scale-factor=${SCALE}`,
-    `--window-size=${target.width},${target.height}`,
-    // 让内联字体解析完再截，否则会截到 fallback 字体
-    "--virtual-time-budget=4000",
-    `--screenshot=${pngPath}`,
-    pathToFileURL(pagePath).href,
-  ];
-  // chrome-headless-shell 本身就是无头的，再传 --headless 反而会被当成 URL 之外的噪声
-  if (!path.basename(chrome).includes("headless-shell")) args.unshift("--headless=new");
-
-  // 挂死比失败更难查，给个硬超时
-  execFileSync(chrome, args, { stdio: "pipe", timeout: 60_000 });
-  if (!fs.existsSync(pngPath)) throw new Error(`截图失败：${target.source}`);
+  screenshot(chrome, {
+    pageUrl: pathToFileURL(pagePath).href,
+    pngPath,
+    width: target.width,
+    height: target.height,
+    scale: SCALE,
+    profileDir: path.join(tmpDir, "profile"),
+  });
 
   const bmpPath = path.join(outDir, target.output);
   const output = execFileSync(
