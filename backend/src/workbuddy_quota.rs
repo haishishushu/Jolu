@@ -6,6 +6,8 @@
 //!   `account.{uid,nickname,email,enterpriseId}`
 //! - 积分：`POST {base}/billing/meter/get-user-resource-summary`，`data.Packages[]` 的
 //!   `CycleTotalCapacity / CycleRemainCapacity / CycleEndTime`
+//! - 企业 / 团队账号（带 enterpriseId，如教育公益版）：`POST {base}/v2/billing/meter/get-enterprise-user-usage`，
+//!   `data.{limit_num,used_num}`，与官方客户端 billing() 一致
 //! - 浏览器授权：系统默认浏览器完成官方登录，保存独立登录令牌，不读取浏览器数据库。
 //!
 //! 纪律：只读查询语义的 POST（请求体为空对象）；地址固定为官方域名，不按文件里的域名拼接；
@@ -299,6 +301,62 @@ fn parse_summary(body: &Value, now: chrono::DateTime<chrono::Utc>) -> QuotaState
     }) }
 }
 
+/// 企业 / 团队账号（如教育公益版）的积分由企业分配：官方客户端 account.js 的 billing()
+/// 对带 enterpriseId 的账号改查 get-enterprise-user-usage，不查个人资源包；
+/// `limit_num = -1` 表示不限量，剩余量由总量减已用得出。
+fn parse_enterprise_usage(body: &Value) -> QuotaState {
+    match body.get("code").and_then(Value::as_i64) {
+        Some(0 | 200) => {}
+        Some(401 | 10085) => return QuotaState::Unauthorized { reason: "WorkBuddy 登录已失效，请打开 WorkBuddy 重新登录".into() },
+        _ => return QuotaState::Failed { reason: "WorkBuddy 企业积分接口返回失败".into() },
+    }
+    // 网页端读 data.data.limitNum，桌面端读 data.limit_num
+    let data = ["/data/data", "/data"].iter().filter_map(|path| body.pointer(path))
+        .find(|data| ["limit_num", "limitNum"].iter().any(|key| data.get(key).is_some()));
+    let Some(data) = data else {
+        return QuotaState::Failed { reason: "WorkBuddy 企业积分响应缺少额度".into() };
+    };
+    let field = |snake: &str, camel: &str| data.get(snake).or_else(|| data.get(camel)).filter(|v| !v.is_null()).map(number);
+    let invalid = || QuotaState::Failed { reason: "WorkBuddy 企业积分额度缺失或无效".into() };
+    let used = match field("used_num", "usedNum") {
+        None => None,
+        Some(Some(used)) if used >= 0.0 => Some(used),
+        Some(_) => return invalid(),
+    };
+    let Some(Some(limit)) = field("limit_num", "limitNum") else { return invalid() };
+    let name = "企业分配积分";
+    let (window, range) = if limit == -1.0 {
+        (QuotaWindow {
+            key: "credits".into(),
+            window_name: name.into(),
+            used_percent: None,
+            amount_text: Some(used.map(|u| format!("已用 {u:.2} credits；不限量")).unwrap_or_else(|| "不限量".into())),
+            remaining_text: None,
+            resets_at: None,
+        }, QuotaAmountRange {
+            key: "workbuddy:enterprise".into(), name: name.into(), total: None, remaining: None,
+            unit: "credits".into(), used, calculated_remaining: None, unlimited: true,
+        })
+    } else {
+        let (true, Some(used)) = (limit >= 0.0, used) else { return invalid() };
+        let remaining = limit - used;
+        (QuotaWindow {
+            key: "credits".into(),
+            window_name: name.into(),
+            used_percent: (limit > 0.0).then(|| (used / limit * 1000.0).round().min(1000.0) / 10.0),
+            amount_text: Some(format!("{used:.2} / {limit:.2} credits")),
+            remaining_text: Some(format!("剩余 {remaining:.2} credits")),
+            resets_at: None,
+        }, QuotaAmountRange {
+            key: "workbuddy:enterprise".into(), name: name.into(), total: Some(limit), remaining: None,
+            unit: "credits".into(), used: Some(used), calculated_remaining: Some(remaining), unlimited: false,
+        })
+    };
+    QuotaState::Ok { windows: vec![window], plan: None, account: Some(AccountMetadata {
+        amount_ranges: Some(vec![range]), ..AccountMetadata::default()
+    }) }
+}
+
 // WorkBuddy 官方客户端 account.js 的付费/免费资源包编码；仅用于查询周期，不据此推断套餐。
 const PAID_PACKAGE_CODES: &[&str] = &[
     "TCACA_code_002_AkiJS3ZHF5", "TCACA_code_005_maRGyrHhw1", "TCACA_code_003_FAnt7lcmRT",
@@ -380,8 +438,11 @@ pub(crate) fn authorized_quota(edition: &str, session:&crate::workbuddy_browser_
 fn query(session: Session) -> QuotaState {
     let Session::Ready { edition, token, base, headers, email } = session else { unreachable!() };
     let client = match quota::client() { Ok(c) => c, Err(reason) => return QuotaState::Failed { reason } };
-    // 国际版接口有过 `/v2` 前缀的迁移，404 时再试一次
-    let paths: &[&str] = if edition == Edition::Ai {
+    let enterprise = headers.iter().any(|(name, _)| *name == "X-Enterprise-Id");
+    // 企业账号：官方桌面端 billingPrefix 为 `/v2`，网页端无前缀；国际版个人接口有过 `/v2` 迁移。404 时再试下一个
+    let paths: &[&str] = if enterprise {
+        &["/v2/billing/meter/get-enterprise-user-usage", "/billing/meter/get-enterprise-user-usage"]
+    } else if edition == Edition::Ai {
         &["/billing/meter/get-user-resource-summary", "/v2/billing/meter/get-user-resource-summary"]
     } else {
         &["/billing/meter/get-user-resource-summary"]
@@ -409,9 +470,10 @@ fn query(session: Session) -> QuotaState {
         let Ok(value) = serde_json::from_str::<Value>(&body) else {
             return QuotaState::Failed { reason: "WorkBuddy 积分响应格式无效".into() };
         };
-        let mut state = parse_summary(&value, chrono::Utc::now());
+        let mut state = if enterprise { parse_enterprise_usage(&value) } else { parse_summary(&value, chrono::Utc::now()) };
         if let QuotaState::Ok { windows,account, .. } = &mut state {
             account.get_or_insert_with(AccountMetadata::default).email = email;
+            if enterprise { return state; }
             if let Some(window)=windows.iter_mut().find(|window|window.key=="credits"&&window.resets_at.is_none()) {
                 window.resets_at=cycle_reset(&client,base,&token,&headers,&value);
             }
@@ -656,6 +718,56 @@ mod tests {
         assert_eq!(value["account"]["amount_ranges"], json!([
             {"key":"workbuddy:package:0","name":"积分资源包 1","total":100.0,"remaining":0.0,"unit":"credits","unlimited":false}
         ]));
+    }
+
+    #[test]
+    fn enterprise_account_queries_enterprise_usage_instead_of_personal_packages() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base: &'static str = Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..count]).unwrap().to_ascii_lowercase();
+            assert!(request.starts_with("post /v2/billing/meter/get-enterprise-user-usage "));
+            assert!(request.contains("x-enterprise-id: synthetic-enterprise"));
+            let body = json!({"code":0,"data":{"limit_num":2000,"used_num":8.35}}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let value = serde_json::to_value(query(Session::Ready {
+            edition: Edition::Cn, token: "synthetic-token".into(), base,
+            headers: vec![("X-User-Id", "synthetic-user".into()), ("X-Enterprise-Id", "synthetic-enterprise".into())],
+            email: None,
+        })).unwrap();
+        server.join().unwrap();
+        assert_eq!(value["state"], "ok");
+        assert_eq!(value["windows"][0]["remaining_text"], "剩余 1991.65 credits");
+        assert_eq!(value["windows"][0]["amount_text"], "8.35 / 2000.00 credits");
+    }
+
+    #[test]
+    fn enterprise_usage_keeps_unlimited_and_rejects_missing_amounts() {
+        let QuotaState::Ok { windows, account, .. } = parse_enterprise_usage(&json!({"code":0,"data":{"data":{"limitNum":-1,"usedNum":12}}})) else { panic!() };
+        assert_eq!(windows[0].amount_text.as_deref(), Some("已用 12.00 credits；不限量"));
+        assert_eq!(windows[0].used_percent, None);
+        let range = &account.unwrap().amount_ranges.unwrap()[0];
+        assert!(range.unlimited && range.total.is_none());
+
+        let QuotaState::Ok { windows, account, .. } = parse_enterprise_usage(&json!({"code":0,"data":{"limit_num":100,"used_num":0}})) else { panic!() };
+        assert_eq!(windows[0].used_percent, Some(0.0));
+        assert_eq!(account.unwrap().amount_ranges.unwrap()[0].calculated_remaining, Some(100.0));
+
+        for body in [
+            json!({"code":0,"data":{}}),
+            json!({"code":0,"data":{"limit_num":100}}),
+            json!({"code":0,"data":{"limit_num":-2,"used_num":1}}),
+            json!({"code":0,"data":{"limit_num":100,"used_num":-1}}),
+            json!({"code":1,"data":{"limit_num":100,"used_num":1}}),
+        ] {
+            assert!(matches!(parse_enterprise_usage(&body), QuotaState::Failed { .. }), "{body}");
+        }
+        assert!(matches!(parse_enterprise_usage(&json!({"code":401})), QuotaState::Unauthorized { .. }));
     }
 
     #[test]

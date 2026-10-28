@@ -93,13 +93,14 @@ impl Account {
                 "WorkBuddy 登录凭证无效，请重新授权",
             ));
         }
+        // 官方客户端 useCheckinService 只对无 enterpriseId 的个人账号启用签到。
         if headers
             .iter()
             .any(|(name, value)| *name == "X-Enterprise-Id" && !value.is_empty())
         {
             return Err(Outcome::new(
                 State::Forbidden,
-                "WorkBuddy 每日签到仅对符合活动条件的个人账号开放",
+                "WorkBuddy 企业 / 团队账号（如教育公益版）官方不开放每日签到，仅个人账号可签到",
             ));
         }
         Ok(Self {
