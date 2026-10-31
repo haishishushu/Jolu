@@ -1,578 +1,337 @@
-# 多厂商反代网关 · 执行开发文档（2026-10-29）
+# 账号汇聚网关 · 执行开发文档（2026-10-29 初稿 · 2026-11-01 按重新研究修订）
 
 **交给：鼠鼠**
-**状态：待实施**
+**状态：待实施。初稿的「多厂商反代 + 协议互转 + OAuth 注入」定位已废弃，以本版为准。**
 **参考实现：https://github.com/yetone/magpie（MIT，Go；仅作设计参考，不复制代码）**
 
 ## 0. 一句话说明
 
-给 Jolu 加一个可选的**多厂商反代网关**：本机监听一个端口，把 Claude Code / Codex 等 CLI 的请求转发到用户配置的任意厂商（Kimi / GLM / DeepSeek / 自建网关…），支持 API Key 与官方订阅两类凭证、跨协议转换、额度耗尽自动换号，并保留「一键切回直连」的逃生门。
+把 Jolu 已登记的本机凭证——`connections` 表里的官方订阅（发现/核实的 auth 连接）与 API Key（`api` 连接）——统一挂到一个本机网关后面。各 agent 把 base_url 指向网关后，模型选择器里出现所有凭证背后的模型（形如 `kimi/kimi-k2`、`codex/gpt-5.5`）。**统一接入的层是网关；MCP 桥只是 Claude 订阅适配器的内部零件，不承担通用接入。**
 
-现有 `proxy.rs` 是**只读观测器**（透传 + 计时）。本功能在它旁边长出一个**控制平面**，两者共用监听端口与配置接管机制，但数据路径严格分离。
+## 1. 修订说明：初稿错在哪里
 
----
+重新研究 magpie（稀疏克隆读码 + reference.md）后确认了四件事，本版据此重写：
 
-## 1. 实施前必读
+1. **`relay_providers` / `relay_accounts` 两张新表废弃。** Jolu 的 `connections` 表已经是 provider 池：`kind='auth'` 就是订阅账号、`kind='api'` 就是 Key 连接，`base_url` / `protocol` / `secret` / `model` 字段一样不缺。网关只需要一个「是否对外服务」开关。
+2. **OAuth 令牌不得注入 `api.anthropic.com`。** Anthropic 把其他 agent 的系统提示词归类为第三方流量，即使请求头看起来和 Claude Code 完全一样。magpie 因此对每次 Claude 订阅生成**驱动真实的本机 `claude` 二进制**（用它自己的登录），调用方的工具经 stdio MCP 桥进到那场会话。初稿 §5 的注入方案整体作废。
+3. **四协议互转矩阵降级。** `connections.protocol` 字段已经声明每个连接说 anthropic 还是 openai；Kimi / GLM / ZCode / DeepSeek 都提供两种协议的原生端点（ZCode 目录里的 `baseUrlChoices` 就是证据）。**主路径是同协议直通**，跨协议配对返回明确错误引导用户换端点。唯一必须做转换的是 Codex 订阅适配器（ChatGPT 后端只收流式、拒部分参数）。
+4. **magpie 的工程重心在接线层，不在网关。** `internal/agent/` 132 个文件 47,830 行（每个 agent 一个适配器：读凭证、改配置、断开恢复），`internal/gateway/` 82,556 行。Jolu 要补的主要缺口也是接线层，不是转发本身。
 
-### 1.1 铁律（本功能与现有纪律的冲突已备案，鼠鼠批准）
+## 2. 实施前必读
 
-| 现有纪律 | 本功能的态度 | 处理方式 |
-| --- | --- | --- |
-| `proxy.rs` 的「不注入凭证」 | **废除（仅反代模式）** | 观测模式保持透传；反代模式必须改写凭证。用 `ProxyMode` 枚举在代码层面隔开，不共用 `forward()` |
-| 「官方订阅直连一律不动」 | **放开** | 反代模式需接管官方订阅，见 §5 |
-| `AGENTS.md` 密钥不入日志 | **继续遵守** | 反代模式下凭证只存在于内存与加密存储，任何日志、诊断、导出都不含明文 |
-| `AGENTS.md` 数据结构变更需可恢复迁移 | **必须遵守** | 见 §6.2 |
+### 2.1 铁律
 
-### 1.2 前置条件（务必先确认，否则无法验证）
+| 纪律 | 本功能的态度 |
+| --- | --- |
+| `proxy.rs`「不注入凭证：请求头透传」 | **仅对反代模式废除**。观测模式保持透传；网关模式改写凭证，两条数据路径不共用 `forward()` |
+| `AGENTS.md` 密钥不入日志 / DTO 只带 masked | 继续遵守。网关持有的凭证只在后端内存与 `connections` 表 |
+| `cli_apply.rs` 写前备份 + `write_atomic` + 全局切换锁 | **作为接线层的模板原样延伸**到所有 agent |
+| `proxy_config.rs`「还原只清理自己的写入，外部意图优先」 | 原样延伸到接线层（magpie 的 `Unwire`/`Restore` 同义） |
+| `AGENTS.md` 数据结构变更需可恢复迁移 | 见 §4 |
+| 官方订阅直连不动（`probe_original` 的前提） | **仅网关模式放开**；观测模式行为不变 |
 
-**这台机器当前没有 Rust 工具链**，`cargo` / `rustc` 均不在 PATH，VS 2022 Community 已安装但缺少 MSVC 编译器与 Windows SDK。开工前先装：
+### 2.2 前置条件
+
+本机当前无 Rust 工具链（VS 2022 Community 在但缺 MSVC 编译器与 Windows SDK）。先装 `rustup`（选 x86_64-pc-windows-msvc）+ Build Tools 的「使用 C++ 的桌面开发」工作负载，自检：
 
 ```bash
-# 1. rustup（在线安装器，约 30MB）
-#    https://rustup.rs/  安装时选 x86_64-pc-windows-msvc
-# 2. VS 2022 Build Tools 的 C++ 工作负载
-#    打开 Visual Studio Installer → 修改 → 勾选「使用 C++ 的桌面开发」
-#    右侧组件至少保留：MSVC v143 编译器、Windows 10/11 SDK
+rustc -V   # >= 1.90（backend/Cargo.toml 的 rust-version）
+cargo test --manifest-path backend/Cargo.toml   # 基线全绿再开工
 ```
 
-装完自检（三条都要过）：
+### 2.3 开工前基线
 
 ```bash
-rustc -V                 # 需 >= 1.90（backend/Cargo.toml 的 rust-version）
-cargo -V
-cargo test --manifest-path backend/Cargo.toml   # 现有测试应全绿再开工
-```
-
-首次 `cargo build` 会编译 `rusqlite` 的 bundled SQLite 和整个 Tauri 依赖树，约 15–25 分钟，属正常。
-
-### 1.3 开工前的基线验证
-
-```bash
-cd D:/develop/Jolu
 pnpm --dir frontend typecheck
-node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs   # 应 198 passed
-cargo test --manifest-path backend/Cargo.toml                           # 应全绿
+node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs   # 全绿
+cargo test --manifest-path backend/Cargo.toml                           # 全绿
 ```
 
-基线不绿先修，不要带着失败开工。
+## 3. 目标与不做的事
 
----
+### 3.1 本期要做
 
-## 2. 目标与不做的事
+1. **网关本体**：与观测模式共用监听端口（`settings.proxy_port`，默认 12731），新增 `/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1/models` 四个入口
+2. **连接适配器**：`kind='api'` 连接按 `protocol` 字段同协议直通（换 base_url、凭证头、model 名）
+3. **Claude 订阅适配器**：驱动真实 `claude` 二进制 + stdio MCP 工具桥（§7）
+4. **Codex 订阅适配器**：凭本机 `auth.json` 的令牌调 ChatGPT 后端，非流式转流式、丢弃后端拒绝的参数（§8）
+5. **接线层**：把各 agent 的配置指向网关（Claude Code / Codex 改造现有 `cli_apply.rs` 路径；ZCode / Gemini CLI / OpenCode 新写适配器）（§9）
+6. **额度感知路由 + 会话亲和**：复用 `quota.rs` / `coding_plan.rs` 的窗口数据（§10）
+7. **归账**：网关模式直接带 `connection_id` 落 `requests` 表（比观测模式的指纹匹配更准）
+8. **逃生门**：手动切回直连、连续失败自动熔断、启动自愈（§11）
 
-### 2.1 本期要做
+### 3.2 本期明确不做
 
-1. **厂商注册表**：新增/编辑/删除厂商，每家按协议分别存 base URL 与密钥
-2. **同协议反代**：路径判定协议 → 选厂商 → 改写 URL / 凭证 / model → 流式回传
-3. **跨协议转换**：Anthropic Messages ↔ OpenAI Chat Completions（双向）、Anthropic → OpenAI Responses（单向）
-4. **凭证解析**：API Key + 官方订阅 OAuth（Claude / Codex 本机凭证读取与刷新）
-5. **账号池与故障转移**：同厂商多账号，额度耗尽/429/5xx 时换号；换号失败再换厂商
-6. **逃生门**：手动「切回直连」按钮 + 自动熔断（连续失败 N 次自动还原）
-7. **用量归账**：反代请求写入现有 `requests` 表，按厂商 + 账号归账
-
-### 2.2 本期明确不做
-
-- 插件系统（magpie 的 Bun 运行时）
-- 隐私脱敏（本地小模型）
-- 局域网共享 / Docker / 远程 magpie / WebDAV 同步
-- Ollama 兼容层（`/api/chat`、`/api/generate`）
-- Gemini 协议的原生转换（只保留 base URL 直连能力，不做 generateContent ↔ Messages 互转）
-- MCP / Skills / Prompts 注入（那是 magpie 的 Library，与网关无关）
-
-**这一条边界是鼠鼠明确要求的「只做厂商反代」，越界的功能一律驳回。**
-
----
-
-## 3. 架构
-
-### 3.1 模块划分（新建 `backend/src/gateway/`）
-
-```
-backend/src/
-  gateway/
-    mod.rs            模块入口、ProxyMode 定义、对外 API
-    registry.rs       厂商与账号的读写（providers.json 或 SQLite）
-    protocol.rs       Protocol 枚举、请求/响应的规范化中间表示（Request / Part）
-    route.rs          选厂商、选账号、故障转移决策
-    credential.rs     凭证解析与注入（API Key / OAuth，含刷新）
-    error.rs          错误类型与对外错误翻译
-    convert/
-      mod.rs
-      anthropic.rs    Anthropic Messages 解析与生成
-      chat.rs         OpenAI Chat Completions 解析与生成
-      responses.rs    OpenAI Responses 解析与生成
-      stream.rs       SSE 流事件映射
-    server.rs         HTTP 路由与 handler
-  proxy.rs            **保持现状**，仅增加 ProxyMode 分支入口
-  proxy_config.rs     **保持现状**，增加反代模式的接管/还原
-```
-
-**关键约束：** `proxy.rs` 与 `gateway/` 不共享 `forward()`。`proxy.rs` 的 `forward` 保持零转换；`gateway/` 写自己的 handler。共用的是端口绑定、配置接管、`requests` 表落库三样基础设施。
-
-### 3.2 数据流
-
-```
-CLI (Claude Code)
-   │  POST http://127.0.0.1:<port>/v1/messages
-   ▼
-gateway/server.rs  ── 路径判定协议 = Anthropic
-   │
-   ▼
-gateway/route.rs   ── 按 model 匹配厂商绑定 / 默认厂商
-   │                  选出 (provider, account)
-   ▼
-gateway/convert/anthropic.rs  ── parse → 规范化 Request
-   │
-   ▼  (若厂商原生协议 != Anthropic)
-gateway/convert/chat.rs       ── Request → OpenAI Chat body
-   │
-   ▼
-gateway/credential.rs  ── 注入该账号凭证（替换 Authorization / x-api-key）
-   │
-   ▼
-上游厂商 (Kimi / GLM / ...)
-   │
-   ▼  (若需转换)
-gateway/convert/stream.rs ── Chat SSE → Anthropic SSE 事件映射
-   │
-   ▼
-CLI 收到 Anthropic 格式流
-```
-
-### 3.3 与观测模式的关系
-
-`ProxyMode` 两值：
-
-```rust
-pub enum ProxyMode {
-    /// 现有行为：透传 + 计时，不碰凭证
-    Observe,
-    /// 新增行为：厂商反代，改写请求
-    Relay,
-}
-```
-
-`ProxyDeps` 增加 `mode: ProxyMode` 字段。`forward()` 首行按 mode 分发；`Relay` 走 `gateway::server::handle`。**不要让 `forward()` 内部长出第二套逻辑。**
-
----
+- **跨协议翻译**（如 Claude Code → 仅提供 OpenAI 协议的 Key）：返回 400 并在错误里说明「该连接仅提供 OpenAI 协议端点，请为其选择 Anthropic 兼容地址或改用其他连接」。设计上保留扩展位（§5.4），本期不实现
+- **Gemini 订阅、Grok 订阅适配器**：Google 已停止向个人账号提供 Gemini CLI 登录的 Code Assist 服务（需 Standard/Enterprise + GCP 项目，且账号在 Antigravity 之外使用有封号风险）；SuperGrok 的 OAuth 转发风控未评估。两项列入待确认（§13），API Key 方式的 grok / gemini 连接照常直通
+- 插件系统、隐私脱敏、局域网共享、Docker、WebDAV 同步、Ollama 兼容路由、MCP 形式的辅助工具（配额查询等，独立小功能后续另立项）
+- **多 Claude 账号的文件级切换**：桥接前若要换账号需要改写 `~/.claude` 凭证文件，可能与用户正在运行的交互式 Claude Code 冲突。本期桥接只使用「当前本机生效的 Claude 登录」（`current_connection.rs` 的语义），多账号切换列入待确认（§13）
 
 ## 4. 数据模型
 
-### 4.1 厂商（Provider）
-
-落库选择 **SQLite 新表**（与 `connections` 同库），理由：现有 `connections` 表语义是「检测到的连接」，与「用户配置的厂商」不同；混用会让所有 `connections` 查询都要加过滤条件。新表独立，互不影响。
+### 4.1 `connections` 表扩展（唯一 schema 变更）
 
 ```sql
-CREATE TABLE IF NOT EXISTS relay_providers (
-    id          TEXT PRIMARY KEY,          -- uuid
-    name        TEXT NOT NULL,             -- 展示名，如 "Kimi"
-    preset      TEXT,                      -- 预置模板 id，自定义为 NULL
-    -- 按协议分别存 base URL；NULL 表示该厂商不支持此协议
-    base_chat      TEXT,
-    base_responses TEXT,
-    base_anthropic TEXT,
-    base_gemini    TEXT,
-    -- 模型映射：JSON 数组，元素形如 {"from":"claude-sonnet-4","to":"kimi-k2"}
-    model_map   TEXT NOT NULL DEFAULT '[]',
-    -- 默认协议优先级：JSON 数组，如 ["anthropic","chat"]
-    protocol_order TEXT NOT NULL DEFAULT '["anthropic","chat"]',
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    created_ms  INTEGER NOT NULL,
-    updated_ms  INTEGER NOT NULL
-);
+ALTER TABLE connections ADD COLUMN serve_enabled INTEGER NOT NULL DEFAULT 0;
 ```
 
-### 4.2 账号（Account）
+- `serve_enabled = 1` 的连接进入网关模型池；默认 0，观测行为完全不变
+- `kind='auth'` 的连接 `serve_enabled` 只对 claude / codex 平台允许置 1（其余平台的订阅暂无适配器，见 §3.2）
+- 沿用现有迁移风格（`db.rs` 里对 `ALTER TABLE ... ADD COLUMN` 的既有写法），旧库升级自动获得该列
 
-```sql
-CREATE TABLE IF NOT EXISTS relay_accounts (
-    id           TEXT PRIMARY KEY,
-    provider_id  TEXT NOT NULL REFERENCES relay_providers(id) ON DELETE CASCADE,
-    kind         TEXT NOT NULL CHECK (kind IN ('api','oauth')),
-    name         TEXT NOT NULL,            -- 展示名
-    -- 密钥：api 存用户填的 key；oauth 存 token bundle 的加密串
-    -- 加密方式沿用 backend/src/creds.rs 的现有方案（DPAPI），不得新造
-    secret_enc   BLOB,
-    -- OAuth 专用
-    oauth_kind   TEXT,                     -- 'claude' | 'codex'
-    expires_ms   INTEGER,
-    refresh_enc  BLOB,
-    -- 状态
-    status       TEXT NOT NULL DEFAULT 'active',   -- active | exhausted | invalid
-    cooldown_until_ms INTEGER,
-    last_used_ms INTEGER,
-    weight       INTEGER NOT NULL DEFAULT 1,
-    created_ms   INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_relay_accounts_provider ON relay_accounts(provider_id);
-```
+**不新建任何 provider/账号表。**`connections` 的既有字段语义映射：
 
-### 4.3 设置项（`backend/src/settings.rs`）
-
-在 `Settings` 结构新增，**全部带 `#[serde(default)]`**：
-
-```rust
-/// 本地代理工作模式：observe（现有观测）/ relay（厂商反代）
-#[serde(default = "default_proxy_mode")]
-pub proxy_mode: String,                    // "observe" | "relay"
-
-/// 反代模式：模型名无法匹配任何厂商绑定时使用的默认厂商 id
-#[serde(default)]
-pub proxy_default_provider: Option<String>,
-
-/// 反代模式：连续失败达到该次数自动切回直连（逃生门）
-#[serde(default = "default_relay_circuit")]
-pub proxy_relay_circuit_threshold: u32,    // 默认 5
-
-/// 反代模式：是否允许自动切回直连（关闭后只能手动）
-#[serde(default = "yes")]
-pub proxy_relay_auto_escape: bool,
-
-/// 反代模式：是否已接管官方订阅的 CLI 配置（还原时用）
-#[serde(default)]
-pub proxy_relay_took_official: bool,
-```
-
-**迁移要求：** 旧版本设置的 `proxy_claude_upstream` / `proxy_codex_upstream` **保留不动**，观测模式继续使用它们。反代模式不读这两个字段，读 `relay_providers` 表。这样两套配置互不干扰，降级回旧版本也不会坏。
-
-### 4.4 `requests` 表扩展
-
-现有 `requests` 表增加两列（`db.rs` 的迁移区，参考已有的 `ALTER TABLE connections ADD COLUMN account_email` 写法）：
-
-```sql
-ALTER TABLE requests ADD COLUMN relay_provider_id TEXT;   -- 反代记录归属的厂商
-ALTER TABLE requests ADD COLUMN relay_account_id  TEXT;   -- 归属的账号
-```
-
-观测模式写入时这两列为 NULL，不受影响。
-
----
-
-## 5. 凭证解析（官方订阅部分）
-
-这是本期最需要小心的部分。magpie 对应代码是 `claude_subscription.go`（4,778 行），我们不抄，只做最小闭环。
-
-### 5.1 Claude 官方订阅
-
-本机凭证位置（`backend/src/creds.rs` 已有读取逻辑可复用）：
-
-- `~/.claude/.credentials.json`（或 `$CLAUDE_CONFIG_DIR/.credentials.json`）
-- 结构：`{"claudeAiOauth":{"accessToken":"...","refreshToken":"...","expiresAt":<ms>,"scopes":[...]}}`
-
-**要做的事：**
-
-1. 读取 `accessToken` 与 `expiresAt`
-2. 过期前 5 分钟用 `refreshToken` 调 `https://api.anthropic.com/v1/oauth/token` 刷新
-3. 刷新成功后**只更新内存与本表**，不回写 CLI 的凭证文件（回写会与 CLI 自己刷新冲突，见 §5.3）
-4. 请求时注入 `Authorization: Bearer <accessToken>`
-5. 官方端点固定 `https://api.anthropic.com`，**不允许用户改**，否则就是把凭证发给第三方
-
-`backend/src/claude_auth.rs` 已有 `PROFILE_URL` 与预检逻辑，参考它的错误处理风格（缺字段时明确报错，不静默降级）。
-
-### 5.2 Codex 官方订阅
-
-- `~/.codex/auth.json`，含 `OPENAI_API_KEY`（可为 null）与 `tokens.access_token` / `refresh_token`
-- 有 `chatgpt-account-id` 头需一并转发
-- 刷新端点 `https://auth.openai.com/oauth/token`
-- `backend/src/creds.rs` 的 `local_codex_auth()` 已能读出 token，复用
-
-### 5.3 刷新冲突（必须处理）
-
-CLI 自己也会刷新 token。如果 Jolu 刷了但没回写，CLI 手里的 refreshToken 可能已被 Jolu 用掉而失效（多数 OAuth 实现 refreshToken 是轮换的）。
-
-**处理方式（二选一，文档要求选 A）：**
-
-- **A（推荐）**：每次请求前**重新读一次** CLI 的凭证文件，只在文件里的 token 已过期时才用 Jolu 缓存的；Jolu 刷新后**回写**凭证文件（保持 CLI 可用），回写前比对文件 mtime，若外部已改则放弃回写、改用外部值。这与 `proxy_config.rs` 的「外部意图优先」原则一致。
-- B：完全不刷新，token 过期就报错让用户去 CLI 重新登录。体验差，不推荐。
-
-### 5.4 安全底线
-
-- 凭证**只存加密后的 BLOB**，加密沿用现有 DPAPI 方案（`creds.rs`），不得新造算法
-- 前端 DTO **绝不含**明文 secret，只返回 `masked`
-- 任何 `eprintln!`、诊断、导出、日志都不得出现 token
-- 官方端点 URL 硬编码，不可配置
-
----
-
-## 6. 协议转换
-
-### 6.1 规范化中间表示
-
-参考 magpie 的 `Request` / `Part` 设计（`internal/gateway/chat.go`、`anthropic.go`），在 `gateway/protocol.rs` 定义：
-
-```rust
-/// 跨协议通用的请求表示
-pub struct Request {
-    pub model: String,
-    pub system: Option<String>,
-    pub messages: Vec<Message>,
-    pub tools: Vec<Tool>,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
-    pub stream: bool,
-    // 扩展参数原样保留，转换时不丢失
-    pub extra: serde_json::Map<String, Value>,
-}
-
-pub struct Message {
-    pub role: Role,          // System | User | Assistant
-    pub parts: Vec<Part>,
-}
-
-pub enum Part {
-    Text(String),
-    Image { data_url: String, detail: Option<String> },
-    ToolUse { id: String, name: String, input: Value },
-    ToolResult { tool_use_id: String, content: Vec<Part>, is_error: bool },
-    /// 思考内容：Anthropic 的 thinking block / OpenAI 的 reasoning_content
-    Reasoning { text: String, signature: Option<String> },
-}
-```
-
-**为什么必须有中间表示：** 直接写 Anthropic → Chat 的转换函数，将来加第三个协议就要写 6 个函数；有中间表示只需 N 个 parse + N 个 build。这是 magpie 8 万行里唯一值得抄的架构决策。
-
-### 6.2 转换矩阵（本期范围）
-
-| 下游（CLI） | 上游（厂商原生） | 实现 |
-| --- | --- | --- |
-| Anthropic | Anthropic | 直通（只换 URL/凭证/model） |
-| Anthropic | Chat | 需要转换 |
-| Anthropic | Responses | 需要转换 |
-| Chat | Chat | 直通 |
-| Chat | Anthropic | 需要转换 |
-| Chat | Responses | **本期不做**，报明确错误 |
-| Responses | Responses | 直通 |
-| Responses | Chat | **本期不做**，报明确错误 |
-
-不支持的组合必须返回清晰的 400 与中文说明，**不允许静默降级成别的协议**（会得到语义错误的结果）。
-
-### 6.3 流式映射（最容易出错的地方）
-
-`gateway/convert/stream.rs`。核心事件对应：
-
-**Anthropic → Chat（下游 Anthropic，上游 Chat）：**
-
-| 上游 Chat chunk | 下游 Anthropic 事件 |
+| 网关概念 | connections 字段 |
 | --- | --- |
-| 首个 chunk | `message_start`（含 `message.id`、`usage.input_tokens`） |
-| `delta.content` | `content_block_start`（首次）+ `content_block_delta`(`text_delta`) |
-| `delta.reasoning_content` | `content_block_delta`(`thinking_delta`) |
-| `delta.tool_calls[].function` | `content_block_start`(`tool_use`) + `content_block_delta`(`input_json_delta`) |
-| `finish_reason` | `content_block_stop` + `message_delta`(`stop_reason`) |
-| 流结束 | `message_stop` |
+| 模型源 | 一行连接 |
+| 上游地址 | `base_url`（auth 连接为空 = 官方端点，由适配器决定） |
+| 协议 | `protocol`（anthropic / openai） |
+| 凭证 | `secret`（auth 连接配合 `auth_snapshot` 恢复语义） |
+| 默认模型 | `model` |
+| 状态 | `status`（网关在 401/429/402 时更新，见 §10.3） |
 
-**必须遵守的细节：**
+### 4.2 模型命名空间
 
-- `content_block_index` 全程单调递增，不能跳号
-- `input_json_delta` 是**增量拼接**的 JSON 字符串，不能每块都是一个完整 JSON
-- `stop_reason` 映射：Chat 的 `stop` → Anthropic 的 `end_turn`，`length` → `max_tokens`，`tool_calls` → `tool_use`
-- `usage` 只在 `message_start` 与 `message_delta` 出现，中间不重复
-- **thinking signature 必须原样透传**，改动会导致上游拒签（Claude 的 thinking block 有此要求）
+- 对外模型 id：`<连接 slug>/<模型名>`。slug 取连接 `name` 的 URL 安全化小写形式（建连接时若与既有 slug 冲突则加序号），网关启动/连接变更时重建「slug → 连接」索引
+- 每个 `serve_enabled` 连接对外暴露的模型列表来源：`fetch_models`（现有实现，按 `protocol` 发头请求 `/v1/models`）；订阅连接暴露适配器内置清单（Claude 桥 = 该账号可用的 Claude 模型；Codex = ChatGPT 后端返回的清单，失败时用内置兜底表）
+- `GET /v1/models` 返回全部池内模型；agent 侧的模型选择器直接消费
+- agent 传来的模型 id 未命中任何 slug 时：若 `settings.gateway_default_connection` 指向某连接，用它的 `model` 字段兜底；否则 400，错误信息列出可用 slug
 
-### 6.4 请求侧的坑（逐条核对）
-
-1. **`model` 字段替换**：按 `model_map` 映射，未命中且配置了默认厂商则用默认，否则报错
-2. **工具定义**：Anthropic `input_schema` ↔ Chat `function.parameters`，字段名不同
-3. **工具调用配对**：Chat 要求每个 `tool` 消息前面有对应的 `assistant.tool_calls`，否则上游 400。转换时要校验并成对；孤儿 tool 消息丢弃并记日志
-4. **空 assistant 消息**：某些上游拒绝空 content，转换时过滤
-5. **图片**：Chat 的 `image_url`（data URL）↔ Anthropic 的 `source.base64`
-6. **`max_tokens` 必填**：Anthropic 要求必填，Chat 可选。反向转换时给默认值并从响应里读实际值
-7. **`temperature` 范围**：Anthropic 0–1，OpenAI 0–2。跨协议时钳制并记日志
-
-### 6.5 请求体处理（性能）
-
-现有 `forward()` 用 `to_bytes(body, 512MB)` 全量缓冲。反代必须读 body 才能改 `model`，但要避免把 512MB JSON 建成 DOM：
-
-- **同协议直通**：只做外层字段替换。用 `serde_json::Value` 解析后改 `model` 再序列化（简单可靠，长上下文时有内存峰值）；或做字节级定位替换（快但脆弱）。**本期选前者**，在文档里注明长上下文内存风险，二期再优化
-- **跨协议转换**：必须完整 parse，无法避免。转换后立即释放原始 body
-- 内存峰值监控：`perf_bench.rs` 已有基准框架，加一个 10MB 请求体的用例
-
----
-
-## 7. 路由与故障转移
-
-### 7.1 选厂商
-
-```
-1. 解析请求的 model 名（下游传入的）
-2. 遍历 enabled 厂商，看其 model_map 是否命中该 from
-3. 命中多个 → 按 protocol_order 偏好 + 最近成功优先
-4. 未命中 → 用 proxy_default_provider
-5. 仍无 → 返回 400，中文说明「模型 X 未绑定任何厂商，请在设置中配置」
-```
-
-### 7.2 选账号
-
-```
-1. 过滤 status = 'active' 且 cooldown_until_ms < now
-2. 按 weight 加权，同权重按 last_used_ms 最久未用优先（打散负载）
-3. 无可用账号 → 该厂商视为不可用，进 7.3
-```
-
-### 7.3 故障转移（关键：区分阶段）
-
-**必须区分「响应首字节之前」和「之后」：**
-
-- **首字节之前失败**（连接失败、DNS、5xx、429、401）：可以安全换账号/换厂商重试，最多试 3 个
-- **首字节之后失败**（流中途断开）：**不能重试**，已发给 CLI 的内容无法撤回。必须原样结束流并让 CLI 自己报错
-
-这条与 `proxy.rs` 现有的 `note_upstream_unreachable` 逻辑呼应，但阈值独立：反代用 `proxy_relay_circuit_threshold`（默认 5），观测用现有 `FALLBACK_THRESHOLD`（3）。
-
-### 7.4 冷却与额度
-
-- 收到 429 → 该账号 `cooldown_until_ms = now + Retry-After`（默认 60s），换下一个
-- 收到 401/403 → 账号 `status = 'invalid'`，不自动恢复，界面标红提示重新授权
-- 收到 402 或响应体含额度耗尽特征 → `status = 'exhausted'`，到下一个自然日重置为 `active`（简单策略，不做精确额度感知）
-
-**不做**：magpie 的 `smart` / `pace` 这类额度感知路由（需要读各厂商额度接口，量太大）。本期只做「不可用就换下一个」。
-
----
-
-## 8. 逃生门（鼠鼠明确要求）
-
-三层，全部要实现：
-
-### 8.1 手动切回直连
-
-设置页「网络与代理」区新增按钮「切回直连」。点击后：
-
-1. 调用 `proxy_config::restore_all_saved()`（含反代模式接管的部分）
-2. `settings.proxy_enabled = false`，`proxy_mode` 保留
-3. 停止监听
-4. Toast：「已切回直连，CLI 配置已还原」
-
-**关键：还原必须彻底。** 反代模式可能接管了官方订阅（`proxy_relay_took_official = true`），还原时要删掉 Jolu 写入的 `ANTHROPIC_BASE_URL` / Codex provider 字段，恢复成「无自定义 base URL」的官方直连状态，而不是写回一个错误的旧值。
-
-### 8.2 自动熔断
-
-连续失败达 `proxy_relay_circuit_threshold` 次（默认 5）：
-
-1. 记录失败原因到 `FALLBACK_REASON`（现有机制，复用）
-2. 自动还原 CLI 配置 + 停止监听
-3. `proxy_mode` 保留为 `relay`，`proxy_enabled = false`
-4. 发系统通知（`notify.rs` 现有能力）：「反代已自动切回直连：<原因>」
-5. 主面板顶部显示红色提示条，带「重新启用」按钮
-
-**与观测模式的差异：** 观测模式熔断后「回退直连」是回到用户原上游，天然可用；反代模式熔断后是回到「CLI 原本的官方直连」，如果用户本就没订阅，CLI 会直接不可用。所以通知文案必须说清楚，不能让人以为是 Jolu 的错。
-
-### 8.3 崩溃恢复
-
-`proxy::startup()` 现有逻辑会在启动时自愈「崩溃残留的代理地址」。反代模式要扩展：
-
-- 启动时若 `proxy_enabled && proxy_mode == "relay"`，先检查配置是否还指向本机端口
-- 是 → 重新接管（复用现有 `set_proxy` 流程）
-- 否（外部已改）→ 尊重外部，关闭反代并通知
-
----
-
-## 9. 后端改动清单
-
-按依赖顺序，每步做完能编译通过再进下一步。
-
-### 步骤 1：数据结构与迁移
-
-- `backend/src/db.rs`：新增 `relay_providers` / `relay_accounts` 建表；`requests` 加两列；写迁移测试（参考 `db_breakdown_tests.rs` 风格）
-- `backend/src/settings.rs`：加 §4.3 五个字段 + `default_*` 函数 + 默认值
-- **验证**：`cargo test --manifest-path backend/Cargo.toml` 全绿；旧设置文件能正常反序列化（写一个用旧 JSON 的测试）
-
-### 步骤 2：`gateway/` 骨架
-
-- `gateway/mod.rs`：`ProxyMode` 枚举、模块导出
-- `gateway/protocol.rs`：`Request` / `Message` / `Part` / `Tool` 定义 + 单测
-- `gateway/error.rs`：错误类型，含「协议组合不支持」的明确载荷
-- **验证**：`cargo test` 通过，此步无外部依赖
-
-### 步骤 3：厂商与账号存储
-
-- `gateway/registry.rs`：CRUD（`list_providers` / `save_provider` / `delete_provider` / `list_accounts` / `save_account` / `delete_account`）
-- 密钥加密复用 `creds.rs` 的 DPAPI 方案
-- **验证**：单元测试覆盖增删改查；加密后读回的明文与写入一致
-
-### 步骤 4：协议解析与生成
-
-- `gateway/convert/anthropic.rs`：`parse_anthropic` / `build_anthropic`
-- `gateway/convert/chat.rs`：`parse_chat` / `build_chat`
-- `gateway/convert/responses.rs`：`parse_responses` / `build_responses`
-- **验证**：用真实报文做往返测试——解析后重新生成，语义等价。在 `backend/tests/fixtures/` 放样例 JSON（参考现有 `fixtures/` 结构）
-
-### 步骤 5：流式转换
-
-- `gateway/convert/stream.rs`：SSE 事件解析 + §6.3 的事件映射
-- **验证**：喂入录制的上游 SSE 流，断言输出事件序列符合 §6.3 表格。这是最容易错的部分，测试要覆盖：纯文本、工具调用、思考内容、混合、异常中断
-
-### 步骤 6：凭证解析
-
-- `gateway/credential.rs`：API Key 直取；OAuth 读取、刷新、回写（§5.3 方案 A）
-- **验证**：刷新逻辑用 mock server 测试；回写冲突用临时文件模拟外部修改
-
-### 步骤 7：路由与故障转移
-
-- `gateway/route.rs`：选厂商、选账号、冷却判定、首字节前重试
-- **验证**：纯逻辑单测，覆盖 §7 每种情况
-
-### 步骤 8：HTTP 服务
-
-- `gateway/server.rs`：路由 `/v1/messages`、`/v1/chat/completions`、`/v1/responses`；`GET /v1/models` 返回已配置厂商的模型列表
-- 接入共享端口：`proxy.rs` 的 `start()` 按 `ProxyMode` 挂不同 router
-- **验证**：起本地 mock 上游，端到端跑通一次流式请求
-
-### 步骤 9：落库归账
-
-- 反代请求写入 `requests` 表，带 `relay_provider_id` / `relay_account_id`
-- 复用现有 `apply_proxy_timing` 的计时逻辑（首字、总时长）
-- **验证**：一次反代请求后，`requests` 表有对应行且字段正确
-
-### 步骤 10：Tauri 命令
-
-在 `lib.rs` 注册（参考现有 `set_proxy` / `proxy_status` 写法）：
+### 4.3 设置项（`backend/src/settings.rs`，全部 `#[serde(default)]`）
 
 ```rust
-#[tauri::command]
-fn relay_list_providers(app: AppHandle) -> Result<Vec<ProviderDto>, String>;
-#[tauri::command]
-fn relay_save_provider(app: AppHandle, provider: ProviderInput) -> Result<ProviderDto, String>;
-#[tauri::command]
-fn relay_delete_provider(app: AppHandle, id: String) -> Result<(), String>;
-#[tauri::command]
-fn relay_list_accounts(app: AppHandle, provider_id: Option<String>) -> Result<Vec<AccountDto>, String>;
-#[tauri::command]
-fn relay_save_account(app: AppHandle, account: AccountInput) -> Result<AccountDto, String>;
-#[tauri::command]
-fn relay_delete_account(app: AppHandle, id: String) -> Result<(), String>;
-#[tauri::command]
-fn relay_set_mode(app: AppHandle, mode: String, default_provider: Option<String>) -> Result<Settings, String>;
-#[tauri::command]
-fn relay_escape(app: AppHandle) -> Result<Settings, String>;  // 逃生门
-#[tauri::command]
-fn relay_test_provider(app: AppHandle, id: String) -> Result<String, String>;  // 连通性测试
+/// 本地代理工作模式：observe（现有观测透传）/ relay（账号汇聚网关）
+#[serde(default = "default_proxy_mode")]
+pub proxy_mode: String,                       // "observe" | "relay"
+
+/// 网关模式：模型 id 未命中时的兜底连接 id；None = 不兜底直接报错
+#[serde(default)]
+pub gateway_default_connection: Option<String>,
+
+/// 网关模式：连续失败达该次数自动切回直连（逃生门，见 §11.2）
+#[serde(default = "default_gateway_circuit")]
+pub gateway_circuit_threshold: u32,           // 默认 5
+
+/// 网关模式：是否允许自动熔断（关闭后只能手动切回）
+#[serde(default = "yes")]
+pub gateway_auto_escape: bool,
+
+/// 接线状态：每个 agent 是否已指向网关（还原时用）
+#[serde(default)]
+pub gateway_wiring: std::collections::BTreeMap<String, String>, // agent_id -> 还原所需的原值快照 json
 ```
 
-**`ProviderDto` / `AccountDto` 严格遵守 §5.4：不含明文 secret，只有 `masked`。**
+**迁移要求**：`proxy_claude_upstream` / `proxy_codex_upstream` 保留不动，观测模式继续使用；`gateway_wiring` 的原值快照让每个 agent 的接线可独立还原。旧设置文件反序列化不受影响（写测试验证）。
 
-### 步骤 11：前端
+### 4.4 `requests` 表：**不改**
 
-- `frontend/src/lib/relayApi.ts`：命令桥接
-- `frontend/src/lib/providerDraft.ts`：草稿校验纯逻辑 + `.test.mjs`（遵循 AGENTS.md 的测试规范）
-- `frontend/src/components/settings/RelaySection.tsx`：设置页新增「厂商反代」分区
-  - 模式切换（观测 / 反代）
-  - 厂商列表（增删改、启用开关、连通性测试）
-  - 账号列表（按厂商分组）
-  - 逃生门按钮 + 熔断状态提示
-- `frontend/src/views/SettingsPage.tsx`：挂载新分区
+2026-10-02 的归账设计已加 `connection_id` 列（`apply_proxy_timing` 回填）。网关模式下转发时已知连接 id，直接随计时写入，比指纹匹配更准；观测模式路径不变。
 
-**界面配色必须用 `Jolu.pen` 的 `jolu-*` 变量**；设计稿没有这个界面，按 AGENTS.md 标注「待确认」并先问鼠鼠，不要自行发明。
+## 5. 网关本体
 
-### 步骤 12：文档与收尾
+### 5.1 模块划分
 
-- `docs/specs/2026-10-29-gateway-design.md`：把本文档的架构决策沉淀为设计说明
-- `AGENTS.md` 的「现有实现」列更新（模块 B / G）
-- `docs/todo/2026-10-22-unverified-integrations.md` 增加真机验证项
+```
+backend/src/gateway/
+  mod.rs          GatewayMode、模块导出、与 proxy.rs 的模式分发
+  server.rs       axum 路由：四个入口 + 回调端点（MCP 桥用，仅 127.0.0.1）
+  route.rs        slug 索引、模型解析、会话亲和表、额度感知排序
+  adapter/
+    mod.rs        Adapter trait 与按连接选择适配器的逻辑
+    direct.rs     anthropic / openai 同协议直通（覆盖全部 kind='api' 连接）
+    claude.rs     Claude 订阅：真实二进制编排（§7）
+    codex.rs      Codex 订阅：ChatGPT 后端直传（§8）
+  wire.rs         调用方协议的事件封装（把适配器产出包回 /v1/messages 等响应）
+  wiring/
+    mod.rs        接线框架：备份 → 写入 → 校验 → 记录原值；还原
+    claude.rs     Claude Code 接线
+    codex.rs      Codex 接线
+    zcode.rs / gemini.rs / opencode.rs   新增 agent 接线
+backend/src/bin/gateway_mcp_bridge.rs    stdio MCP 桥助手（§7.3；独立小二进制）
+```
 
----
+**与 `proxy.rs` 的关系**：`ProxyMode { Observe, Relay }`。`proxy.rs::start()` 按 mode 挂不同 router——Observe 挂现有 `forward`（一行不改），Relay 挂 `gateway::server::router()`。共用：端口绑定、启停/自愈框架、`requests` 落库。
 
-## 10. 验证要求
+### 5.2 鉴权与归账
 
-### 10.1 自动化
+- 网关只监听 `127.0.0.1`（与观测模式相同）
+- 写入各 agent 的令牌形如 `jolu-<agent>`（如 `jolu-claude-code`、`jolu-zcode`）。网关**接受任意令牌**（magpie 的经验：CLI 端 insist 要有一个 key，但本机回环无需真实验证），令牌仅用于识别调用方归账；识别不出时按请求凭证指纹匹配（现有 `KeyIndex` 机制）兜底
+- 每个请求的 `connection_id` 在选路时即确定，随 `TimingCore` 落库；`x-jolu-proxy` 响应头保留
+
+### 5.3 请求路径（以 Claude Code → `kimi/kimi-k2` 为例）
+
+```
+Claude Code ── POST /v1/messages (model=kimi/kimi-k2, x-api-key=jolu-claude-code)
+   ▼ gateway/server.rs：按 anthropic 入口解析；令牌识别 agent
+   ▼ gateway/route.rs：slug "kimi" → 连接 id；检查 protocol 匹配（anthropic == anthropic ✓）；
+   │                    会话亲和（§10.2）；额度窗口排序（§10.1）
+   ▼ gateway/adapter/direct.rs：
+   │    - body 读入（上限沿用 REQUEST_BODY_LIMIT 512MB），
+   │      serde_json 解析后仅改 "model" 字段为连接的 model（"kimi-k2"），其余原样序列化
+   │    - 头部：剥 hop-by-hop，Authorization/x-api-key 换为该连接 secret，
+   │      按 protocol 加 anthropic-version（anthropic）或 Bearer（openai）
+   │    - URL = 连接 base_url + 原路径
+   ▼ 上游响应流零缓冲透传（沿用 timed_body 的首字/总时长计时）
+Claude Code ◀── anthropic SSE 原样回传
+```
+
+- **失败语义**：上游连接失败 / DNS / 5xx / 429 / 401 且**首字节未发出** → 可按 §10.4 换连接重试（最多 3 个）；流已开始 → 不重试，原样结束
+- 请求体处理选 `serde_json::Value` 往返（简单可靠）；长上下文内存峰值记入 `perf_bench.rs` 用例，优化留待后续
+
+### 5.4 协议匹配与扩展位
+
+| 调用方入口协议 | 连接 protocol | 行为 |
+| --- | --- | --- |
+| anthropic | anthropic | 直通（§5.3） |
+| chat | openai | 直通 |
+| responses | responses | 直通（预留；当前无此类 `kind='api'` 连接，Codex 订阅适配器见 §8） |
+| anthropic | openai（或反之） | **400 明确报错**（§3.2）；`adapter/mod.rs` 的 trait 设计让未来加翻译层不需要改路由 |
+
+### 5.5 Tauri 命令（`lib.rs` 注册，风格对齐现有 `set_proxy` / `proxy_status`）
+
+```rust
+set_proxy_mode(mode, default_connection)      // observe/relay 切换（复用 set_proxy 的启停/回滚框架）
+gateway_status() -> GatewayStatus             // 模式、池内连接数、接线状态、熔断状态
+gateway_set_serve(connection_id, enabled)     // 连接进出模型池
+gateway_escape()                              // 手动逃生门（§11.1）
+gateway_test_connection(connection_id)        // 连通性测试（复用 fetch_models）
+gateway_wiring_set(agent, wired) / wiring_list()
+```
+
+前端 `gatewayApi.ts` 桥接；设置页 UI 归属待确认（§13）。
+
+## 6. Claude 订阅适配器：真实二进制 + MCP 工具桥
+
+> 依据：Anthropic 将第三方系统提示词判为第三方流量，注入 OAuth 的转发请求有风控风险。
+> magpie 的对应实现：`claude_subscription.go`（4,778 行）+ `claudebridge/`（210 行 stdio MCP 助手）。
+> 本期做最小闭环，结构对齐但代码全部重写。
+
+### 6.1 生成链路
+
+```
+agent 请求 model=claude/claude-sonnet-5（入口协议任意）
+   ▼ route.rs 命中 kind='auth' 且 platform=claude 的连接
+   ▼ adapter/claude.rs：
+   1. 取会话对应的 claude 进程（无则创建，见 6.2）
+   2. 把请求体规范化为该场会话的下一轮输入（文本 / 图片 / 工具结果）
+   3. 工具：把调用方请求里的 tools 声明注入桥助手的工具表（6.3）
+   4. claude 进程用自己的 OAuth 凭证完成生成（Jolu 不碰令牌）
+   5. 产出事件流 → wire.rs 封装回调用方协议 → 回传
+```
+
+### 6.2 进程编排
+
+- **进程粒度 = 会话**。会话键 =（agent 令牌，可推导的会话标识）；Claude Code 的 `metadata.user_id`、Codex 的 session id 可作键，取不到时退化为 agent 令牌（同 agent 串行复用一个进程）
+- 进程常驻复用（magpie：「tool results resume the same Claude Code process」）；空闲 10 分钟回收；崩溃则该会话下次请求重建并返回明确错误
+- 启动方式：`claude` 非交互模式 + stream-json 输出；工作目录用调用方请求里的 cwd 提示不可靠，默认用户主目录，列入待确认（§13）
+- **凭证来源**：只使用当前本机生效的 Claude 登录（`creds::read_local_pair("claude", "auth")`）。Jolu 不刷新、不回写、不持有该令牌——claude 二进制自己管理轮换。发现未登录时返回明确错误引导用户先在 Claude Code 登录
+- 同一时刻只允许一个会话使用一个 claude 进程发推理（进程内排队），避免流式交错
+
+### 6.3 MCP 工具桥（`bin/gateway_mcp_bridge.rs`）
+
+- 形态：独立小二进制，由网关在启动 claude 进程时经 `--mcp-config` 挂载为 stdio MCP server（参考 magpie claudebridge 的回调模型，210 行的规模量级）
+- 行为：向 claude 进程声明调用方请求里的 tools；claude 调用工具时，助手把 `(tool_call_id, name, arguments)` 经**仅回环的回调端点**（`gateway/server.rs` 提供）交给网关 → 网关把 tool_use 事件封装进对该 agent 的响应流 → agent 本地执行 → 下一个请求携带 tool_result → 网关交给助手 → 同一场 claude 会话继续
+- 助手在等待工具结果期间挂起该次 MCP 调用（对齐 magpie 的 listWait 语义）；超时（默认 120s）返回工具错误
+- 该桥**只在 Claude 订阅适配器内出现**，其他适配器一律不经 MCP
+
+### 6.4 明确不支持
+
+- 不做多 Claude 账号在桥内的切换（§3.2）
+- 不把订阅 token 暴露给任何配置项或日志；官方端点固定由 claude 二进制自己决定
+- claude 二进制未安装 / 未登录 → 适配器返回明确错误，不静默降级到其他连接（避免用户在不知情下消耗别的额度）
+
+## 7. Codex 订阅适配器
+
+- 凭证：每次请求**现场重读** `~/.codex/auth.json`（`creds::codex_dir()` 已有路径解析）。`tokens.access_token` 过期前 5 分钟用 `refresh_token` 调 `https://auth.openai.com/oauth/token` 刷新，成功后**回写 auth.json**：回写前比对文件 mtime，外部已改则放弃回写并改用外部值（`proxy_config.rs`「外部意图优先」原则；这是初稿 §5.3 方案 A 的保留部分，仍然正确）
+- 上游：ChatGPT 后端（Responses 语义），带 `chatgpt-account-id` 头
+- 转换（对齐 magpie 的处理）：后端只支持流式 → 非流式请求转为流式采集后聚合返回；丢弃后端会拒绝的参数（temperature 等），被丢弃的参数记入响应外的诊断字段，不写日志正文
+- 失败：401（刷新后仍失败）→ 连接 `status='invalid'`，界面标红；429 → 冷却（§10.3）
+
+## 8. 接线层（`gateway/wiring/`）
+
+### 8.1 框架纪律（从 `cli_apply.rs` 提取，全部沿用）
+
+1. 写前把原文件备份到应用数据目录
+2. 临时文件 + rename 原子写
+3. 还原只清理自己的写入：当前值不再是网关地址时不覆盖（外部意图优先）
+4. 全局配置切换锁 `serialized_switch`（网关接线与观测接管互斥）
+5. 接线/还原动作记录进 `settings.gateway_wiring`（原值快照），支持逐 agent 还原
+
+### 8.2 各 agent 适配器
+
+| agent | 接线动作 | 备注 |
+| --- | --- | --- |
+| Claude Code | `settings.json` 写 `env.ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` + `env.ANTHROPIC_AUTH_TOKEN=jolu-claude-code` | 与 `cli_apply.rs` 同一文件同一写法；网关令牌接受任意值但 CLI insist 要有 |
+| Codex | `config.toml` 自定义 provider `base_url=网关` + `auth.json` 的 `OPENAI_API_KEY=jolu-codex`；`wire_api` 按 §5.4 匹配写 `chat` 或 `responses` | 复用 `cli_apply.rs` 的 TOML 保留格式写入 |
+| ZCode | provider 配置写 `options.baseURL=网关` + `apiKey=jolu-zcode` | 参考 magpie `zcode.go`：注意其 rules 文件与输出上限行为（不写 rules 时 ZCode 把未知模型截到 32000 token），接线时须同步写 rules；保留用户已有 base 的场景参照 `zcodeKept` 语义 |
+| Gemini CLI | `GOOGLE_GEMINI_BASE_URL` 指向网关（经 `~/.gemini/.env` 或 settings） | magpie 的 gemini 接线较薄；Jolu 需实测 env 写入位置 |
+| OpenCode | provider JSON 写 baseURL + apiKey | 对齐 `opencode.rs` 现有读取路径 |
+
+- 每个适配器都要实现：探测（agent 是否安装/已接线）、接线、还原、`Notice`（是否需重启 agent 生效）
+- Qoder / WorkBuddy / Trae 不接线（Jolu 不代管其密钥，且订阅适配器未做），目录里不出现入口
+
+### 8.3 接线与观测模式的互斥
+
+同一 agent 的配置文件同时是观测接管和网关接管的写入目标。规则：**一个 agent 同一时间只处于一种模式**。`set_proxy_mode` 切换时先还原全部接线再建立新模式；`serialized_switch` 锁保证不并发。
+
+## 9. 路由与额度
+
+### 9.1 选连接（对一次新请求）
+
+```
+1. 解析模型 id → slug 命中连接（唯一命中即用）
+2. 未命中 → gateway_default_connection 兜底，否则 400
+3. protocol 匹配检查（§5.4）；auth 连接只接受其适配器声明的入口协议
+4. 连接可用性：serve_enabled ∧ status='active' ∧ 不在冷却期
+5. 同 slug 多连接（未来多账号）时：额度窗口余量多者优先
+   （窗口数据 = connection_quota 命令的现有缓存，quota.rs / coding_plan.rs）
+```
+
+### 9.2 会话亲和（prompt cache 成本关键）
+
+- 亲和键：可推导会话标识（Claude Code 的 `metadata.user_id`、Codex session id）；取不到按（agent 令牌 + 模型 slug）
+- 规则：会话一旦由某连接答过，后续请求继续用该连接；窗口用量 ≥98% 才迁移；429 冷却的连接在会话内也不切换——直接报错给 agent（缓存迁移的代价高于偶发失败，对齐 magpie 的 Stays 语义）
+- 亲和表在内存（`route.rs`），LRU 上限 1000 会话，进程重启清空（重启后首请求重新选择）
+
+### 9.3 状态与冷却
+
+| 上游信号 | 动作 |
+| --- | --- |
+| 429（带 Retry-After） | `cooldown_until_ms = now + Retry-After`（默认 60s），换连接重试 |
+| 401/403（重试后仍失败） | `status='invalid'`，不自动恢复，界面标红 |
+| 402 / 额度耗尽特征 | `status='exhausted'`，次日零点自动回 `active`（简单策略） |
+| 连接失败 | 计入熔断计数（§10.4），单次请求内先换连接 |
+
+### 9.4 熔断
+
+连续失败达 `gateway_circuit_threshold`（默认 5）且 `gateway_auto_escape` 开启：还原全部接线 → 停网关 → 系统通知（`notify.rs`）「账号汇聚网关已自动切回直连：<原因>」→ `proxy_mode` 保留、`proxy_enabled=false`。**注意**：熔断后 agent 回到各自直连，若某 agent 本无订阅会不可用，通知文案必须写清楚是「切回直连」而非「服务故障」。
+
+## 10. 逃生门（三层，全部必须）
+
+1. **手动切回直连**：设置页按钮 → `gateway_wiring_set` 逐 agent 还原（按原值快照）→ 停网关 → Toast「已切回直连，各 agent 配置已还原」
+2. **自动熔断**：§9.4
+3. **启动自愈**：`proxy::startup()` 扩展——`proxy_mode=relay` 且启用时，校验各接线文件是否仍指向网关（`is_self_base` 同款判断）；是 → 重新接线；否（外部已改）→ 尊重外部、关闭网关并通知
+
+## 11. 实施步骤（一次性交付，步骤仅表依赖顺序）
+
+每步完成即 `cargo test` 全绿再进下一步。
+
+1. **数据与设置**：`serve_enabled` 列 + §4.3 设置项 + 迁移测试（含旧设置文件加载）
+2. **gateway 骨架**：`mod.rs` / `server.rs` 空路由 / `wire.rs` 雏形；`ProxyMode` 分发接入 `proxy.rs::start()`
+3. **直通适配器**：`adapter/direct.rs`（anthropic + openai）；slug 索引与 `/v1/models`；mock 上游端到端测试（流式 + 非流式 + model 改写 + 头部替换断言，参考 `connections.rs` 的 `serve_models_once` 测试手法）
+4. **路由与亲和**：`route.rs` 全分支单测（命中/兜底/协议不匹配/冷却/亲和）
+5. **Codex 订阅适配器**：mock 后端测刷新（成功/失败/mtime 冲突）与流式转换
+6. **MCP 桥助手**：`bin/gateway_mcp_bridge.rs` + 回调端点；用假 MCP 客户端测声明/调用/超时
+7. **Claude 订阅适配器**：进程编排 + 会话复用 + 崩溃恢复；用假 claude 二进制（fixture 脚本）测全链路
+8. **接线层**：框架 + claude/codex（改造现有写入路径）+ zcode/gemini/opencode；还原与「外部意图优先」测试
+9. **归账落库**：网关请求带 `connection_id` 写 `requests`；与观测模式计时共存验证
+10. **逃生门与自愈**：三层逐条实现 + 测试
+11. **Tauri 命令与前端**：`gatewayApi.ts`、设置页分区（UI 归属待确认，§13）、`providerDraft` 式纯逻辑 + `.test.mjs`
+12. **文档收尾**：`AGENTS.md` 模块 B/G「现有实现」列更新；`docs/todo/2026-10-22-unverified-integrations.md` 增补验证项
+
+## 12. 验证要求
+
+### 12.1 自动化
 
 ```bash
 cargo test --manifest-path backend/Cargo.toml
@@ -580,66 +339,47 @@ pnpm --dir frontend typecheck
 node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs
 ```
 
-新增测试必须覆盖：
+必测：直通适配器的头部/模型改写/流式透传；路由全分支；Codex 刷新与 mtime 冲突；MCP 桥调用/超时；Claude 桥进程复用与崩溃；接线还原与外部改动不覆盖；迁移（旧库旧设置）；熔断三条路径。
 
-| 区域 | 必测内容 |
-| --- | --- |
-| 协议转换 | 每种组合的往返等价；§6.4 七个坑各一条 |
-| 流式映射 | §6.3 五种场景 + 中途断开 |
-| 路由 | §7 全部判定分支 |
-| 凭证 | 刷新成功 / 刷新失败 / 回写冲突 / 过期边界 |
-| 迁移 | 旧设置文件加载；旧 `requests` 行不受影响 |
-| 逃生门 | 手动还原彻底性、熔断触发、崩溃恢复三条路径 |
+### 12.2 真机（隔离目录，`scripts/acceptance/README.md`）
 
-### 10.2 真机验证（必须在隔离目录跑，见 `scripts/acceptance/README.md`）
+1. Claude Code 接 Kimi 的 Anthropic 端点（`serve_enabled` 开启）→ 流式正常、`requests` 带连接 id
+2. ZCode 接入网关 → rules 文件生效（长输出不被 32000 截断）、网关模型出现在其选择器
+3. Codex 订阅经网关 → 非流式请求转流式成功、参数丢弃有诊断
+4. Claude 订阅经网关（真实 claude 二进制已登录）→ 工具调用闭环、多轮会话复用同进程
+5. 熔断：错误 base_url 连续失败 → 自动切回直连 + 通知
+6. 逃生门：手动还原后逐 agent 检查配置文件与备份一致性
+7. 降级：回退到旧版本 Jolu，各 agent 配置可手动恢复、应用不崩
 
-1. Claude Code 配 API Key 厂商（如 Kimi 的 Anthropic 端点）→ 发一条消息 → 流式正常、`requests` 表有记录
-2. 跨协议转换：Claude Code 配一个只有 OpenAI Chat 端点的厂商 → 消息正常、工具调用正常
-3. 账号池：配两个账号，手动让第一个 401 → 自动切第二个，CLI 无感
-4. 熔断：配一个错误 base URL → 连续失败 5 次 → 自动切回直连 + 通知
-5. 逃生门：手动点「切回直连」→ `~/.claude/settings.json` 恢复原样
-6. 官方订阅：「待确认」——见 §12
+### 12.3 界面
 
-### 10.3 界面验证
+设置页改完用 Pencil MCP 截对应画板对照；本功能无既有画板，先等 §13 第 1 项结论。
 
-改完界面用 Pencil MCP 截图对应画板对照（AGENTS.md §5 要求）。本功能是新界面，先确认画板是否存在。
+## 13. 待确认（需鼠鼠决策）
 
----
+1. **设置页 UI**：网关是独立分区还是并入「网络与代理」？`Jolu.pen` 无此界面，需补画板或给方向
+2. **Gemini / Grok 订阅适配器**：本期不做（§3.2），确认是否接受；若要做 Gemini 需用户提供 Code Assist Standard/Enterprise 账号与 GCP 项目
+3. **多 Claude 账号**：桥接前是否允许 Jolu 改写 `~/.claude` 凭证切换账号（与交互式 Claude Code 并存有风险）？本期默认只认当前登录
+4. **claude 桥的工作目录**：spawn 真实 claude 时用什么 cwd（影响其文件工具的默认作用域）
+5. **预置厂商模板**：是否内置 Kimi/GLM/DeepSeek/MiniMax 的 base_url 预填（减少手填）
 
-## 11. 风险与已知限制
+## 14. 风险
 
-| 风险 | 影响 | 缓解 |
-| --- | --- | --- |
-| 协议转换语义不完整 | 某些工具调用/思考内容行为异常 | 本期只承诺矩阵内组合；不支持的明确报错 |
-| 长上下文内存峰值 | 100MB+ 请求可能导致内存尖峰 | 本期接受，记入 todo；二期做流式改写 |
-| OAuth 刷新与 CLI 冲突 | 用户被迫重新登录 | §5.3 方案 A（回写 + mtime 比对） |
-| 官方订阅真机验证缺样本 | 可能上线即坏 | **必须**在发布前找真实订阅账号验证，未验证不得宣称支持 |
-| 用户配置错误导致全断 | CLI 不可用 | 三层逃生门（§8） |
-| 厂商协议漂移 | 某天突然不兼容 | 连通性测试命令 + 明确错误信息，不做自动降级 |
+| 风险 | 缓解 |
+| --- | ---|
+| claude 进程编排复杂（生命周期/流式交错/崩溃） | 进程粒度=会话 + 排队串行 + fixture 假二进制测试；实在不稳则该适配器单独回退为「待接入」，不影响其余 |
+| Codex 后端协议漂移（非公开接口） | 适配器内聚在 `adapter/codex.rs`；失败返回明确错误不做静默降级 |
+| 长上下文内存峰值（serde_json 往返） | `perf_bench.rs` 加 10MB 用例；超出即列 todo 优化 |
+| 接线写坏用户配置 | 备份 + 原子写 + 只清自己的写入 + 真机验证第 6 项 |
+| 用户误以为网关 = 官方服务，额度耗尽怪 Jolu | 通知与界面文案明确标注「流量经本机网关转发到各厂商」 |
+| 无 Rust 工具链导致开发中途无法验证 | §2.2 前置条件不满足不开工 |
 
----
+## 15. 交付标准
 
-## 12. 待确认（需鼠鼠决策，开工前必须有答案）
-
-1. **官方订阅反代的真机验证样本**：仓库里有可用的 Claude / Codex 订阅账号吗？没有的话这部分只能做到「代码完成 + mock 测试」，不得标记为已验证。
-2. **设置页 UI 归属**：新增「厂商反代」是独立分区，还是并入现有「网络与代理」？`Jolu.pen` 里没有这个界面，需要鼠鼠给方向或补画板。
-3. **预置厂商模板**：要不要内置 Kimi / GLM / DeepSeek / MiniMax 等常用厂商的 base URL 模板（减少用户填写）？如要，清单由鼠鼠确认。
-4. **默认端口**：沿用现在的 12731，还是反代模式单独分配端口（避免与观测模式切换时冲突）？
-
----
-
-## 13. 交付标准
-
-全部满足才算完成：
-
-- [ ] `cargo test` 全绿，新增测试覆盖 §10.1 全部条目
-- [ ] `pnpm --dir frontend typecheck` 通过
-- [ ] 前端测试全绿（含新增的 `providerDraft.test.mjs`）
-- [ ] §10.2 前 5 条真机验证通过并记录到 `docs/verification/`
+- [ ] §12.1 全绿（含新增测试全部条目）
+- [ ] §12.2 第 1–7 项真机通过并记录到 `docs/verification/`
 - [ ] 三层逃生门逐条手动验证
-- [ ] 密钥不落明文：全库 grep 确认日志、导出、DTO 中无明文
-- [ ] 旧设置文件升级后不丢配置，降级回旧版本不崩
+- [ ] 全库 grep 确认日志 / 导出 / DTO 无明文凭证；`x-jolu-proxy` 响应头保留
+- [ ] 旧设置与旧库升级无损，回退旧版本可恢复
 - [ ] `AGENTS.md` 现有实现列已更新
-- [ ] §12 四项已获得鼠鼠答复，未验证项明确标注「待确认」
-
-**第 6 条真机验证（官方订阅）如果缺样本，必须在交付说明里写明「未验证」，不得含糊。**
+- [ ] §13 五项已获鼠鼠答复；未验证项（如有）明确标注「待确认」，不得含糊
