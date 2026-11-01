@@ -93,6 +93,8 @@ export interface ConnectionDto {
   context_1m: boolean | null
   /** 自定义供应商的接口协议；其他平台为 null */
   protocol: "openai" | "anthropic" | null
+  /** 账号汇聚网关：是否进入模型池对外服务（后端默认 false） */
+  serve_enabled?: boolean
 }
 
 export interface FetchResult {

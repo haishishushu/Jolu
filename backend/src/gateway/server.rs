@@ -15,7 +15,7 @@ const BODY_LIMIT: usize = 512 * 1024 * 1024;
 
 /// 网关路由：挂在 `proxy.rs::start` 的监听端口上（仅 127.0.0.1）。
 /// 观测模式的 `forward` 兜底不参与网关模式——两套数据路径严格分流。
-pub fn router(deps: Arc<ProxyDeps>) -> Router {
+pub(crate) fn router(deps: Arc<ProxyDeps>) -> Router {
     Router::new()
         .route("/v1/models", get(models))
         .route("/models", get(models))
@@ -25,16 +25,42 @@ pub fn router(deps: Arc<ProxyDeps>) -> Router {
         .route("/chat/completions", post(chat))
         .route("/v1/responses", post(responses))
         .route("/responses", post(responses))
+        .route("/__jolu/bridge/callback", post(bridge_callback))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(deps)
 }
 
+/// MCP 桥的工具调用回调（§6.3）：挂起等待 agent 的 tool_result 释放。
+/// 仅回环监听 + 双下划线私有路径，不进入任何公共文档。
+async fn bridge_callback(
+    State(deps): State<Arc<ProxyDeps>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return error_json(StatusCode::BAD_REQUEST, "回调体不是有效 JSON");
+    };
+    let Some(call_id) = value.get("tool_call_id").and_then(|v| v.as_str()).map(str::to_string) else {
+        return error_json(StatusCode::BAD_REQUEST, "回调缺少 tool_call_id");
+    };
+    let Some(hub) = deps.tool_hub.as_ref() else {
+        return error_json(StatusCode::SERVICE_UNAVAILABLE, "网关状态暂不可用");
+    };
+    let receiver = hub.register(&call_id);
+    match tokio::time::timeout(crate::gateway::bridge::TOOL_CALL_TIMEOUT, receiver).await {
+        Ok(Ok(result)) => json_response(StatusCode::OK, result),
+        Ok(Err(_)) => json_response(StatusCode::GONE, "调用已被放弃"),
+        Err(_) => {
+            json_response(StatusCode::GATEWAY_TIMEOUT, "等待工具结果超时（120 秒）")
+        }
+    }
+}
+
 /// JSON 响应。不启用 axum 的 json feature，手工拼装保持依赖面不变。
-fn json_response(status: StatusCode, body: String) -> Response {
+fn json_response(status: StatusCode, body: impl Into<String>) -> Response {
     (
         status,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
+        body.into(),
     )
         .into_response()
 }
@@ -46,10 +72,104 @@ fn error_json(status: StatusCode, message: &str) -> Response {
     )
 }
 
+/// 订阅连接的内置模型清单（适配器第 5/7 步接入前的兜底）。
+/// 名称取自设计稿（Jolu.pen 模块 J 连接池卡片），不得凭空增删。
+fn builtin_subscription_models(platform: &str) -> &'static [&'static str] {
+    match platform {
+        "claude" => &["claude-sonnet-5", "claude-opus-5"],
+        "codex" => &["gpt-5.5", "gpt-5-codex"],
+        _ => &[],
+    }
+}
+
+/// 模型清单缓存：connection_id → (刷新时间, 模型列表)。TTL 内不重复打上游。
+static MODEL_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (i64, Vec<String>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const MODEL_CACHE_TTL_MS: i64 = 5 * 60_000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// `GET /v1/models`：池内连接的模型清单，供各工具的模型选择器消费。
-async fn models(State(_deps): State<Arc<ProxyDeps>>) -> Response {
-    // 第 4 步接入模型列表后填充真实清单；骨架阶段返回空列表保持端点可用。
-    json_response(StatusCode::OK, "{\"object\":\"list\",\"data\":[]}".into())
+/// API 连接调 `fetch_models`（带 TTL 缓存）；订阅连接用内置清单；
+/// 拉取失败的连接不出现在列表里，其 slug 记入 `unavailable` 供诊断。
+async fn models(State(deps): State<Arc<ProxyDeps>>) -> Response {
+    let pool = {
+        let guard = match deps.pool_index() {
+            Ok(g) => g,
+            Err(_) => return error_json(StatusCode::SERVICE_UNAVAILABLE, "网关状态暂不可用"),
+        };
+        crate::gateway::route::pool_snapshot(&deps.db, guard)
+    };
+    let now = now_ms();
+    let mut data: Vec<serde_json::Value> = Vec::new();
+    let mut unavailable: Vec<String> = Vec::new();
+    for entry in &pool {
+        let models: Vec<String> = if entry.kind == "api" {
+            let cached = MODEL_CACHE
+                .lock()
+                .ok()
+                .and_then(|cache| {
+                    cache
+                        .get(&entry.connection_id)
+                        .filter(|(at, _)| now - *at < MODEL_CACHE_TTL_MS)
+                        .map(|(_, list)| list.clone())
+                })
+                .unwrap_or_default();
+            if !cached.is_empty() {
+                cached
+            } else {
+                let platform = entry.platform.clone();
+                let base = entry.base_url.clone().unwrap_or_default();
+                let secret = entry.secret.clone().unwrap_or_default();
+                let protocol: Option<&'static str> = if entry.protocol == "anthropic" { Some("anthropic") } else { Some("openai") };
+                let connection_id = entry.connection_id.clone();
+                // fetch_models 是 blocking reqwest：在 async 上下文里直接调用会在
+                // 客户端 drop 时 panic（runtime 嵌套），必须挪到阻塞线程池
+                let fetched = tokio::task::spawn_blocking(move || {
+                    crate::connections::fetch_models(&platform, protocol, &base, &secret)
+                })
+                .await;
+                match fetched {
+                    Ok(Ok(list)) => {
+                        if let Ok(mut cache) = MODEL_CACHE.lock() {
+                            cache.insert(connection_id, (now, list.clone()));
+                        }
+                        list
+                    }
+                    Ok(Err(_)) => {
+                        unavailable.push(entry.slug.clone());
+                        continue;
+                    }
+                    Err(_) => {
+                        unavailable.push(entry.slug.clone());
+                        continue;
+                    }
+                }
+            }
+        } else {
+            builtin_subscription_models(&entry.platform)
+                .iter()
+                .map(|m| m.to_string())
+                .collect()
+        };
+        for model in models {
+            data.push(serde_json::json!({
+                "id": format!("{}/{}", entry.slug, model),
+                "object": "model",
+                "owned_by": entry.slug,
+                "display_name": model,
+            }));
+        }
+    }
+    let body = serde_json::json!({"object": "list", "data": data, "unavailable": unavailable});
+    json_response(StatusCode::OK, body.to_string())
 }
 async fn split(request: Request) -> Result<(String, HeaderMap, axum::body::Bytes), Response> {
     let (parts, body) = request.into_parts();
@@ -111,7 +231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_endpoint_answers_empty_list_in_skeleton() {
+    async fn models_endpoint_answers_empty_list_when_pool_empty() {
         let base = spawn_router(crate::proxy::test_support::bare_deps()).await;
         let body = reqwest::Client::new()
             .get(format!("{base}/v1/models"))
@@ -121,7 +241,77 @@ mod tests {
             .text()
             .await
             .unwrap();
-        assert_eq!(body, "{\"object\":\"list\",\"data\":[]}");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["object"], "list");
+        assert_eq!(value["data"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// models 端点真实清单：API 连接调上游 /v1/models（mock），订阅连接用内置清单。
+    #[tokio::test]
+    async fn models_endpoint_lists_pool_with_prefix_and_reports_unavailable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 { break; }
+                raw.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&raw).contains("\r\n\r\n") { break; }
+            }
+            let body = "{\"data\":[{\"id\":\"kimi-k2\"},{\"id\":\"kimi-k2-turbo\"}]}";
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let deps = crate::proxy::test_support::bare_deps();
+        {
+            let conn = deps.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO connections(id,platform,kind,name,secret,masked,base_url,protocol,serve_enabled,created_ms)
+                 VALUES('c-kimi','custom','api','Kimi','sk-test','****',?1,'anthropic',1,1)",
+                [format!("http://{upstream_addr}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO connections(id,platform,kind,name,secret,masked,serve_enabled,created_ms)
+                 VALUES('c-claude','claude','auth','Claude 订阅','auth-x','****',1,2)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO connections(id,platform,kind,name,secret,masked,base_url,protocol,serve_enabled,created_ms)
+                 VALUES('c-dead','custom','api','Dead','sk-dead','****','http://127.0.0.1:1','openai',1,3)",
+                [],
+            )
+            .unwrap();
+        }
+        // 清缓存保证走真实拉取
+        MODEL_CACHE.lock().unwrap().clear();
+
+        let base = spawn_router(deps).await;
+        let body = reqwest::Client::builder().no_proxy().build().unwrap()
+            .get(format!("{base}/v1/models"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ids: Vec<&str> = value["data"].as_array().unwrap()
+            .iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"kimi/kimi-k2"), "{ids:?}");
+        assert!(ids.contains(&"kimi/kimi-k2-turbo"), "{ids:?}");
+        assert!(ids.contains(&"claude/claude-sonnet-5"), "订阅连接用内置清单：{ids:?}");
+        let unavailable = value["unavailable"].as_array().unwrap();
+        assert_eq!(unavailable.len(), 1, "拉取失败的连接要单独标出：{body}");
+        assert_eq!(unavailable[0], "dead");
     }
 
     #[tokio::test]

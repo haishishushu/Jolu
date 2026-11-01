@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 /// 响应流头部快照上限：Claude `message_start` 与 Codex `response.created`
 /// 都在流的最开头，64 KiB 足以覆盖，同时防止大响应常驻内存。
-const HEAD_CAP: usize = 64 * 1024;
+pub(crate) const HEAD_CAP: usize = 64 * 1024;
 /// 请求体缓冲上限：长上下文请求可达数十 MB，取 512 MB（axum 默认 2 MB 会 413）。
 const REQUEST_BODY_LIMIT: usize = 512 * 1024 * 1024;
 /// 待关联队列 TTL：超过后放弃（响应结束到 CLI 写日志通常毫秒~秒级）。
@@ -80,6 +80,43 @@ fn request_credential(platform: ProxyPlatform, headers: &HeaderMap) -> Option<St
 
 /// 生产环境的待关联队列与最近错误。独立于运行时存在，便于 [`flush_pending`] 随时访问。
 static PENDING: LazyLock<Arc<Mutex<Vec<PendingTiming>>>> = LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
+
+/// 网关连接的 platform 字段 → 去重键提取用的平台枚举。
+/// 网关下自定义/第三方连接按 Anthropic 语义解析（message.id），codex 系按 response_id。
+impl crate::proxy_config::ProxyPlatform {
+    pub(crate) fn from_platform(platform: &str) -> Self {
+        match platform {
+            "codex" | "opencode" => crate::proxy_config::ProxyPlatform::Codex,
+            _ => crate::proxy_config::ProxyPlatform::Claude,
+        }
+    }
+}
+
+/// 待关联队列长度（测试与诊断用）。
+#[cfg(test)]
+pub(crate) fn pending_len() -> usize {
+    PENDING.lock().map(|q| q.len()).unwrap_or(0)
+}
+
+/// 网关请求的计时入队（记录尚未入库时）；由采集扫描后的 `flush_pending` 补写。
+pub(crate) fn queue_pending_timing(
+    dedup_key: &str,
+    first_token_ms: i64,
+    duration_ms: i64,
+    status_code: i64,
+    connection_id: Option<&str>,
+) {
+    if let Ok(mut queue) = PENDING.lock() {
+        queue.push(PendingTiming {
+            dedup_key: dedup_key.to_string(),
+            first_token_ms,
+            duration_ms,
+            status_code,
+            created_ms: now_ms(),
+            connection_id: connection_id.map(str::to_string),
+        });
+    }
+}
 static LAST_ERROR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 /// 自动回退的原因：设置页用它区分「手动关闭」与「已回退直连」。
 static FALLBACK_REASON: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
@@ -108,6 +145,16 @@ pub(crate) struct ProxyDeps {
     /// 网关模式：模型池索引（slug → 连接）与兜底连接。观测模式不使用。
     pub(crate) pool_index: Option<Mutex<crate::gateway::route::PoolIndex>>,
     pub(crate) gateway_default_connection: Option<String>,
+    /// 网关模式：会话亲和表与连接冷却表（内存态，进程重启清空）。
+    pub(crate) affinity: Option<Mutex<crate::gateway::route::Affinity>>,
+    pub(crate) cooldowns: Option<Mutex<crate::gateway::route::Cooldowns>>,
+    /// 网关模式：MCP 桥的工具调用挂起表（Claude 订阅适配器专用）。
+    pub(crate) tool_hub: Option<Arc<crate::gateway::bridge::ToolCallHub>>,
+    /// 网关模式：Claude 订阅的会话表（网关会话键 → claude session_id，用于 --resume 延续）。
+    pub(crate) claude_sessions: Option<Mutex<crate::gateway::adapter::claude::ClaudeSessions>>,
+    /// 网关模式：连续失败阈值与熔断动作（与观测模式的回退计数相互独立）。
+    pub(crate) circuit_threshold: u32,
+    pub(crate) on_circuit: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl ProxyDeps {
@@ -673,6 +720,38 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         } else {
             None
         },
+        affinity: if mode == crate::gateway::Mode::Relay {
+            Some(Mutex::new(crate::gateway::route::Affinity::new()))
+        } else {
+            None
+        },
+        cooldowns: if mode == crate::gateway::Mode::Relay {
+            Some(Mutex::new(crate::gateway::route::Cooldowns::new()))
+        } else {
+            None
+        },
+        tool_hub: if mode == crate::gateway::Mode::Relay {
+            Some(Arc::new(crate::gateway::bridge::ToolCallHub::new()))
+        } else {
+            None
+        },
+        claude_sessions: if mode == crate::gateway::Mode::Relay {
+            Some(Mutex::new(crate::gateway::adapter::claude::ClaudeSessions::new()))
+        } else {
+            None
+        },
+        circuit_threshold: settings.gateway_circuit_threshold.max(1),
+        on_circuit: {
+            let app = app.clone();
+            let auto_escape = settings.gateway_auto_escape;
+            Arc::new(move |reason: &str| {
+                if !auto_escape {
+                    eprintln!("[网关] 连续失败达阈值，但自动逃生已关闭：{reason}");
+                    return;
+                }
+                crate::gateway::escape::circuit_break(&app, reason);
+            })
+        },
     });
 
     let router = build_router(mode, deps.clone());
@@ -730,6 +809,8 @@ pub fn stop() {
 
 /// 应用启动时的恢复 / 自愈（setup 调用；隔离测试模式不进入）。
 pub fn startup(app: &tauri::AppHandle) {
+    // 第三层逃生门：网关接线自愈（外部已改则尊重外部并停网关）
+    crate::gateway::escape::startup(app);
     let settings = app.state::<crate::Cfg>().0.get();
     if settings.proxy_enabled {
         // 复用完整开启流程：先把崩溃残留的代理地址还原成保存的上游，再重新接管并监听
@@ -959,6 +1040,12 @@ pub(crate) mod test_support {
             on_fallback: Arc::new(|_| {}),
             pool_index: Some(Mutex::new(crate::gateway::route::PoolIndex::new())),
             gateway_default_connection: None,
+            affinity: Some(Mutex::new(crate::gateway::route::Affinity::new())),
+            cooldowns: Some(Mutex::new(crate::gateway::route::Cooldowns::new())),
+            tool_hub: Some(Arc::new(crate::gateway::bridge::ToolCallHub::new())),
+            claude_sessions: Some(Mutex::new(crate::gateway::adapter::claude::ClaudeSessions::new())),
+            circuit_threshold: 5,
+            on_circuit: Arc::new(|_| {}),
         })
     }
 }
@@ -1013,6 +1100,12 @@ mod tests {
             }),
             pool_index: None,
             gateway_default_connection: None,
+            affinity: None,
+            cooldowns: None,
+            tool_hub: None,
+            claude_sessions: Some(Mutex::new(crate::gateway::adapter::claude::ClaudeSessions::new())),
+            circuit_threshold: 5,
+            on_circuit: Arc::new(|_| {}),
         });
         (deps, shutdown_rx)
     }

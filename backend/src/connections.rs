@@ -1253,6 +1253,8 @@ pub fn set_paused(conn: &Sql, id: &str, paused: bool) -> Result<(), String> {
 /// 账号汇聚网关：把连接加入 / 移出模型池。
 /// 只有具备网关服务能力的平台可开启：API Key 平台按 protocol 直通，
 /// claude / codex 的官方订阅走订阅适配器；其余平台的订阅暂无适配器（执行文档 §3.2）。
+/// Tauri 命令 `gateway_set_serve` 在第 11 步接线，先保留公共 API。
+#[allow(dead_code)]
 pub fn set_serve(conn: &Sql, id: &str, enabled: bool) -> Result<(), String> {
     let row: Option<(String, String)> = conn
         .query_row("SELECT platform, kind FROM connections WHERE id = ?1", [id], |r| {

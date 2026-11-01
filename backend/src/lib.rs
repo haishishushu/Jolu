@@ -31,7 +31,7 @@ mod main_window;
 mod pricing;
 mod proxy;
 mod proxy_config;
-mod gateway;
+pub mod gateway;
 mod quota;
 mod checkin_types;
 mod checkin_stats;
@@ -1644,6 +1644,100 @@ fn proxy_status(app: tauri::AppHandle) -> proxy::ProxyStatus {
     proxy::status(&app)
 }
 
+/* ------------------------- 账号汇聚网关（模块 J） ------------------------- */
+
+/// 网关总览：模式、端口、模型池与接线状态。凭证不外泄（只给掩码与 slug）。
+#[derive(serde::Serialize)]
+struct GatewayStatus {
+    mode: String,
+    enabled: bool,
+    port: u16,
+    circuit_threshold: u32,
+    auto_escape: bool,
+    default_connection: Option<String>,
+    wiring: Vec<crate::gateway::wiring::WiringStatus>,
+}
+
+#[tauri::command]
+fn gateway_status(app: tauri::AppHandle) -> GatewayStatus {
+    let settings = app.state::<Cfg>().0.get();
+    GatewayStatus {
+        mode: settings.proxy_mode.clone(),
+        enabled: settings.proxy_enabled,
+        port: settings.proxy_port,
+        circuit_threshold: settings.gateway_circuit_threshold,
+        auto_escape: settings.gateway_auto_escape,
+        default_connection: settings.gateway_default_connection.clone(),
+        wiring: crate::gateway::wiring::AGENTS
+            .iter()
+            .map(|agent| crate::gateway::wiring::status(agent, settings.proxy_port))
+            .collect(),
+    }
+}
+
+/// 切换网关模式（observe / relay）。切到 relay 时按当前设置启动监听；
+/// 切回 observe 前先还原全部接线，保证两套模式不交叉占用同一批配置文件。
+#[tauri::command]
+fn gateway_set_mode(
+    app: tauri::AppHandle,
+    mode: String,
+    default_connection: Option<String>,
+) -> Result<settings::Settings, String> {
+    if !matches!(mode.as_str(), "observe" | "relay") {
+        return Err("模式只能是 observe 或 relay".into());
+    }
+    let settings = app.state::<Cfg>().0.get();
+    if mode == "observe" && settings.proxy_mode == "relay" {
+        // 离开网关模式：先还原接线，再切模式
+        crate::gateway::escape::manual(&app);
+    }
+    let next = app
+        .state::<Cfg>()
+        .0
+        .try_update(|settings| {
+            settings.proxy_mode = mode.clone();
+            settings.gateway_default_connection = default_connection;
+        })
+        .map_err(|error| format!("保存网关设置失败：{error}"))?;
+    let _ = app.emit("settings-changed", next.clone());
+    Ok(next)
+}
+
+/// 连接进出模型池。
+#[tauri::command]
+fn gateway_set_serve(app: tauri::AppHandle, connection_id: String, enabled: bool) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let db = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    connections::set_serve(&db, &connection_id, enabled)
+}
+
+/// 接入 / 断开单个工具。
+#[tauri::command]
+fn gateway_wiring_set(app: tauri::AppHandle, agent: String, wired: bool) -> Result<String, String> {
+    if wired {
+        let wired_agents = crate::gateway::escape::wire_agents(&app, std::slice::from_ref(&agent))?;
+        Ok(format!("已接入 {}", wired_agents.join("、")))
+    } else {
+        let settings = app.state::<Cfg>().0.get();
+        let snapshot = settings.gateway_wiring.get(&agent).map(String::as_str);
+        let restored = crate::gateway::wiring::unwire(&agent, settings.proxy_port, snapshot)?;
+        if restored {
+            let _ = app.state::<Cfg>().0.try_update(|settings| {
+                settings.gateway_wiring.remove(&agent);
+            });
+            Ok(format!("已断开 {agent}"))
+        } else {
+            Ok(format!("{agent} 的配置已被外部修改，未覆盖"))
+        }
+    }
+}
+
+/// 逃生门：切回直连（还原全部接线 + 停网关）。
+#[tauri::command]
+fn gateway_escape(app: tauri::AppHandle) -> String {
+    crate::gateway::escape::manual(&app).summary()
+}
+
 /* --------------------------- 连接管理（§6.3） --------------------------- */
 
 #[tauri::command]
@@ -2944,6 +3038,11 @@ pub fn run() {
             set_dnd,
             set_proxy,
             proxy_status,
+            gateway_status,
+            gateway_set_mode,
+            gateway_set_serve,
+            gateway_wiring_set,
+            gateway_escape,
             dock_undock,
             cost_estimate,
             connection_quota,

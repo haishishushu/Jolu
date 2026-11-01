@@ -1,4 +1,4 @@
-import { BookOpen, Bot, CalendarCheck2, ChartColumn, Link2, MessageSquareText, PictureInPicture2, SlidersHorizontal, type LucideIcon } from "lucide-react"
+import { BookOpen, Bot, CalendarCheck2, ChartColumn, Link2, MessageSquareText, Network, PictureInPicture2, SlidersHorizontal, type LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { PRIMARY_PAGES, SETTINGS_PAGE, type MainPage, type MainPageItem } from "@/lib/mainNavigation"
 import { Tip } from "@/components/ui/Tip"
@@ -12,6 +12,7 @@ const ICONS: Record<MainPage, LucideIcon> = {
   sessions: MessageSquareText,
   automation: Bot,
   skills: BookOpen,
+  gateway: Network,
   settings: SlidersHorizontal,
 }
 

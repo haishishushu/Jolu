@@ -19,6 +19,10 @@ name = "jolu"
 path = "src/main.rs"
 
 [[bin]]
+name = "gateway_mcp_bridge"
+path = "src/bin/gateway_mcp_bridge.rs"
+
+[[bin]]
 name = "handoff_eval"
 path = "src/bin/handoff_eval.rs"
 required-features = ["handoff-eval"]
@@ -68,7 +72,7 @@ base64 = "0.22"
 # hyper / tokio / http 已是 tauri 传递依赖，这里只显式声明需要的特性；
 # 运行时复用 tauri::async_runtime（内部即 tokio），不另起 runtime。
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-tokio = { version = "1", features = ["rt", "net", "macros", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "sync", "time", "io-util", "process"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # 保留注释与格式的 TOML 编辑（接管 Codex config.toml 的 base_url，proxy_config.rs）
 toml_edit = "0.22"

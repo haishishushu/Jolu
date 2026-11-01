@@ -136,6 +136,59 @@ pub(crate) fn split_model_id(model: &str) -> Option<(&str, &str)> {
     Some((slug, rest))
 }
 
+/// 会话亲和表：会话键 → 已应答的连接 id。
+/// prompt cache 有前缀一致性——换连接等于缓存全失效按写重算，所以会话黏住首个应答的连接
+/// （对齐 magpie 的 Stays 语义）。LRU 上限 [`AFFINITY_CAP`]，进程重启自然清空。
+pub(crate) struct Affinity {
+    entries: std::collections::HashMap<String, (String, i64)>,
+}
+
+pub(crate) const AFFINITY_CAP: usize = 1000;
+
+impl Affinity {
+    pub(crate) fn new() -> Self {
+        Self { entries: std::collections::HashMap::new() }
+    }
+
+    pub(crate) fn get(&self, session: &str) -> Option<&str> {
+        self.entries.get(session).map(|(id, _)| id.as_str())
+    }
+
+    /// 记录绑定；超上限时淘汰最久未使用的条目。
+    pub(crate) fn bind(&mut self, session: &str, connection_id: &str, now: i64) {
+        if self.entries.len() >= AFFINITY_CAP && !self.entries.contains_key(session) {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(session.into(), (connection_id.into(), now));
+    }
+}
+
+/// 连接冷却表：429 后短期内不再把新请求派给该连接（会话内已绑定的请求不受影响，直接报错）。
+pub(crate) struct Cooldowns {
+    until: std::collections::HashMap<String, i64>,
+}
+
+impl Cooldowns {
+    pub(crate) fn new() -> Self {
+        Self { until: std::collections::HashMap::new() }
+    }
+
+    pub(crate) fn cool(&mut self, connection_id: &str, until_ms: i64) {
+        self.until.insert(connection_id.into(), until_ms);
+    }
+
+    pub(crate) fn remaining_ms(&self, connection_id: &str, now: i64) -> i64 {
+        self.until.get(connection_id).map_or(0, |until| (*until - now).max(0))
+    }
+}
+
 /// 一次选路的结果。
 #[derive(Debug)]
 pub(crate) enum RouteDecision<'a> {
@@ -194,6 +247,43 @@ fn classify(entry: &PoolEntry, model_name: String) -> RouteDecision<'_> {
     } else {
         RouteDecision::Subscription(entry)
     }
+}
+
+/// 带会话亲和的选路（主入口）。
+/// slug 是调用方的明确意图：换 slug = 故意换模型，亲和不覆盖它。
+/// 亲和的真实作用：请求本应命中会话已绑定的连接、而该连接正处 429 冷却时，
+/// **不切换**——换连接等于 prompt cache 全失效按写重算（对齐 magpie 的 Stays 语义）。
+pub(crate) fn decide_with_affinity<'a>(
+    entries: &'a [PoolEntry],
+    model: &str,
+    default_connection: Option<&str>,
+    session: Option<&str>,
+    affinity: &mut Affinity,
+    cooldowns: &Cooldowns,
+) -> RouteDecision<'a> {
+    let now = now_ms();
+    // 先按请求意图常规选路
+    let decision = decide(entries, model, default_connection);
+    // 选路结果命中的连接若正是会话绑定连接且在冷却中：拒绝而不是换下一个
+    let target = match &decision {
+        RouteDecision::Direct(entry, _) | RouteDecision::Subscription(entry) => Some(entry),
+        RouteDecision::Reject(_) => None,
+    };
+    if let (Some(session), Some(entry)) = (session, target) {
+        if affinity.get(session) == Some(entry.connection_id.as_str()) {
+            let remaining = cooldowns.remaining_ms(&entry.connection_id, now);
+            if remaining > 0 {
+                return RouteDecision::Reject(format!(
+                    "会话固定的连接「{}」已被限流，约 {} 秒后恢复；为保留提示词缓存本会话不自动切换连接",
+                    entry.slug,
+                    remaining / 1000 + 1,
+                ));
+            }
+        }
+        // 命中即绑定（含续期）：调用方换 slug 换了连接，会话跟着走
+        affinity.bind(session, &entry.connection_id, now);
+    }
+    decision
 }
 
 /// 模型池快照（带 TTL 缓存）。锁被采集占用时沿用旧快照，与观测模式 KeyIndex 一致。
@@ -302,5 +392,82 @@ mod tests {
         let slugs: Vec<&str> = pool.iter().map(|e| e.slug.as_str()).collect();
         assert_eq!(slugs, vec!["kimi", "kimi-2", "kimi-3"]);
         assert!(pool.iter().all(|e| e.protocol == "anthropic"));
+    }
+
+    #[test]
+    fn affinity_follows_request_slug_and_rebinds() {
+        let pool = vec![
+            entry("kimi", "api", "anthropic", "connected"),
+            entry("glm", "api", "anthropic", "connected"),
+        ];
+        let mut affinity = Affinity::new();
+        let cooldowns = Cooldowns::new();
+        affinity.bind("s1", "c-kimi", 100);
+        // 换 slug = 调用方故意换模型：亲和不覆盖明确意图，改走新连接并重绑
+        match decide_with_affinity(&pool, "glm/glm-4.6", None, Some("s1"), &mut affinity, &cooldowns) {
+            RouteDecision::Direct(e, m) => {
+                assert_eq!(e.slug, "glm");
+                assert_eq!(m, "glm-4.6");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(affinity.get("s1"), Some("c-glm"), "命中新连接后应重绑会话");
+        // 无 slug + 默认连接兜底也照常
+        match decide_with_affinity(&pool, "glm-4.6", Some("c-kimi"), Some("s1"), &mut affinity, &cooldowns) {
+            RouteDecision::Direct(e, _) => assert_eq!(e.slug, "kimi"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn affinity_rejects_instead_of_switching_when_connection_rate_limited() {
+        let pool = vec![
+            entry("kimi", "api", "anthropic", "connected"),
+            entry("glm", "api", "anthropic", "connected"),
+        ];
+        let mut affinity = Affinity::new();
+        let mut cooldowns = Cooldowns::new();
+        affinity.bind("s1", "c-kimi", 100);
+        cooldowns.cool("c-kimi", now_ms() + 30_000);
+        // 请求命中的正是会话绑定的 kimi，且 kimi 冷却中：拒绝而非悄悄切到 glm
+        let decision = decide_with_affinity(&pool, "kimi/kimi-k2", None, Some("s1"), &mut affinity, &cooldowns);
+        let RouteDecision::Reject(msg) = decision else { panic!("{decision:?}") };
+        assert!(msg.contains("限流") && msg.contains("不自动切换"), "{msg}");
+        // 未绑定该连接的会话不受冷却影响（常规路径也命中 kimi；冷却对常规选路的处理由适配器重试负责）
+        // 冷却过期后恢复服务
+        cooldowns.cool("c-kimi", now_ms() - 1);
+        assert!(matches!(
+            decide_with_affinity(&pool, "kimi/kimi-k2", None, Some("s1"), &mut affinity, &cooldowns),
+            RouteDecision::Direct(_, _)
+        ));
+    }
+
+    #[test]
+    fn affinity_no_switch_guard_requires_bound_connection() {
+        // 会话绑定 kimi，请求指向 glm：即使 kimi 冷却也不拦截 glm（意图明确）
+        let pool = vec![
+            entry("kimi", "api", "anthropic", "connected"),
+            entry("glm", "api", "anthropic", "connected"),
+        ];
+        let mut affinity = Affinity::new();
+        let mut cooldowns = Cooldowns::new();
+        affinity.bind("s1", "c-kimi", 100);
+        cooldowns.cool("c-kimi", now_ms() + 30_000);
+        assert!(matches!(
+            decide_with_affinity(&pool, "glm/glm-4.6", None, Some("s1"), &mut affinity, &cooldowns),
+            RouteDecision::Direct(_, _)
+        ));
+    }
+
+    #[test]
+    fn affinity_lru_evicts_oldest_beyond_cap() {
+        let mut affinity = Affinity::new();
+        for i in 0..AFFINITY_CAP {
+            affinity.bind(&format!("s{i}"), "c", i as i64);
+        }
+        affinity.bind("newcomer", "c", AFFINITY_CAP as i64 + 10);
+        assert!(affinity.get("s0").is_none(), "最旧的条目应被淘汰");
+        assert_eq!(affinity.get("newcomer"), Some("c"));
+        assert!(affinity.entries.len() <= AFFINITY_CAP);
     }
 }

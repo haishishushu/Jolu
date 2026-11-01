@@ -29,6 +29,7 @@ const SessionsView = createLazyPage(() => import("./SessionsView").then((m) => (
 const AutomationView = createLazyPage(() => import("./AutomationView").then((m) => ({ default: m.AutomationView })), "自动化", "tasks")
 const SkillsView = createLazyPage(() => import("./SkillsView").then((m) => ({ default: m.SkillsView })), "Skills 管理", "table")
 const UsageView = createLazyPage(() => import("./UsageView").then((m) => ({ default: m.UsageView })), "用量统计", "stats")
+const GatewayView = createLazyPage(() => import("./GatewayView").then((m) => ({ default: m.GatewayView })), "账号汇聚网关", "settings")
 const SettingsPage = createLazyPage(() => import("./SettingsPage").then((m) => ({ default: m.SettingsPage })), "设置", "settings")
 
 /**
@@ -51,6 +52,7 @@ export function MainPanelWindow({
   const [navigationRequest, setNavigationRequest] = useState(0)
   /** 托盘 / 菜单要定位的设置分区（旧分区 id，由设置页换算成新分类） */
   const [settingsSection, setSettingsSection] = useState<string | null>(null)
+  const [gatewayTab, setGatewayTab] = useState<"overview" | "detail" | "wiring">("overview")
   const [about, setAbout] = useState<string | null>(null)
   const [panelActive, setPanelActive] = useState(true)
   /** 页面之间的定位跳转：用量统计 → 指定会话，会话 → 该会话的调用明细 */
@@ -279,6 +281,7 @@ export function MainPanelWindow({
               )}
               {page === "providers" && <ProvidersView accountTarget={accountTarget} onAccountTargetHandled={clearAccountTarget} />}
               {checkinVisited.current && <div hidden={page !== "checkin"}><CheckinView active={page === "checkin" && panelActive} /></div>}
+              {page === "gateway" && <GatewayView tab={gatewayTab} onTab={setGatewayTab} />}
               {page === "settings" && <SettingsPage section={settingsSection} navigationRequest={navigationRequest} onOpenSkills={() => navigate("skills")} />}
               {/* 模块 E · 自动化 */}
               {page === "automation" && (

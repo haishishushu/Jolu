@@ -133,7 +133,7 @@ pub fn balance_message(connection_name: &str, remaining: f64, currency: &str) ->
 }
 
 /// Windows 实际发送与点击监听在插件后台线程进行；这里只能记录通知准备阶段返回的错误。
-fn show(app: &AppHandle, title: String, body: String, task_id: Option<i64>) {
+pub(crate) fn show(app: &AppHandle, title: String, body: String, task_id: Option<i64>) {
     let mut builder = app.notification().builder().title(title).body(body);
     if let Some(id) = task_id { builder = builder.extra(TASK_KEY, id); }
     if let Err(error) = builder.show() { eprintln!("[通知] 发送失败：{error}"); }

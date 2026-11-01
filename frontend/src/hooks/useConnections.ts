@@ -40,6 +40,7 @@ function toConnection(d: ConnectionDto): Connection {
     effort: d.effort,
     context1m: d.context_1m,
     protocol: d.protocol ?? null,
+    serve_enabled: d.serve_enabled ?? false,
   }
 }
 

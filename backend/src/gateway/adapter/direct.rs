@@ -80,6 +80,7 @@ pub(crate) async fn forward(
         request = request.body(rewritten);
     }
 
+    let started = std::time::Instant::now();
     let upstream = match request.send().await {
         Ok(response) => response,
         Err(error) => {
@@ -91,6 +92,10 @@ pub(crate) async fn forward(
     };
 
     let status = upstream.status();
+    // 上游信号 → 连接状态（执行文档 §9.3）：429 记冷却；401/403 标 invalid；402 标 exhausted。
+    // 状态原样回传给调用方——agent 需要看到真实的 429/401 才会正确退避或提示重新授权。
+    crate::gateway::adapter::record_upstream_signal(&deps, entry, &upstream);
+
     let mut out_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
         let lower = name.as_str().to_ascii_lowercase();
@@ -105,15 +110,87 @@ pub(crate) async fn forward(
     }
     // 归账标识必须在头表整体替换之后再加，否则会被上面的赋值抹掉
     builder = builder.header("x-jolu-gateway", entry.slug.as_str());
+    // 计时与归账（执行文档 §9）：首字时刻随时间流转发记录，流结束回填 requests 行。
+    // 与观测模式同一条链路（apply_proxy_timing），只是连接 id 已知、不必靠指纹匹配。
+    let connection_id = entry.connection_id.clone();
+    let platform = entry.platform.clone();
+    let timing = GatewayTiming {
+        deps: deps.clone(),
+        connection_id,
+        platform,
+        started,
+        first_byte_ms: None,
+        status: status.as_u16() as i64,
+    };
     let stream = upstream.bytes_stream();
     builder
-        .body(Body::from_stream(stream))
+        .body(Body::from_stream(GatewayTimedStream { inner: stream, timing, head: Vec::new(), settled: false }))
         .unwrap_or_else(|error| {
             crate::gateway::wire::error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("连接「{}」响应构造失败：{error}", entry.slug),
             )
         })
+}
+
+/// 网关请求的计时状态：记录首字节时刻与连接归属，流结束时回填 `requests` 行。
+struct GatewayTiming {
+    deps: Arc<ProxyDeps>,
+    connection_id: String,
+    platform: String,
+    started: std::time::Instant,
+    first_byte_ms: Option<i64>,
+    status: i64,
+}
+
+/// 计时流的可变状态：首字、响应头快照（提取去重键）、是否已结算。
+struct GatewayTimedStream<S> {
+    inner: S,
+    timing: GatewayTiming,
+    head: Vec<u8>,
+    settled: bool,
+}
+
+impl<S> futures_util::Stream for GatewayTimedStream<S>
+where
+    S: futures_util::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Unpin,
+{
+    type Item = Result<axum::body::Bytes, reqwest::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let polled = std::pin::Pin::new(&mut this.inner).poll_next(cx);
+        match &polled {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                if this.timing.first_byte_ms.is_none() {
+                    this.timing.first_byte_ms = Some(this.timing.started.elapsed().as_millis() as i64);
+                }
+                if this.head.len() < crate::proxy::HEAD_CAP {
+                    let room = crate::proxy::HEAD_CAP - this.head.len();
+                    this.head.extend_from_slice(&bytes[..bytes.len().min(room)]);
+                }
+            }
+            std::task::Poll::Ready(None) | std::task::Poll::Ready(Some(Err(_))) => {
+                if !this.settled {
+                    this.settled = true;
+                    crate::gateway::adapter::settle_gateway_timing(
+                        &this.timing.deps,
+                        &this.timing.connection_id,
+                        &this.timing.platform,
+                        &this.head,
+                        this.timing.first_byte_ms.unwrap_or_default(),
+                        this.timing.started.elapsed().as_millis() as i64,
+                        this.timing.status,
+                    );
+                }
+            }
+            std::task::Poll::Pending => {}
+        }
+        polled
+    }
 }
 
 #[cfg(test)]

@@ -10,8 +10,10 @@ import {
   writeSidebarCollapsed,
 } from "./mainNavigation.ts"
 
-test("签到在供应商同级下方，与 Jolu.pen 模块 I 导航一致", () => {
-  assert.deepEqual(PRIMARY_PAGES.map((item) => item.label), ["灵动岛", "供应商", "一键签到", "用量统计", "会话线程", "自动化", "Skills 管理"])
+test("签到在供应商同级下方；网关排在 Skills 管理之后（Jolu.pen 模块 I / J）", () => {
+  assert.deepEqual(PRIMARY_PAGES.map((item) => item.label), [
+    "灵动岛", "供应商", "一键签到", "用量统计", "会话线程", "自动化", "Skills 管理", "账号汇聚网关",
+  ])
   assert.equal(resolveOpenPage("checkin", null), "checkin")
   assert.equal(resolveOpenPage("last", "checkin"), "checkin")
   assert.equal(pageLabel("settings"), "设置")
@@ -22,6 +24,7 @@ test("托盘意图换算成页面", () => {
   assert.equal(pageForIntent({ kind: "settings", section: "island" }), "island")
   assert.equal(pageForIntent({ kind: "settings", section: "connections" }), "providers")
   assert.equal(pageForIntent({ kind: "settings", section: "general" }), "settings")
+  assert.equal(pageForIntent({ kind: "settings", section: "gateway" }), "gateway")
 })
 
 test("侧栏收起状态读写，存储不可用时按展开处理", () => {

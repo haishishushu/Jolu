@@ -54,6 +54,8 @@ export interface Connection {
   context1m: boolean | null
   /** 自定义供应商的接口协议；其他平台为 null */
   protocol: "openai" | "anthropic" | null
+  /** 账号汇聚网关：是否进入模型池对外服务（旧连接默认 false） */
+  serve_enabled: boolean
 }
 
 /** 额度窗口是一组可变窗口，不是固定的两个字段（§7.4） */

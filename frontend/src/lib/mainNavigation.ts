@@ -5,14 +5,14 @@
  * 便于 node --test 直接验证。
  */
 
-export type MainPage = "island" | "providers" | "checkin" | "usage" | "sessions" | "automation" | "skills" | "settings"
+export type MainPage = "island" | "providers" | "checkin" | "usage" | "sessions" | "automation" | "skills" | "gateway" | "settings"
 
 export interface MainPageItem {
   id: MainPage
   label: string
 }
 
-/** 侧栏上部的七个模块；「设置」固定在侧栏底部，单独列出。签到位置见模块 I。 */
+/** 侧栏上部的八个模块（模块 J 账号汇聚网关排在 Skills 管理之后）；「设置」固定在侧栏底部，单独列出。 */
 export const PRIMARY_PAGES: readonly MainPageItem[] = [
   { id: "island", label: "灵动岛" },
   { id: "providers", label: "供应商" },
@@ -21,6 +21,7 @@ export const PRIMARY_PAGES: readonly MainPageItem[] = [
   { id: "sessions", label: "会话线程" },
   { id: "automation", label: "自动化" },
   { id: "skills", label: "Skills 管理" },
+  { id: "gateway", label: "账号汇聚网关" },
 ]
 
 export const SETTINGS_PAGE: MainPageItem = { id: "settings", label: "设置" }
@@ -66,6 +67,7 @@ export function pageForIntent(intent: NavigationIntent): MainPage {
   if (intent.kind === "overview") return resolveOpenPage(intent.settings?.default_page ?? "last", intent.settings?.last_page ?? null)
   if (intent.kind === "automation") return "automation"
   if (intent.section === "island") return "island"
+  if (intent.section === "gateway") return "gateway"
   if (intent.section === "connections") return "providers"
   return "settings"
 }

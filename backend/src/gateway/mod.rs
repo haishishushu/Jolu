@@ -12,9 +12,12 @@
 //!   返回明确的 400 引导换端点，不做静默翻译（协议转换是后续扩展位）。
 
 pub mod adapter;
+pub mod bridge;
+pub mod escape;
 pub mod route;
 pub mod server;
 pub mod wire;
+pub mod wiring;
 
 /// 本地代理的工作模式。默认 `Observe`，行为与历史版本完全一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
