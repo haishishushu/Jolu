@@ -751,6 +751,9 @@ pub struct ConnectionDto {
     pub context_1m: Option<bool>,
     /// 自定义供应商的接口协议：openai / anthropic；其他平台为 None
     pub protocol: Option<String>,
+    /// 账号汇聚网关：是否进入模型池对外服务。旧连接默认 false，不改变观测行为。
+    #[serde(default)]
+    pub serve_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -838,6 +841,7 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
         context_1m: r.get("context_1m")?,
         protocol: r.get("protocol")?,
         service: r.get("service")?,
+        serve_enabled: r.get::<_, Option<i64>>("serve_enabled")?.unwrap_or(0) != 0,
     })
 }
 
@@ -851,7 +855,7 @@ fn list_with_account_lookup(
 ) -> rusqlite::Result<Vec<ConnectionDto>> {
     let now = chrono::Local::now().timestamp_millis();
     let mut stmt = conn.prepare(
-        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, service, account_email, secret
+        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, service, account_email, serve_enabled, secret
          FROM connections ORDER BY created_ms ASC",
     )?;
     let rows = stmt
@@ -1243,6 +1247,29 @@ pub fn set_paused(conn: &Sql, id: &str, paused: bool) -> Result<(), String> {
         params![id, if paused { "paused" } else { "connected" }],
     ).map_err(|e| e.to_string())?;
     if changed == 0 { return Err("连接不存在".into()); }
+    Ok(())
+}
+
+/// 账号汇聚网关：把连接加入 / 移出模型池。
+/// 只有具备网关服务能力的平台可开启：API Key 平台按 protocol 直通，
+/// claude / codex 的官方订阅走订阅适配器；其余平台的订阅暂无适配器（执行文档 §3.2）。
+pub fn set_serve(conn: &Sql, id: &str, enabled: bool) -> Result<(), String> {
+    let row: Option<(String, String)> = conn
+        .query_row("SELECT platform, kind FROM connections WHERE id = ?1", [id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map(Some)
+        .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e.to_string()) })
+        .map_err(|e: String| e)?;
+    let Some((platform, kind)) = row else { return Err("连接不存在".into()); };
+    let capable = kind == "api" || matches!((platform.as_str(), kind.as_str()), ("claude", "auth") | ("codex", "auth"));
+    if enabled && !capable {
+        return Err(format!("{platform} 的订阅连接暂不支持对外服务"));
+    }
+    conn.execute(
+        "UPDATE connections SET serve_enabled = ?2 WHERE id = ?1",
+        params![id, enabled as i64],
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1640,6 +1667,29 @@ mod account_email_tests {
         assert!(!refreshed.ok && !refreshed.changed);
         assert_eq!(list(&db).unwrap()[0].account_email.as_deref(), Some("person@example.test"));
 
+    }
+
+    #[test]
+    fn serve_enabled_requires_capable_platform_and_roundtrips() {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        // API 连接可开
+        let api_id = add(&db, NewConnection { service: None, platform:"claude".into(), kind:"api".into(), name:"Kimi Key".into(), secret:Some("synthetic-key".into()), base_url:Some("https://api.moonshot.cn/anthropic".into()), model:None, effort:None, context_1m:None, protocol:Some("anthropic".into()) }).unwrap();
+        assert!(list(&db).unwrap()[0].serve_enabled == false, "新连接默认不对外服务");
+        set_serve(&db, &api_id, true).unwrap();
+        assert!(list(&db).unwrap()[0].serve_enabled);
+        set_serve(&db, &api_id, false).unwrap();
+        assert!(!list(&db).unwrap()[0].serve_enabled);
+        // claude / codex 订阅可开
+        let claude_id = add(&db, NewConnection { service: None, platform:"claude".into(), kind:"auth".into(), name:"Claude 官方".into(), secret:Some("synthetic-auth".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
+        set_serve(&db, &claude_id, true).unwrap();
+        // 无适配器的平台订阅必须被拒绝
+        let gemini_id = add(&db, NewConnection { service: None, platform:"gemini".into(), kind:"auth".into(), name:"Gemini 订阅".into(), secret:Some("synthetic-auth".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
+        let err = set_serve(&db, &gemini_id, true).unwrap_err();
+        assert!(err.contains("暂不支持"), "{err}");
+        // 关闭不受能力限制（幂等清理路径）
+        set_serve(&db, &gemini_id, false).unwrap();
+        // 不存在的连接
+        assert_eq!(set_serve(&db, "no-such", true).unwrap_err(), "连接不存在");
     }
 }
 

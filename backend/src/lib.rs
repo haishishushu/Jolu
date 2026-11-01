@@ -31,6 +31,7 @@ mod main_window;
 mod pricing;
 mod proxy;
 mod proxy_config;
+mod gateway;
 mod quota;
 mod checkin_types;
 mod checkin_stats;

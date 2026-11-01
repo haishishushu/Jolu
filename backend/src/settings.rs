@@ -80,6 +80,22 @@ pub struct Settings {
     /// 接管时保存的 Codex 真实上游（config.toml 原 provider base_url）。
     #[serde(default)]
     pub proxy_codex_upstream: Option<String>,
+    /// 本地代理工作模式：`observe`（现有观测透传）/ `relay`（账号汇聚网关）。
+    /// 两套数据路径不共用 forward()，观测模式行为不受网关字段影响。
+    #[serde(default = "default_proxy_mode")]
+    pub proxy_mode: String,
+    /// 网关模式：模型 id 未命中任何连接 slug 时的兜底连接 id；None = 不兜底直接报错。
+    #[serde(default)]
+    pub gateway_default_connection: Option<String>,
+    /// 网关模式：连续失败达该次数自动切回直连（逃生门）。
+    #[serde(default = "default_gateway_circuit")]
+    pub gateway_circuit_threshold: u32,
+    /// 网关模式：是否允许自动熔断（关闭后只能手动切回）。
+    #[serde(default = "yes")]
+    pub gateway_auto_escape: bool,
+    /// 接线状态：agent_id → 还原所需的原值快照 JSON，支持逐 agent 还原。
+    #[serde(default)]
+    pub gateway_wiring: std::collections::BTreeMap<String, String>,
     /// 默认打开页面（画板 86）：`last` 表示上次访问的页面，其余为七个主窗口页面之一。
     #[serde(default = "default_default_page")]
     pub default_page: String,
@@ -122,6 +138,8 @@ fn default_currency() -> String { "USD".into() }
 fn default_dock_enabled() -> bool { true }
 fn default_proxy_port() -> u16 { 12731 }
 fn default_proxy_fallback() -> bool { true }
+fn default_proxy_mode() -> String { "observe".into() }
+fn default_gateway_circuit() -> u32 { 5 }
 fn default_default_page() -> String { "last".into() }
 fn default_main_zoom() -> u16 { 100 }
 fn default_list_density() -> String { "comfortable".into() }
@@ -176,6 +194,11 @@ impl Default for Settings {
             proxy_fallback_direct: default_proxy_fallback(),
             proxy_claude_upstream: None,
             proxy_codex_upstream: None,
+            proxy_mode: default_proxy_mode(),
+            gateway_default_connection: None,
+            gateway_circuit_threshold: default_gateway_circuit(),
+            gateway_auto_escape: true,
+            gateway_wiring: std::collections::BTreeMap::new(),
             default_page: default_default_page(),
             last_page: None,
             main_zoom: default_main_zoom(),
@@ -251,6 +274,36 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::Settings;
+
+    #[test]
+    fn gateway_fields_default_when_missing_from_old_settings() {
+        // 旧版设置文件没有任何网关字段：反序列化必须得到 observe 模式与逃生门默认值
+        let old: Settings = serde_json::from_str(
+            r#"{"island_platform":"claude","dnd":false,"island_visible":true,"proxy_enabled":false}"#,
+        ).unwrap();
+        assert_eq!(old.proxy_mode, "observe");
+        assert_eq!(old.gateway_default_connection, None);
+        assert_eq!(old.gateway_circuit_threshold, 5);
+        assert!(old.gateway_auto_escape);
+        assert!(old.gateway_wiring.is_empty());
+    }
+
+    #[test]
+    fn gateway_settings_roundtrip() {
+        let mut s = Settings::default();
+        s.proxy_mode = "relay".into();
+        s.gateway_default_connection = Some("c1".into());
+        s.gateway_circuit_threshold = 3;
+        s.gateway_auto_escape = false;
+        s.gateway_wiring.insert("claude-code".into(), r#"{"base":"https://x"}"#.into());
+        let v = serde_json::to_value(&s).unwrap();
+        let back: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(back.proxy_mode, "relay");
+        assert_eq!(back.gateway_default_connection.as_deref(), Some("c1"));
+        assert_eq!(back.gateway_circuit_threshold, 3);
+        assert!(!back.gateway_auto_escape);
+        assert_eq!(back.gateway_wiring.get("claude-code").map(String::as_str), Some(r#"{"base":"https://x"}"#));
+    }
 
     #[test]
     fn failed_save_keeps_previous_settings() {

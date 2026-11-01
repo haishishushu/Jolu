@@ -228,6 +228,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN service TEXT", []);
     // 可空展示元数据：保留旧连接，仅在凭证准确匹配时补齐。
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN account_email TEXT", []);
+    // 账号汇聚网关：该连接是否进入模型池、接受其他工具的请求。
+    // 默认 0，旧库升级后全部不对外服务，观测模式行为完全不变。
+    let _ = conn.execute("ALTER TABLE connections ADD COLUMN serve_enabled INTEGER NOT NULL DEFAULT 0", []);
     // 会话生命周期：旧库升级后默认均为停止，避免把近期 Token 误报成正在运行。
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN is_running INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN activity_state TEXT NOT NULL DEFAULT 'done'", []);
@@ -2853,6 +2856,33 @@ mod tests {
         // 不传日期时导出全部
         let all: serde_json::Value = serde_json::from_str(&export_backup(&conn, None, None, None).unwrap()).unwrap();
         assert_eq!(all["requests"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn serve_enabled_column_migrates_and_defaults_off() {
+        // 模拟旧库：没有 serve_enabled 列。init 的幂等 ALTER 补列，默认 0。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE connections (
+                id TEXT PRIMARY KEY, platform TEXT NOT NULL, kind TEXT NOT NULL,
+                name TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', secret TEXT,
+                masked TEXT NOT NULL DEFAULT '', base_url TEXT, status TEXT NOT NULL DEFAULT 'connected',
+                last_sync_ms INTEGER, created_ms INTEGER NOT NULL
+            );
+            INSERT INTO connections (id, platform, kind, name, created_ms) VALUES ('c1', 'claude', 'api', '旧连接', 1);",
+        ).unwrap();
+        init(&conn).unwrap();
+        let served: i64 = conn
+            .query_row("SELECT serve_enabled FROM connections WHERE id='c1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(served, 0, "旧库升级后 serve_enabled 必须默认关闭");
+        // 新库直接 init 也应有该列
+        let fresh = Connection::open_in_memory().unwrap();
+        init(&fresh).unwrap();
+        let cols: i64 = fresh
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('connections') WHERE name='serve_enabled'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cols, 1);
     }
 }
 

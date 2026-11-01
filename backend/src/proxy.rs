@@ -92,18 +92,35 @@ pub(crate) struct ProxyRuntime {
 }
 
 /// 转发依赖。测试可独立构造，不经 [`PROXY`]。
+/// 网关模式（`gateway` 模块）复用同一监听与计时设施，字段对本 crate 可见。
 pub(crate) struct ProxyDeps {
-    client: reqwest::Client,
-    db: Arc<Mutex<rusqlite::Connection>>,
-    /// 已接管平台 → 真实上游 base（无尾斜杠）。
-    upstreams: HashMap<ProxyPlatform, String>,
-    pending: Arc<Mutex<Vec<PendingTiming>>>,
-    consecutive_failures: Arc<AtomicU32>,
-    fallback_enabled: bool,
-    key_index: Mutex<KeyIndex>,
-    shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    pub(crate) client: reqwest::Client,
+    pub(crate) db: Arc<Mutex<rusqlite::Connection>>,
+    /// 已接管平台 → 真实上游 base（无尾斜杠）。仅观测模式使用。
+    pub(crate) upstreams: HashMap<ProxyPlatform, String>,
+    pub(crate) pending: Arc<Mutex<Vec<PendingTiming>>>,
+    pub(crate) consecutive_failures: Arc<AtomicU32>,
+    pub(crate) fallback_enabled: bool,
+    pub(crate) key_index: Mutex<KeyIndex>,
+    pub(crate) shutdown: Arc<tokio::sync::watch::Sender<bool>>,
     /// 触发回退时的收尾动作（生产：还原 CLI 配置 + 停止监听 + 通知前端）。
-    on_fallback: Arc<dyn Fn(&str) + Send + Sync>,
+    pub(crate) on_fallback: Arc<dyn Fn(&str) + Send + Sync>,
+    /// 网关模式：模型池索引（slug → 连接）与兜底连接。观测模式不使用。
+    pub(crate) pool_index: Option<Mutex<crate::gateway::route::PoolIndex>>,
+    pub(crate) gateway_default_connection: Option<String>,
+}
+
+impl ProxyDeps {
+    /// 网关模式的模型池索引；观测模式返回错误（不应走到这条路径）。
+    pub(crate) fn pool_index(
+        &self,
+    ) -> Result<&Mutex<crate::gateway::route::PoolIndex>, ()> {
+        self.pool_index.as_ref().ok_or(())
+    }
+
+    pub(crate) fn gateway_default_connection(&self) -> Option<String> {
+        self.gateway_default_connection.clone()
+    }
 }
 
 fn now_ms() -> i64 {
@@ -588,6 +605,10 @@ fn rollback(app: &tauri::AppHandle) {
 pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
     let settings = app.state::<crate::Cfg>().0.get();
     let port = settings.proxy_port;
+    let (mode, mode_warn) = crate::gateway::mode_from(&settings);
+    if let Some(warn) = mode_warn {
+        eprintln!("[代理] {warn}");
+    }
     let mut upstreams = HashMap::new();
     if let Some(base) = settings.proxy_claude_upstream.as_deref().filter(|s| !s.trim().is_empty()) {
         upstreams.insert(ProxyPlatform::Claude, base.trim().trim_end_matches('/').to_string());
@@ -595,7 +616,9 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(base) = settings.proxy_codex_upstream.as_deref().filter(|s| !s.trim().is_empty()) {
         upstreams.insert(ProxyPlatform::Codex, base.trim().trim_end_matches('/').to_string());
     }
-    if upstreams.is_empty() {
+    // 网关模式的上游来自 connections 模型池（serve_enabled），不依赖观测接管的探测值；
+    // 观测模式维持原有前置：没有接管上游就拒绝启动。
+    if mode == crate::gateway::Mode::Observe && upstreams.is_empty() {
         return Err("没有已接管的平台上游，无法启动".into());
     }
 
@@ -640,12 +663,19 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         key_index: Mutex::new(KeyIndex::default()),
         shutdown: shutdown.clone(),
         on_fallback,
+        pool_index: if mode == crate::gateway::Mode::Relay {
+            Some(Mutex::new(crate::gateway::route::PoolIndex::new()))
+        } else {
+            None
+        },
+        gateway_default_connection: if mode == crate::gateway::Mode::Relay {
+            settings.gateway_default_connection.clone()
+        } else {
+            None
+        },
     });
 
-    let router = Router::new()
-        .fallback(forward)
-        .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
-        .with_state(deps.clone());
+    let router = build_router(mode, deps.clone());
 
     // 同步上下文里绑定端口：占用等错误要直接反馈给设置页，不能吞进后台任务
     let listener = tauri::async_runtime::block_on(tokio::net::TcpListener::bind(("127.0.0.1", port)))
@@ -676,6 +706,18 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
 
     *PROXY.lock().expect("代理状态锁") = Some(Arc::new(ProxyRuntime { port, shutdown, deps }));
     Ok(())
+}
+
+/// 按模式构建路由：观测 = 现有零转换 forward；网关 = gateway 模块自己的 handler。
+/// 两条数据路径严格分流，`forward` 不出现在网关路由里。
+pub(crate) fn build_router(mode: crate::gateway::Mode, deps: Arc<ProxyDeps>) -> Router {
+    match mode {
+        crate::gateway::Mode::Observe => Router::new()
+            .fallback(forward)
+            .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
+            .with_state(deps),
+        crate::gateway::Mode::Relay => crate::gateway::server::router(deps),
+    }
 }
 
 /// 停止监听（CLI 配置的还原由调用方负责）。
@@ -898,6 +940,29 @@ pub fn status(app: &tauri::AppHandle) -> ProxyStatus {
     }
 }
 
+/// 测试支持：给 `gateway` 模块的单测构造最小可用的 deps（空库、无上游、no_proxy 客户端）。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    pub fn bare_deps() -> Arc<ProxyDeps> {
+        let db = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        Arc::new(ProxyDeps {
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            db: Arc::new(Mutex::new(db)),
+            upstreams: HashMap::new(),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            consecutive_failures: Arc::new(AtomicU32::new(0)),
+            fallback_enabled: false,
+            key_index: Mutex::new(KeyIndex::default()),
+            shutdown: Arc::new(shutdown_tx),
+            on_fallback: Arc::new(|_| {}),
+            pool_index: Some(Mutex::new(crate::gateway::route::PoolIndex::new())),
+            gateway_default_connection: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,6 +1011,8 @@ mod tests {
                     hits.fetch_add(1, Ordering::Relaxed);
                 }
             }),
+            pool_index: None,
+            gateway_default_connection: None,
         });
         (deps, shutdown_rx)
     }
