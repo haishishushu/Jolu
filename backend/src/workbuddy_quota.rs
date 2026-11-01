@@ -703,11 +703,28 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut request = [0; 4096];
-            let count = stream.read(&mut request).unwrap();
-            assert!(std::str::from_utf8(&request[..count]).unwrap().starts_with("POST /billing/meter/get-user-resource-summary "));
+            // 读到整个请求（含 body）再回应，避免 body 未读就 close 导致 Windows 发 RST
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 { break; }
+                raw.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&raw).to_string();
+                let Some(split) = text.find("\r\n\r\n") else { continue };
+                let head = text[..split].to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= split + 4 + length { break; }
+            }
+            let request = String::from_utf8_lossy(&raw).to_string();
+            assert!(request.starts_with("POST /billing/meter/get-user-resource-summary "));
             let body = json!({"code":0,"data":{"Packages":[{"CycleTotalCapacity":100,"CycleRemainCapacity":0}]}}).to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            stream.flush().unwrap();
         });
         let value = serde_json::to_value(query(Session::Ready {
             edition: Edition::Cn, token: "synthetic-token".into(), base,
@@ -727,13 +744,30 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut request = [0; 4096];
-            let count = stream.read(&mut request).unwrap();
-            let request = std::str::from_utf8(&request[..count]).unwrap().to_ascii_lowercase();
+            // 读到整个请求（含 body）再回应：只读一次可能停在请求头，
+            // 剩余 body 未读就 close 会让 Windows 发 RST，客户端偶发收不到响应
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 { break; }
+                raw.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&raw).to_string();
+                let Some(split) = text.find("\r\n\r\n") else { continue };
+                let head = text[..split].to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= split + 4 + length { break; }
+            }
+            let request = String::from_utf8_lossy(&raw).to_ascii_lowercase();
             assert!(request.starts_with("post /v2/billing/meter/get-enterprise-user-usage "));
             assert!(request.contains("x-enterprise-id: synthetic-enterprise"));
             let body = json!({"code":0,"data":{"limit_num":2000,"used_num":8.35}}).to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            stream.flush().unwrap();
         });
         let value = serde_json::to_value(query(Session::Ready {
             edition: Edition::Cn, token: "synthetic-token".into(), base,
