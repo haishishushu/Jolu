@@ -7,7 +7,8 @@
     "build": "pnpm --dir frontend build",
     "tauri": "node scripts/dev/tauri.mjs",
     "installer-art": "node scripts/installer-art/build.mjs",
-    "social-preview": "node scripts/social-preview/build.mjs"
+    "social-preview": "node scripts/social-preview/build.mjs",
+    "promo-video": "node scripts/promo-video/build.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.2.7"

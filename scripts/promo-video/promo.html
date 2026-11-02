@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Jolu promo</title>
+<!-- build.mjs 从这两项读取片长与帧率 -->
+<meta name="promo-duration" content="61.55" />
+<meta name="promo-fps" content="60" />
+<!--
+  Jolu 宣传片画面源：1920×1080 · 60fps · 61.55 秒，深色科技风。
+  所有 CSS 动画的 animation-delay 都是绝对时间（秒）；打字、计数、时钟、乱码解码由底部脚本按时间计算。
+  build.mjs 暂停全部动画后逐帧调用 window.__seek(t) 截图，所以这里的时间点就是成片时间点。
+  配乐 128 BPM，1 小节 = 1.875 秒，小节线 b(k) = 7.24 + 1.875k；转场都落在小节线上。
+  画面里的账号、项目与数值全部是演示数据；截图只来自浏览器预览。
+-->
+<style>
+  @font-face { font-family: "Inter"; src: url("{{interFont}}") format("woff2"); font-weight: 100 900; }
+  @font-face { font-family: "JetBrains Mono"; src: url("{{monoFont}}") format("woff2"); font-weight: 100 900; }
+  @font-face { font-family: "Noto Sans SC VF"; src: url("{{cjkFont}}"); font-weight: 100 900; }
+
+  :root {
+    --g: #22d27c;
+    --g2: #06c167;
+    --ink: #f2f4fa;
+    --mute: #8b93ab;
+    --dim: #5d6580;
+    --line: rgba(255, 255, 255, 0.1);
+    --panel: #12152b;
+    --red: #ff4d6a;
+    --amber: #f5b041;
+    --blue: #4da3ff;
+    --e: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --spring: cubic-bezier(0.34, 1.5, 0.64, 1);
+    --cn: "Noto Sans SC VF", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; }
+  body {
+    position: relative; color: var(--ink); font-family: var(--cn); -webkit-font-smoothing: antialiased;
+    background: linear-gradient(160deg, #0a0c1a, #0d0f22 60%, #0a0b16);
+  }
+  img { display: block; }
+  .abs { position: absolute; }
+  .g { color: var(--g); }
+  .mono { font-family: "JetBrains Mono", monospace; }
+
+  /* ---------- 背景 ---------- */
+  .bg { position: absolute; inset: 0; overflow: hidden; }
+  .bg .glow { position: absolute; border-radius: 50%; filter: blur(110px); }
+  .bg .p { width: 1100px; height: 900px; right: -260px; top: -380px; background: rgba(86, 60, 190, 0.32); animation: drift 62s linear 0s both; }
+  .bg .t { width: 1000px; height: 800px; left: -300px; bottom: -420px; background: rgba(6, 193, 103, 0.13); animation: drift 62s linear 0s reverse both; }
+  @keyframes drift { 0% { transform: translate(0, 0); } 50% { transform: translate(-160px, 120px); } 100% { transform: translate(60px, 40px); } }
+  .star { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #c9d2ff; animation: twinkle var(--tw) ease-in-out var(--td) infinite; }
+  @keyframes twinkle { 0%, 100% { opacity: 0.08; } 50% { opacity: 0.55; } }
+  .streak { position: absolute; height: 1px; background: linear-gradient(90deg, transparent, rgba(150, 170, 255, 0.22), transparent); animation: streak var(--sd) linear var(--sdel) infinite; }
+  @keyframes streak { from { transform: translateX(-60%); } to { transform: translateX(60%); } }
+  .demo { position: absolute; right: 36px; bottom: 26px; font-size: 14px; color: rgba(255, 255, 255, 0.28); letter-spacing: 0.1em; animation: fade 0.4s ease 12.9s both, sOut 0.3s ease 57.6s forwards; }
+  .black { position: absolute; inset: 0; background: #000; opacity: 0; z-index: 100; animation: fade 0.4s linear 61.15s forwards; }
+
+  /* ---------- 通用动画 ---------- */
+  .scene { position: absolute; inset: 0; opacity: 0; animation: sIn var(--ind, 0.35s) ease var(--in) both, sOut var(--outd, 0.3s) ease var(--out) forwards; }
+  @keyframes sIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes sOut { from { opacity: 1; filter: blur(0); } to { opacity: 0; filter: blur(14px); } }
+  .up { animation: up 0.7s var(--e) var(--d) both; }
+  @keyframes up { from { opacity: 0; transform: translateY(34px); } to { opacity: 1; transform: none; } }
+  .pop { animation: pop 0.6s var(--spring) var(--d) both; }
+  @keyframes pop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
+  .fade { animation: fade 0.5s ease var(--d) both; }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  .blurIn { animation: blurIn 0.6s var(--e) var(--d) both; }
+  @keyframes blurIn { from { opacity: 0; filter: blur(18px); transform: scale(1.08); } to { opacity: 1; filter: blur(0); transform: none; } }
+  .fromR { animation: fromR 0.8s var(--e) var(--d) both; }
+  @keyframes fromR { from { opacity: 0; transform: translateX(120px); } to { opacity: 1; transform: none; } }
+
+  .rip { position: absolute; width: 70px; height: 70px; margin: -35px 0 0 -35px; border-radius: 50%; border: 3px solid var(--g); opacity: 0; animation: rip 0.5s ease-out var(--d) forwards; z-index: 30; }
+  @keyframes rip { from { opacity: 1; transform: scale(0.2); } to { opacity: 0; transform: scale(1.5); } }
+  .cursor { position: absolute; width: 40px; height: 40px; z-index: 40; filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.6)); }
+
+  /* ---------- 排版组件 ---------- */
+  .tag { display: inline-flex; align-items: center; gap: 10px; padding: 8px 18px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); font-size: 18px; color: #c9cfdf; white-space: nowrap; }
+  .tag::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--g); box-shadow: 0 0 10px var(--g); }
+  .tag b { font-family: "JetBrains Mono", monospace; color: var(--g); font-weight: 700; }
+  .h { font-weight: 900; font-size: 84px; line-height: 1.14; letter-spacing: 0.01em; }
+  .center { left: 0; right: 0; text-align: center; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 9px 18px; border-radius: 999px; border: 1px solid rgba(34, 210, 124, 0.3); background: rgba(34, 210, 124, 0.08); font-size: 19px; color: #d8f5e6; white-space: nowrap; }
+  .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--g); }
+  .caret::after { content: ""; display: inline-block; width: 0.55em; height: 1.05em; margin-left: 4px; vertical-align: -0.16em; background: var(--g); }
+  .panel { position: absolute; border-radius: 20px; background: rgba(18, 21, 43, 0.92); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 40px 100px rgba(0, 0, 0, 0.55); }
+
+  /* 倾斜的深色截图 */
+  .tilt { position: absolute; perspective: 2200px; }
+  .tilt .plane { position: relative; transform-origin: 0 50%; transform: rotateY(-17deg) rotateX(5deg); border-radius: 16px; overflow: visible; animation: tiltIn 1s var(--e) var(--d) both; }
+  @keyframes tiltIn { from { opacity: 0; transform: translateX(260px) rotateY(-32deg) rotateX(8deg); } to { opacity: 1; transform: rotateY(-17deg) rotateX(5deg); } }
+  .tilt img { width: 100%; border-radius: 16px; box-shadow: 0 60px 140px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.1); }
+  .call { position: absolute; width: 0; height: 0; opacity: 0; animation: pop 0.5s var(--spring) var(--d) both; }
+  .call i { position: absolute; left: -26px; top: -26px; width: 52px; height: 52px; border-radius: 50%; border: 2px solid var(--g); box-shadow: 0 0 24px rgba(34, 210, 124, 0.6); }
+  .call i::after { content: ""; position: absolute; left: 20px; top: 20px; width: 8px; height: 8px; border-radius: 50%; background: var(--g); }
+  .call span { position: absolute; left: 30px; top: -64px; padding: 7px 14px; border-radius: 10px; background: rgba(10, 14, 28, 0.92); border: 1px solid rgba(34, 210, 124, 0.45); font-size: 18px; font-weight: 700; white-space: nowrap; }
+  .call.left span { left: auto; right: 30px; }
+  .call span::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--g); vertical-align: 2px; }
+
+  /* ---------- 00 开场隐喻 ---------- */
+  .node { position: absolute; width: 0; height: 0; }
+  .core { position: absolute; left: -8px; top: -8px; width: 16px; height: 16px; border-radius: 50%; background: #eafff3; box-shadow: 0 0 0 6px rgba(34, 210, 124, 0.35), 0 0 40px 10px rgba(34, 210, 124, 0.55); }
+  .ring { position: absolute; border-radius: 50%; border: 2px solid rgba(34, 210, 124, 0.8); }
+  #nodeA { animation: nodeA 7.24s linear 0s both; }
+  @keyframes nodeA { 0%, 25% { left: 960px; top: 520px; } 33%, 100% { left: 420px; top: 540px; } }
+  #ringA { left: -115px; top: -115px; width: 230px; height: 230px; animation: ringA 7.24s linear 0s both; }
+  @keyframes ringA {
+    0% { opacity: 0; transform: scale(0.25); background: transparent; }
+    7% { opacity: 1; transform: scale(1); }
+    62% { background: rgba(34, 210, 124, 0); box-shadow: none; }
+    74% { background: rgba(34, 210, 124, 0.85); box-shadow: 0 0 80px rgba(34, 210, 124, 0.6); transform: scale(1.04); }
+    80%, 100% { background: rgba(34, 210, 124, 0.25); box-shadow: 0 0 40px rgba(34, 210, 124, 0.3); opacity: 1; transform: scale(1); }
+  }
+  .pulseR { position: absolute; left: -230px; top: -230px; width: 460px; height: 460px; border-radius: 50%; border: 1.5px solid rgba(34, 210, 124, 0.45); opacity: 0; animation: pulseR 1.4s ease-out var(--d) forwards; }
+  @keyframes pulseR { from { opacity: 0.8; transform: scale(0.5); } to { opacity: 0; transform: scale(1.2); } }
+  .nlabel { position: absolute; left: -200px; width: 400px; text-align: center; font-size: 17px; color: #c9cfdf; }
+  .nlabel.code { font-size: 18px; color: #fff; font-weight: 700; }
+  #wall { position: absolute; left: 760px; top: 0; width: 92px; height: 1080px; animation: wall 7.24s linear 0s both; }
+  @keyframes wall {
+    0%, 26% { opacity: 0; transform: translateY(-80px); }
+    32% { opacity: 1; transform: none; color: #5f6690; }
+    37.5% { color: #5f6690; }
+    38.5% { color: #ff4d6a; filter: drop-shadow(0 0 18px rgba(255, 77, 106, 0.7)); }
+    52%, 80.5% { color: #a03d5a; filter: none; opacity: 1; }
+    81.5%, 100% { opacity: 0; color: #a03d5a; }
+  }
+  .shot-pill { position: absolute; left: 560px; top: 534px; width: 46px; height: 12px; border-radius: 6px; background: #fff; animation: shotPill 7.24s linear 0s both; }
+  @keyframes shotPill { 0%, 29% { opacity: 0; transform: translateX(0); } 31% { opacity: 1; } 38% { opacity: 1; transform: translateX(150px); } 40%, 100% { opacity: 0.5; transform: translateX(110px); background: #a03d5a; } }
+  .xmark { position: absolute; left: 712px; top: 516px; width: 40px; height: 40px; opacity: 0; animation: xIn 0.3s var(--spring) 2.8s both, sOut 0.2s ease 5.85s forwards; }
+  @keyframes xIn { from { opacity: 0; transform: scale(0.3) rotate(-40deg); } to { opacity: 1; transform: none; } }
+  .rlabel { position: absolute; font-size: 19px; font-weight: 700; color: #ff7088; white-space: nowrap; }
+  .rlabel::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 10px; border-radius: 50%; background: var(--red); vertical-align: 3px; }
+  .frag { position: absolute; width: 12px; height: 12px; background: #a03d5a; opacity: 0; animation: burst 1.1s cubic-bezier(0.1, 0.7, 0.3, 1) 5.9s forwards; }
+  @keyframes burst { 0% { opacity: 1; transform: none; } 100% { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(0.4); } }
+  #nodeB { left: 1500px; top: 540px; }
+  #ringB { left: -75px; top: -75px; width: 150px; height: 150px; border-color: rgba(77, 163, 255, 0.85); animation: pop 0.6s var(--spring) 3.9s both; }
+  #nodeB .core { background: #eaf4ff; box-shadow: 0 0 0 6px rgba(77, 163, 255, 0.35), 0 0 40px 10px rgba(77, 163, 255, 0.55); animation: pop 0.5s var(--spring) 3.9s both; }
+  .link { position: absolute; left: 420px; top: 539px; width: 1080px; height: 2px; transform-origin: 0 50%; background: repeating-linear-gradient(90deg, var(--g) 0 10px, transparent 10px 22px); box-shadow: 0 0 12px rgba(34, 210, 124, 0.6); animation: link 0.55s var(--e) 5.95s both; }
+  @keyframes link { from { transform: scaleX(0); opacity: 1; } to { transform: scaleX(1); opacity: 1; } }
+
+  /* ---------- 01 品牌 ---------- */
+  .tile { position: absolute; border-radius: 26%; background: #fff; overflow: hidden; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4), 0 0 70px 10px rgba(34, 210, 124, 0.45); }
+  .tile img { width: 100%; height: 100%; object-fit: cover; }
+  #brandTile { animation: brandTile 4.44s linear 6.55s both; }
+  @keyframes brandTile {
+    0% { left: 830px; top: 410px; width: 260px; height: 260px; opacity: 0; transform: scale(2.4); filter: blur(24px); }
+    15.5% { opacity: 1; transform: none; filter: blur(0); }
+    35% { left: 830px; top: 410px; width: 260px; height: 260px; }
+    48%, 100% { left: 470px; top: 372px; width: 230px; height: 230px; opacity: 1; transform: none; filter: blur(0); }
+  }
+  .brandHalo { position: absolute; left: 960px; top: 540px; width: 900px; height: 900px; margin: -450px; border-radius: 50%; background: radial-gradient(circle, rgba(34, 210, 124, 0.55), transparent 60%); opacity: 0; animation: halo 1.4s ease-out 6.6s both; }
+  @keyframes halo { 0% { opacity: 0; transform: scale(0.4); } 40% { opacity: 1; } 100% { opacity: 0; transform: scale(1.3); } }
+  .wordmark path { stroke-dasharray: 100; stroke-dashoffset: 100; animation: draw 0.9s var(--e) var(--d) both; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .hl { display: inline-block; padding: 2px 14px 4px; border-radius: 10px; background: var(--g); color: #07150d; }
+
+  /* ---------- 02 绿色闪切 ---------- */
+  .flash { background: #1ed27a; }
+  .flash .pat { position: absolute; left: -200px; top: -60px; width: 2400px; font-size: 92px; font-weight: 900; line-height: 1.5; color: rgba(0, 60, 30, 0.12); white-space: nowrap; animation: patMove 1.9s linear 10.99s both; }
+  @keyframes patMove { from { transform: translateX(0); } to { transform: translateX(-120px); } }
+  .flash .pat div:nth-child(even) { margin-left: -260px; }
+
+  /* ---------- 03 灵动岛 ---------- */
+  .big { font-size: 270px; font-weight: 900; line-height: 1; letter-spacing: -0.02em; }
+  .big .num { background: linear-gradient(180deg, #ffffff, #d8ffe9); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .big .pct { color: var(--g); text-shadow: 0 0 40px rgba(34, 210, 124, 0.35); }
+  .bar { position: relative; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); }
+  .bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; animation: fill 1.1s var(--e) var(--d) forwards; }
+  .bar i::after { content: ""; position: absolute; right: -4px; top: -4px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 0 14px currentColor; }
+  @keyframes fill { to { width: var(--w); } }
+  .brow { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; font-size: 20px; font-weight: 700; }
+  .brow small { font-family: "JetBrains Mono", monospace; font-size: 16px; color: var(--mute); font-weight: 400; }
+  .isl { position: absolute; transform-origin: 50% 0; }
+  .isl img { width: 100%; }
+  #islC { animation: islC 3.75s linear 16.615s both; }
+  @keyframes islC {
+    0%, 4.9% { opacity: 0; transform: translateY(-40px); left: 1040px; top: 250px; width: 720px; }
+    10.3%, 30% { opacity: 1; transform: none; }
+    31.1%, 48.9% { opacity: 0; transform: scale(0.97); left: 1040px; top: 250px; width: 720px; }
+    51.6% { opacity: 1; transform: none; left: 1040px; top: 250px; width: 720px; }
+    61%, 100% { opacity: 1; transform: none; left: 990px; top: 250px; width: 440px; }
+  }
+  #islE { left: 1080px; top: 170px; width: 640px; animation: islE 3.75s linear 16.615s both; }
+  @keyframes islE { 0%, 30% { opacity: 0; transform: scale(0.96, 0.35); } 35.6%, 48.1% { opacity: 1; transform: none; } 50.8%, 100% { opacity: 0; transform: scale(0.96, 0.35); } }
+  .ilab { position: absolute; padding: 4px 12px; border-radius: 999px; font-size: 15px; font-weight: 700; background: rgba(255, 255, 255, 0.1); color: #dfe4f2; }
+  .ilab.main { background: var(--g); color: #07150d; }
+  #cur1 { animation: cur1 3.75s linear 16.615s both; }
+  @keyframes cur1 { 0%, 9% { left: 1640px; top: 720px; opacity: 0; } 12% { opacity: 1; } 21%, 47% { left: 1400px; top: 360px; opacity: 1; } 56% { left: 1660px; top: 760px; opacity: 1; } 62%, 100% { left: 1700px; top: 800px; opacity: 0; } }
+
+  /* ---------- 04 自动化 ---------- */
+  .term { position: absolute; left: 400px; top: 360px; width: 1120px; height: 430px; }
+  .term .bar0 { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 22px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); font-size: 16px; color: var(--mute); }
+  .term .bar0 i { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; box-shadow: 20px 0 #febc2e, 40px 0 #28c840; margin-right: 52px; }
+  .term .lines { padding: 26px 34px; font-family: "JetBrains Mono", "Noto Sans SC VF", monospace; font-size: 24px; line-height: 2.05; }
+  .term .lines div { white-space: pre; min-height: 49px; }
+  .clockBox { position: absolute; right: 30px; top: 74px; text-align: right; opacity: 0; animation: fade 0.3s ease 21.95s both, clockDone 0.3s ease 22.95s forwards; }
+  .clockBox small { display: block; font-size: 15px; color: var(--mute); }
+  .clockBox b { font-family: "JetBrains Mono", monospace; font-size: 58px; color: var(--amber); }
+  @keyframes clockDone { to { filter: drop-shadow(0 0 16px rgba(34, 210, 124, 0.7)); } }
+  .red { color: #ff7088; } .amber { color: var(--amber); } .ok { color: var(--g); }
+
+  /* ---------- 05 账号管理 ---------- */
+  .acct { position: absolute; top: 410px; width: 385px; height: 360px; padding: 26px; border-radius: 20px; background: #141832; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 40px 90px rgba(0, 0, 0, 0.5); }
+  .acct .hd { display: flex; align-items: center; gap: 12px; }
+  .acct .hd svg { width: 32px; height: 32px; flex: none; }
+  .acct .hd h4 { font-size: 25px; font-weight: 800; }
+  .acct .hd .badge { margin-left: auto; font-size: 15px; font-weight: 700; padding: 4px 10px; border-radius: 8px; background: rgba(34, 210, 124, 0.15); color: var(--g); }
+  .acct .meta { margin-top: 10px; font-size: 17px; color: var(--mute); }
+  .mask { display: inline-grid; }
+  .mask > * { grid-area: 1 / 1; }
+  .mask .plain { animation: hide 0.35s ease 30.75s forwards; }
+  .mask .hidden { opacity: 0; animation: fade 0.35s ease 30.75s forwards; }
+  @keyframes hide { to { opacity: 0; filter: blur(4px); } }
+  .q { margin-top: 26px; }
+  .q .row { display: flex; justify-content: space-between; font-size: 18px; color: #c4cadb; }
+  .q .row b { color: #fff; }
+  .q .bar { margin-top: 12px; height: 9px; }
+  .q .bar i::after { display: none; }
+  .acct .ft { position: absolute; left: 26px; right: 26px; bottom: 22px; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.07); display: flex; justify-content: space-between; font-size: 16px; color: var(--dim); }
+  .bal { margin-top: 24px; padding: 16px 18px; border-radius: 14px; background: rgba(34, 210, 124, 0.1); border: 1px solid rgba(34, 210, 124, 0.25); }
+  .bal span { font-size: 16px; color: var(--g); }
+  .bal div { font-size: 42px; font-weight: 900; margin-top: 4px; }
+  .bal small { font-size: 16px; color: var(--mute); font-weight: 500; }
+  .tool { position: absolute; left: 1520px; top: 330px; display: flex; align-items: center; height: 50px; padding: 0 20px; border-radius: 12px; font-size: 19px; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); }
+  .tool svg { width: 22px; height: 22px; margin-right: 10px; }
+  .tool .mask > span { display: flex; align-items: center; }
+  .tool .mask .plain { animation: hide 0.3s ease 30.65s forwards; }
+  .tool .mask .hidden { color: var(--g); animation: fade 0.3s ease 30.65s forwards; }
+  #cur2 { animation: cur2 3.75s linear 27.865s both; }
+  @keyframes cur2 { 0%, 50% { left: 1350px; top: 900px; opacity: 0; } 54% { opacity: 1; } 72%, 82% { left: 1640px; top: 350px; opacity: 1; } 92%, 100% { left: 1720px; top: 430px; opacity: 0; } }
+  .pcard { position: absolute; width: 316px; height: 124px; padding: 22px 24px; border-radius: 18px; background: #141832; border: 1px solid rgba(255, 255, 255, 0.08); }
+  .pcard .hd { display: flex; align-items: center; gap: 12px; font-size: 24px; font-weight: 800; }
+  .pcard .hd svg, .pcard .hd img, .pcard .hd .oc { width: 30px; height: 30px; flex: none; }
+  .pcard .hd .oc { display: grid; place-items: center; font-family: "JetBrains Mono", monospace; font-size: 17px; font-weight: 800; }
+  .pcard p { margin-top: 12px; font-size: 17px; color: var(--mute); }
+
+  /* ---------- 06 压缩会话 ---------- */
+  .wallWrap { position: absolute; left: -260px; top: -260px; width: 2440px; height: 1600px; perspective: 1500px; }
+  .wall3d { position: absolute; inset: 0; transform: rotateX(46deg) rotateZ(-14deg); transform-origin: 50% 40%; }
+  .wall3d .grid3 { display: grid; grid-template-columns: repeat(4, 560px); gap: 22px; animation: wallMove 4.2s linear 35.2s both; }
+  @keyframes wallMove { from { transform: translateY(0); } to { transform: translateY(-360px); } }
+  .msg { height: 128px; padding: 18px 22px; border-radius: 16px; background: #141832; border: 1px solid rgba(255, 255, 255, 0.07); font-size: 20px; color: #b9c0d4; }
+  .msg b { display: block; font-size: 17px; margin-bottom: 8px; color: #fff; }
+  .msg b i { font-style: normal; font-family: "JetBrains Mono", monospace; color: var(--dim); font-weight: 400; margin-left: 10px; }
+  .msg.u b { color: var(--g); }
+  .shade { position: absolute; inset: 0; background: radial-gradient(900px 520px at 50% 50%, rgba(10, 12, 26, 0.88), rgba(10, 12, 26, 0.35) 70%); }
+  .strip { position: absolute; left: 470px; top: 600px; width: 980px; height: 86px; display: flex; align-items: center; gap: 18px; padding: 0 28px; border-radius: 16px; background: rgba(16, 20, 40, 0.96); border: 1px solid rgba(34, 210, 124, 0.45); box-shadow: 0 0 50px rgba(34, 210, 124, 0.25); font-size: 21px; }
+  .strip .prog { margin-left: auto; width: 200px; }
+  .doc { position: absolute; left: 190px; top: 250px; width: 700px; height: 520px; border-radius: 20px; background: #10132a; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 50px 120px rgba(0, 0, 0, 0.6); overflow: hidden; }
+  .doc .dbar { display: flex; align-items: center; gap: 12px; height: 60px; padding: 0 26px; background: rgba(255, 255, 255, 0.04); border-bottom: 1px solid rgba(255, 255, 255, 0.07); font-family: "JetBrains Mono", monospace; font-size: 17px; color: var(--mute); }
+  .doc .dbar svg { width: 22px; height: 22px; color: var(--g); }
+  .doc .body { padding: 26px 34px; font-family: "JetBrains Mono", "Noto Sans SC VF", monospace; font-size: 22px; line-height: 2; }
+  .doc .body .h1 { font-size: 28px; font-weight: 800; color: #fff; }
+  .doc .body .hh { color: var(--g); font-weight: 700; }
+  .doc .body div { color: #c4cadb; min-height: 44px; white-space: pre; }
+  .agent { position: absolute; top: 520px; width: 280px; height: 84px; border-radius: 20px; display: flex; align-items: center; justify-content: center; gap: 14px; font-size: 26px; font-weight: 800; background: rgba(255, 255, 255, 0.05); border: 1.5px solid var(--line); }
+  .agent svg { width: 34px; height: 34px; }
+  #agentB { animation: pop 0.6s var(--spring) 39.6s both, agentOn 0.4s ease 40.99s both; }
+  @keyframes agentOn { from { border-color: rgba(255, 255, 255, 0.1); box-shadow: none; } to { border-color: var(--g); box-shadow: 0 0 50px rgba(34, 210, 124, 0.45); background: rgba(34, 210, 124, 0.1); } }
+  .done { position: absolute; right: -14px; top: -14px; width: 38px; height: 38px; border-radius: 50%; background: var(--g); display: grid; place-items: center; opacity: 0; animation: pop 0.45s var(--spring) 41.05s both; }
+  .done svg { width: 22px; height: 22px; color: #07150d; }
+  .lane { position: absolute; left: 1340px; top: 561px; width: 230px; height: 2px; background: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.25) 0 8px, transparent 8px 18px); }
+  .token { position: absolute; display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 12px; background: #fff; color: #111; font-family: "JetBrains Mono", monospace; font-size: 18px; font-weight: 800; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5); animation: fly 1.2s linear 39.85s both; }
+  .token svg { width: 20px; height: 20px; color: var(--g2); }
+  @keyframes fly {
+    0% { left: 1140px; top: 470px; opacity: 0; transform: scale(0.6); }
+    12% { opacity: 1; transform: none; }
+    50% { left: 1390px; top: 410px; }
+    90% { left: 1640px; top: 470px; opacity: 1; transform: none; }
+    100% { left: 1650px; top: 520px; opacity: 0; transform: scale(0.5); }
+  }
+
+  /* ---------- 07 一键签到 ---------- */
+  .ck { position: absolute; width: 470px; height: 150px; padding: 22px 26px; border-radius: 18px; background: #141832; border: 1px solid rgba(255, 255, 255, 0.08); }
+  .ck .hd { display: flex; align-items: center; gap: 12px; font-size: 24px; font-weight: 800; }
+  .ck .hd img, .ck .hd svg { width: 30px; height: 30px; }
+  .ck .hd em { margin-left: auto; font-style: normal; font-size: 14px; font-weight: 600; padding: 3px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: var(--mute); }
+  .ck .acc { margin-top: 10px; font-size: 16px; color: var(--dim); font-family: "JetBrains Mono", monospace; }
+  .ck .st { position: absolute; right: 24px; bottom: 20px; display: inline-grid; justify-items: end; }
+  .ck .st > * { grid-area: 1 / 1; white-space: nowrap; }
+  .ck .st .before { font-size: 17px; padding: 6px 14px; border-radius: 10px; border: 1px solid rgba(34, 210, 124, 0.35); color: var(--g); animation: hide 0.2s ease var(--d) forwards; }
+  .ck .st .after { font-size: 22px; font-weight: 900; color: var(--g); opacity: 0; animation: pop 0.45s var(--spring) var(--d) both; }
+  .ck .st .muted { font-size: 16px; color: var(--dim); }
+  .ck.on { animation: up 0.6s var(--e) var(--d0) both, ckOn 0.4s ease var(--d) both; }
+  @keyframes ckOn { from { border-color: rgba(255, 255, 255, 0.08); box-shadow: none; } to { border-color: rgba(34, 210, 124, 0.55); box-shadow: 0 0 40px rgba(34, 210, 124, 0.22); } }
+  .bigBtn { position: absolute; left: 810px; top: 750px; width: 300px; height: 70px; border-radius: 16px; display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 26px; font-weight: 900; color: #07150d; background: var(--g); box-shadow: 0 0 50px rgba(34, 210, 124, 0.45); }
+  .bigBtn svg { width: 28px; height: 28px; }
+  .press { animation: up 0.6s var(--e) 43.5s both, press 0.25s ease 44.74s both; }
+  @keyframes press { 0% { transform: scale(1); } 40% { transform: scale(0.94); } 100% { transform: scale(1); } }
+  .toast { position: absolute; right: 70px; top: 120px; display: flex; align-items: center; gap: 14px; padding: 16px 22px; border-radius: 16px; background: #171b38; border: 1px solid rgba(34, 210, 124, 0.4); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); font-size: 20px; font-weight: 800; }
+  .toast i { width: 32px; height: 32px; border-radius: 50%; background: var(--g); display: grid; place-items: center; }
+  .toast svg { width: 18px; height: 18px; color: #07150d; }
+  .toast small { display: block; font-size: 15px; color: var(--mute); font-weight: 400; margin-top: 2px; }
+  #cur3 { animation: cur3 3.835s linear 42.865s both; }
+  @keyframes cur3 { 0%, 14% { left: 1300px; top: 1000px; opacity: 0; } 20% { opacity: 1; } 44%, 56% { left: 980px; top: 790px; opacity: 1; } 70%, 100% { left: 1150px; top: 960px; opacity: 0; } }
+
+  /* ---------- 08 更多 ---------- */
+  .trio { position: absolute; top: 330px; width: 560px; perspective: 1800px; }
+  .trio .pl { animation: trioIn 0.9s var(--e) var(--d) both; transform: rotateY(var(--ry)); transform-origin: 50% 50%; }
+  @keyframes trioIn { from { opacity: 0; transform: translateY(80px) rotateY(var(--ry)) scale(0.9); } to { opacity: 1; transform: rotateY(var(--ry)); } }
+  .trio img { width: 100%; border-radius: 14px; box-shadow: 0 40px 90px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1); }
+  .trio h4 { margin-top: 30px; font-size: 30px; font-weight: 900; text-align: center; }
+  .trio p { margin-top: 8px; font-size: 19px; color: var(--mute); text-align: center; }
+
+  /* ---------- 09 片尾 ---------- */
+  .endRing { position: absolute; left: 960px; top: 380px; width: 620px; height: 620px; margin: -310px; border-radius: 50%; border: 1.5px solid rgba(34, 210, 124, 0.35); opacity: 0; animation: endRing 3.6s ease-out 57.9s both; }
+  @keyframes endRing { 0% { opacity: 0; transform: scale(0.3); } 15% { opacity: 1; } 100% { opacity: 0.25; transform: scale(1.25); } }
+  .dl { position: absolute; display: flex; align-items: center; justify-content: center; height: 62px; border-radius: 16px; font-size: 22px; font-weight: 900; }
+  .dl.main { left: 690px; width: 230px; background: var(--g); color: #07150d; box-shadow: 0 0 40px rgba(34, 210, 124, 0.45); animation: up 0.6s var(--e) 59.15s both, press 0.25s ease 60.55s both; }
+  .dl.sub { left: 940px; width: 300px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05); font-size: 18px; font-weight: 600; color: #dfe4f2; }
+  #cur4 { animation: cur4 3.69s linear 57.865s both; }
+  @keyframes cur4 { 0%, 46% { left: 1300px; top: 1000px; opacity: 0; } 52% { opacity: 1; } 72%, 100% { left: 800px; top: 684px; opacity: 1; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19" fill="none" stroke="#ff4d6a" stroke-width="3" stroke-linecap="round"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3v5h5M8.5 13h7M8.5 16.5h5"/></g></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c5 0 8.5 4.5 9.5 7a13 13 0 0 1-2.4 3.4M6.3 6.3A13 13 0 0 0 2.5 12c1 2.5 4.5 7 9.5 7a9.8 9.8 0 0 0 5.2-1.5"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></g></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2"><path d="M2.5 12C3.5 9.5 7 5 12 5s8.5 4.5 9.5 7c-1 2.5-4.5 7-9.5 7s-8.5-4.5-9.5-7z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M8 3v4M16 3v4M3.5 10h17M9 15l2 2 4-4"/></g></symbol>
+    <symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.4-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.6-1.4-2.2-.3-4.6-1.1-4.6-5a3.9 3.9 0 0 1 1-2.7 3.6 3.6 0 0 1 .1-2.7s.8-.3 2.8 1a9.5 9.5 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .5 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.7-4.6 5 .4.3.7.9.7 1.9V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z"/></symbol>
+    <symbol id="cursor" viewBox="0 0 24 24"><path d="M4 2.5l15 8.2-6.6 1.6-3.2 6.2z" fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></symbol>
+    <symbol id="logo-claude" viewBox="0 0 57.6 57.95"><path fill="#e08a6d" d="{{claudeD}}"/></symbol>
+    <symbol id="logo-codex" viewBox="0 0 60.76 64.08"><path fill="#f0f0f0" d="{{codexD}}"/></symbol>
+    <symbol id="logo-gemini" viewBox="0 0 57.28 57.34"><path fill="#7ca9f5" d="{{geminiD}}"/></symbol>
+    <symbol id="logo-trae" viewBox="0 0 24 24"><path fill="#32F08C" d="{{traeD}}"/></symbol>
+    <!-- Grok 第二段偏移按 PlatformLogo.tsx 的 GROK_SECOND_SLOT 换算：(5.632-0.8)/0.25, (6.416-3.088)/0.25 -->
+    <symbol id="logo-grok" viewBox="0 0 57.6 39.36"><path fill="#f0f0f0" d="{{grokD1}}"/><path fill="#f0f0f0" transform="translate(19.33 13.31)" d="{{grokD2}}"/></symbol>
+    <symbol id="logo-custom" viewBox="0 0 24 24"><g fill="none" stroke="#22d27c" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2.5l8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5z"/><path d="M10 9.5l-2.5 2.5 2.5 2.5M14 9.5l2.5 2.5-2.5 2.5"/></g></symbol>
+  </defs>
+</svg>
+
+<div class="bg"><i class="glow p"></i><i class="glow t"></i><div id="stars"></div><div id="streaks"></div></div>
+
+<!-- ============ 00 开场隐喻 0–6.7s ============ -->
+<section class="scene" style="--in:0s;--ind:0.2s;--out:6.45s;--outd:0.25s">
+  <div class="node" id="nodeA">
+    <i class="pulseR" style="--d:0.9s"></i>
+    <i class="pulseR" style="--d:4.7s"></i>
+    <i class="pulseR" style="--d:5.3s"></i>
+    <i class="ring" id="ringA"></i>
+    <i class="core"></i>
+    <div class="nlabel fade" style="top:44px;--d:0.45s">● 你的 AI 编程工具</div>
+    <div class="nlabel code mono" style="top:72px" data-type data-at="0.65" data-cps="22">claude · codex · gemini</div>
+  </div>
+  <svg id="wall" viewBox="0 0 92 1080">
+    <!-- 花纹必须定义在墙自己的 SVG 里，currentColor 才会跟随 #wall 的颜色动画 -->
+    <defs><pattern id="hex" width="30" height="52" patternUnits="userSpaceOnUse" patternTransform="scale(1.1)"><path d="M15 0l15 8.66v17.32L15 34.64 0 25.98V8.66zM15 34.64V52M0 25.98L-15 34.64M30 25.98l15 8.66" fill="none" stroke="currentColor" stroke-width="2"/></pattern></defs>
+    <rect width="92" height="1080" fill="url(#hex)" />
+  </svg>
+  <div class="shot-pill"></div>
+  <svg class="xmark"><use href="#i-x" /></svg>
+  <div class="rlabel fade" style="left:880px;top:250px;--d:2.85s">额度看不见 · 任务会中断</div>
+  <div class="rlabel fade" style="left:420px;top:820px;--d:3.15s">工具与账号，散落在各处</div>
+  <div id="frags"></div>
+  <div class="node" id="nodeB">
+    <i class="ring" id="ringB"></i>
+    <i class="core"></i>
+    <div class="nlabel fade" style="top:-130px;--d:4.1s;color:#9fcbff">● Jolu · 管在一处</div>
+  </div>
+  <i class="link"></i>
+  <div class="abs center fade" style="top:900px;font-size:22px;font-weight:700;--d:6.05s"><span class="g">●</span> 把分散的一切，连到一起</div>
+</section>
+
+<!-- ============ 01 品牌 6.55–10.99s ============ -->
+<section class="scene" style="--in:6.55s;--ind:0.15s;--out:10.97s;--outd:0.02s">
+  <i class="brandHalo"></i>
+  <div class="tile" id="brandTile"><img src="{{icon}}" alt="" /></div>
+  <svg class="abs wordmark" style="left:760px;top:350px;width:390px;height:157px" viewBox="0 0 67 27" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#f2f4fa" stroke-width="2.8">
+      <path pathLength="100" style="--d:8.55s" d="M4 4h11v12c0 9-12 9-12 1" />
+      <path pathLength="100" style="--d:8.85s" d="M44 3l-4 15q-1 6 5 4" />
+      <path pathLength="100" style="--d:9.0s" d="M51 11l-2 7q-1 6 5 5 5-1 7-12m0 0l-2 10q0 3 4 1" />
+    </g>
+    <path pathLength="100" style="--d:8.7s" d="M29 10c-9 0-11 13-3 13 9 0 12-13 3-13z" stroke="#22d27c" stroke-width="2.8" />
+  </svg>
+  <div class="abs up" style="left:766px;top:540px;font-size:44px;font-weight:900;--d:9.12s">把 AI 编程工具，<span class="hl">管在一处</span></div>
+  <div class="abs mono" style="left:770px;top:640px;font-size:18px;letter-spacing:0.42em;color:#69728d" data-scramble data-at="9.4" data-dur="1.2">ISLAND · AUTOMATION · ACCOUNTS · HANDOFF · CHECK-IN</div>
+</section>
+
+<!-- ============ 02 绿色闪切 10.99–12.865s ============ -->
+<section class="scene flash" style="--in:10.99s;--ind:0.02s;--out:12.85s;--outd:0.02s">
+  <div class="pat">
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+    <div>JOLU ✧ 灵动岛 ✧ 自动化 ✧ 账号管理 ✧ 压缩会话 ✧ 一键签到 ✧ JOLU ✧ 灵动岛 ✧</div>
+  </div>
+  <div class="abs center mono fade" style="top:300px;font-size:22px;font-weight:800;letter-spacing:0.5em;color:#0b4a2b;--d:11.05s">ONE APP · FIVE POWERS</div>
+  <div class="abs center blurIn" style="top:340px;font-size:250px;font-weight:900;color:#07150d;line-height:1.2;--d:10.99s">5 大能力</div>
+  <div class="abs center up" style="top:680px;font-size:36px;font-weight:800;color:#0b4a2b;--d:11.4s">灵动岛 · 自动化 · 账号管理 · 压缩会话 · 一键签到</div>
+</section>
+
+<!-- ============ 03 灵动岛 A 12.865–16.615s ============ -->
+<section class="scene" style="--in:12.865s;--ind:0.02s;--out:16.4s">
+  <div class="abs" style="left:140px;top:250px">
+    <div class="tag up" style="--d:12.9s"><b>01</b> 桌面灵动岛 · 实时额度</div>
+  </div>
+  <div class="abs big up" style="left:130px;top:320px;--d:12.95s"><span class="num" data-count data-at="12.95" data-dur="1" data-to="90">0</span><span class="pct">%</span></div>
+  <div class="abs up" style="left:146px;top:620px;font-size:26px;--d:13.3s"><b>5 小时窗口 · 已用</b> <span style="color:var(--mute)">· 4h 51m 后重置</span></div>
+  <div class="abs" style="left:140px;top:710px;display:flex;gap:14px">
+    <span class="chip pop" style="--d:14.74s">重置倒计时</span>
+    <span class="chip pop" style="--d:15.21s">会话增量</span>
+    <span class="chip pop" style="--d:15.68s">双击展开</span>
+    <span class="chip pop" style="--d:16.15s">边缘停靠</span>
+  </div>
+  <div class="abs" style="left:1060px;top:380px;width:700px">
+    <div class="up" style="--d:13.1s">
+      <div class="brow">5 小时窗口 <small>90% · 4h 51m 后重置</small></div>
+      <div class="bar"><i style="--w:90%;--d:13.2s;color:var(--blue);background:linear-gradient(90deg,#2b6fd6,var(--blue))"></i></div>
+    </div>
+    <div class="up" style="margin-top:70px;--d:13.35s">
+      <div class="brow">7 天窗口 <small>41% · 3d 7h 后重置</small></div>
+      <div class="bar"><i style="--w:41%;--d:13.45s;color:var(--g);background:linear-gradient(90deg,#0a8f4e,var(--g))"></i></div>
+    </div>
+    <div class="up" style="margin-top:70px;--d:13.6s;display:flex;justify-content:space-between;font-size:22px">
+      <span style="color:var(--mute)">运行中的会话 · 3</span><b class="g mono">+12.4k Token</b>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 03 灵动岛 B 16.615–20.365s ============ -->
+<section class="scene" style="--in:16.615s;--out:20.15s">
+  <div class="abs" style="left:140px;top:300px;width:760px">
+    <div class="tag up" style="--d:16.65s"><b>01</b> 灵动岛 · 常驻桌面</div>
+    <div class="h up" style="margin-top:28px;--d:16.75s">额度常驻桌面，<br /><span class="g">一眼看清</span></div>
+    <div class="mono up" style="margin-top:34px;font-size:21px;color:var(--mute);--d:17.0s">双击展开 · 拖到边缘停靠 · 最多 8 个分身</div>
+  </div>
+  <div class="isl" id="islC"><img src="{{islandCollapsedDark}}" alt="" /></div>
+  <div class="isl" id="islE"><img src="{{islandExpandedDark}}" alt="" /></div>
+  <div class="isl pop" style="left:1440px;top:250px;width:440px;--d:18.95s"><img src="{{islandCollapsedDark}}" alt="" /></div>
+  <div class="isl pop" style="left:990px;top:440px;width:440px;--d:19.1s"><img src="{{islandCollapsedDark}}" alt="" /></div>
+  <div class="isl pop" style="left:1440px;top:440px;width:440px;--d:19.25s"><img src="{{islandCollapsedDark}}" alt="" /></div>
+  <span class="ilab main fade" style="left:1016px;top:395px;--d:18.95s">本体</span>
+  <span class="ilab fade" style="left:1466px;top:395px;--d:19.0s">分身 1</span>
+  <span class="ilab fade" style="left:1016px;top:585px;--d:19.15s">分身 2</span>
+  <span class="ilab fade" style="left:1466px;top:585px;--d:19.3s">分身 3</span>
+  <div class="abs" style="left:1016px;top:660px"><span class="chip pop" style="--d:19.42s">每个分身显示不同账号</span></div>
+  <svg class="cursor" id="cur1"><use href="#cursor" /></svg>
+  <i class="rip" style="left:1404px;top:364px;--d:17.42s"></i>
+  <i class="rip" style="left:1404px;top:364px;--d:17.6s"></i>
+  <i class="rip" style="left:1404px;top:364px;--d:18.3s"></i>
+  <i class="rip" style="left:1404px;top:364px;--d:18.46s"></i>
+</section>
+
+<!-- ============ 04 自动化 A 20.365–24.115s ============ -->
+<section class="scene" style="--in:20.365s;--out:23.95s">
+  <div class="abs center" style="top:120px"><div class="tag up" style="--d:20.4s"><b>02</b> 自动化 · 额度恢复后续跑</div></div>
+  <div class="abs center h up" style="top:180px;font-size:80px;--d:20.5s">额度用完，<span class="g">到点续跑</span></div>
+  <div class="panel term up" style="--d:20.55s">
+    <div class="bar0"><i></i>任务日志 · 完善登录页面 · Claude Code · 演示账号</div>
+    <div class="lines">
+      <div data-type data-at="20.8" data-cps="48"><span>▶ 16:02  开始执行：完善登录页面的表单校验</span></div>
+      <div class="red" data-type data-at="21.4" data-cps="48">✕ 16:48  5 小时额度已用完 · 已保留修改与进度</div>
+      <div class="amber" data-type data-at="21.95" data-cps="48">◷ 等待额度恢复 · 预计今天 18:30</div>
+      <div class="ok" data-type data-at="23.0" data-cps="48">✓ 18:30  额度已恢复 · 在原会话继续执行</div>
+      <div class="ok" data-type data-at="23.42" data-cps="48">✓ 18:57  任务完成 · 已汇总改动与验证结果</div>
+    </div>
+    <div class="clockBox"><small>当前时间</small><b data-clock data-at="22.05" data-dur="0.9" data-from="16:48" data-to="18:30">16:48</b></div>
+  </div>
+</section>
+
+<!-- ============ 04 自动化 B 24.115–27.865s ============ -->
+<section class="scene" style="--in:24.115s;--out:27.65s">
+  <div class="abs" style="left:130px;top:330px;width:700px">
+    <div class="tag up" style="--d:24.15s"><b>02</b> 自动化 · 等待额度</div>
+    <div class="h up" style="margin-top:28px;font-size:78px;--d:24.25s">保留进度，<br /><span class="g">原会话继续</span></div>
+    <div class="mono" style="margin-top:34px;font-size:21px;color:#9fe7c3" data-type data-at="24.7" data-cps="20">立即 · 定时 · 额度恢复后执行</div>
+    <div style="margin-top:34px;display:flex;gap:12px;flex-wrap:wrap">
+      <span class="chip pop" style="--d:26.45s">同账号任务依次排队</span>
+      <span class="chip pop" style="--d:26.9s">运行记录区分等待时长</span>
+    </div>
+  </div>
+  <div class="tilt" style="left:860px;top:150px;width:1000px">
+    <div class="plane" style="--d:24.2s">
+      <img src="{{automationDark}}" alt="" />
+      <div class="call" style="left:265px;top:265px;--d:25.99s"><i></i><span>预计恢复 · 今天 18:30</span></div>
+      <div class="call left" style="left:840px;top:285px;--d:26.45s"><i></i><span>5 小时额度 100% · 等待中</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 05 账号管理 A 27.865–31.615s ============ -->
+<section class="scene" style="--in:27.865s;--out:31.4s">
+  <div class="abs center" style="top:110px"><div class="tag up" style="--d:27.9s"><b>03</b> 账号管理 · 多账号额度</div></div>
+  <div class="abs center h up" style="top:170px;font-size:76px;--d:28.0s">多个账号，<span class="g">额度一屏看全</span></div>
+  <div class="abs up" style="left:160px;top:342px;font-size:21px;color:#c4cadb;--d:28.2s">4 个账号 · 1 个当前使用 · 演示数据</div>
+  <div class="tool up" style="--d:28.2s"><span class="mask"><span class="plain"><svg><use href="#i-eye-off" /></svg>隐藏敏感信息</span><span class="hidden"><svg><use href="#i-eye" /></svg>显示敏感信息</span></span></div>
+
+  <div class="acct up" style="left:160px;--d:28.3s">
+    <div class="hd"><svg><use href="#logo-claude" /></svg><h4>Claude Code</h4></div>
+    <div class="meta"><span class="mask"><span class="plain">work@example.com</span><span class="hidden">••••••@•••••••</span></span> · 官方订阅</div>
+    <div class="q"><div class="row"><span>5 小时额度</span><b>剩余 62%</b></div><div class="bar"><i style="--w:62%;--d:28.8s;background:var(--g)"></i></div></div>
+    <div class="q"><div class="row"><span>7 天额度</span><b>剩余 35%</b></div><div class="bar"><i style="--w:35%;--d:29.0s;background:var(--g)"></i></div></div>
+    <div class="ft"><span>订阅到期 2026-11-30</span><span>刚刚同步</span></div>
+  </div>
+  <div class="acct up" style="left:570px;--d:28.42s">
+    <div class="hd"><svg><use href="#logo-claude" /></svg><h4>Claude Code</h4><span class="badge">当前使用</span></div>
+    <div class="meta"><span class="mask"><span class="plain">me@example.com</span><span class="hidden">••••@•••••••</span></span> · 官方订阅</div>
+    <div class="q"><div class="row"><span>5 小时额度</span><b>剩余 100%</b></div><div class="bar"><i style="--w:100%;--d:29.27s;background:var(--g)"></i></div></div>
+    <div class="q"><div class="row"><span>7 天额度</span><b>剩余 88%</b></div><div class="bar"><i style="--w:88%;--d:29.45s;background:var(--g)"></i></div></div>
+    <div class="ft"><span>订阅到期 2026-12-08</span><span>刚刚同步</span></div>
+  </div>
+  <div class="acct up" style="left:980px;--d:28.54s">
+    <div class="hd"><svg><use href="#logo-codex" /></svg><h4>Codex</h4></div>
+    <div class="meta"><span class="mask"><span class="plain">team@example.com</span><span class="hidden">••••@•••••••</span></span> · 官方订阅</div>
+    <div class="q"><div class="row"><span>5 小时额度</span><b style="color:var(--amber)">剩余 18%</b></div><div class="bar"><i style="--w:18%;--d:29.74s;background:var(--amber)"></i></div></div>
+    <div class="q"><div class="row"><span>7 天额度</span><b>剩余 54%</b></div><div class="bar"><i style="--w:54%;--d:29.92s;background:var(--g)"></i></div></div>
+    <div class="ft"><span>订阅到期 2026-12-15</span><span>刚刚同步</span></div>
+  </div>
+  <div class="acct up" style="left:1390px;--d:28.66s">
+    <div class="hd"><svg><use href="#logo-custom" /></svg><h4>自定义供应商</h4></div>
+    <div class="meta"><span class="mask"><span class="plain">api.example.com</span><span class="hidden">•••.•••••••</span></span> · API Key</div>
+    <div class="bal"><span>可用余额</span><div data-count data-at="30.2" data-dur="0.6" data-to="12.50" data-decimals="2" data-prefix="$">$0.00</div></div>
+    <div class="q" style="margin-top:22px"><div class="row"><span>累计消费</span><b>$3.00 USD</b></div></div>
+    <div class="ft"><span>sk-••••test</span><span>刚刚同步</span></div>
+  </div>
+  <svg class="cursor" id="cur2"><use href="#cursor" /></svg>
+  <i class="rip" style="left:1646px;top:356px;--d:30.6s"></i>
+</section>
+
+<!-- ============ 05 账号管理 B 31.615–35.365s ============ -->
+<section class="scene" style="--in:31.615s;--out:35.15s">
+  <div class="abs center" style="top:150px"><div class="tag up" style="--d:31.65s"><b>03</b> 供应商 · 订阅账号与 API Key</div></div>
+  <div class="abs center h up" style="top:210px;font-size:76px;--d:31.75s">一个面板，<span class="g">接入主流 AI 工具</span></div>
+  <div id="pcards"></div>
+</section>
+
+<!-- ============ 06 压缩会话 A 35.365–39.115s ============ -->
+<section class="scene" style="--in:35.365s;--out:38.95s">
+  <div class="wallWrap"><div class="wall3d"><div class="grid3" id="msgwall"></div></div></div>
+  <div class="shade"></div>
+  <div class="abs center" style="top:300px"><div class="tag up" style="--d:35.45s"><b>04</b> 压缩会话 · Markdown 交接</div></div>
+  <div class="abs center h up" style="top:360px;font-size:84px;--d:35.55s">长会话，<span class="g">压成一份 MD</span></div>
+  <div class="strip up" style="--d:37.24s">
+    <svg style="width:26px;height:26px"><use href="#logo-codex" /></svg>
+    <b>优化 Jolu 的会话界面</b><span style="color:var(--mute)">24 条消息 · 26.2K Token</span>
+    <div class="prog"><div class="bar"><i style="--w:100%;--d:37.5s;background:var(--g);color:var(--g)"></i></div></div>
+  </div>
+</section>
+
+<!-- ============ 06 压缩会话 B 39.115–42.865s ============ -->
+<section class="scene" style="--in:39.115s;--out:42.65s">
+  <div class="doc up" style="--d:39.12s">
+    <div class="dbar"><svg><use href="#i-file" /></svg>jolu_继续当前开发_交接-Claude.md</div>
+    <div class="body">
+      <div class="h1" data-type data-at="39.3" data-cps="40"># 交接文档 · jolu</div>
+      <div class="hh" data-type data-at="39.55" data-cps="40">## 项目目标与约束</div>
+      <div data-type data-at="39.75" data-cps="50">- 会话页左右分栏，保留筛选条件</div>
+      <div class="hh" data-type data-at="40.0" data-cps="40">## 当前进度</div>
+      <div data-type data-at="40.2" data-cps="50">- 列表与详情已完成，测试通过</div>
+      <div class="hh" data-type data-at="40.45" data-cps="40">## 关键文件 · 下一步</div>
+      <div data-type data-at="40.65" data-cps="50">- SessionList.tsx · 补空状态</div>
+    </div>
+  </div>
+  <div class="abs h up" style="left:1040px;top:250px;font-size:64px;--d:39.3s">换个 Agent，<br /><span class="g">接着干</span></div>
+  <div class="agent pop" style="left:1060px;--d:39.5s"><svg><use href="#logo-codex" /></svg>Codex</div>
+  <i class="lane fade" style="--d:39.6s"></i>
+  <div class="agent" id="agentB" style="left:1570px"><svg><use href="#logo-claude" /></svg>Claude Code<span class="done"><svg><use href="#i-check" /></svg></span></div>
+  <div class="token"><svg><use href="#i-file" /></svg>交接.md</div>
+  <div class="abs up" style="left:1060px;top:650px;font-size:24px;font-weight:700;--d:41.2s"><span class="g">✓</span> Claude Code 读完交接文档，继续开发</div>
+  <div class="abs" style="left:1060px;top:720px;display:flex;gap:12px">
+    <span class="chip pop" style="--d:41.6s">对话式修订摘要</span>
+    <span class="chip pop" style="--d:42.0s">原始会话保持完整</span>
+  </div>
+</section>
+
+<!-- ============ 07 一键签到 A 42.865–46.615s ============ -->
+<section class="scene" style="--in:42.865s;--out:46.45s">
+  <div class="abs center" style="top:110px"><div class="tag up" style="--d:42.9s"><b>05</b> 一键签到 · 每日福利</div></div>
+  <div class="abs center h up" style="top:170px;font-size:76px;--d:43.0s">多平台多账号，<span class="g">一键签到</span></div>
+  <div class="ck on" style="left:225px;top:360px;--d0:43.15s;--d:44.9s">
+    <div class="hd"><img src="{{workbuddy}}" alt="" />WorkBuddy<em>国内版</em></div><div class="acc">user@example.com</div>
+    <div class="st"><span class="before" style="--d:44.9s">可签到</span><span class="after" style="--d:44.9s">+100 积分</span></div>
+  </div>
+  <div class="ck on" style="left:719px;top:360px;--d0:43.25s;--d:45.13s">
+    <div class="hd"><img src="{{qoder}}" alt="" style="background:#fff;border-radius:7px;padding:2px" />Qoder<em>国内版</em></div><div class="acc">momo@example.com</div>
+    <div class="st"><span class="before" style="--d:45.13s">可签到</span><span class="after" style="--d:45.13s">+100 Credits</span></div>
+  </div>
+  <div class="ck on" style="left:1213px;top:360px;--d0:43.35s;--d:45.37s">
+    <div class="hd"><svg><use href="#logo-trae" /></svg>Trae<em>国内版</em></div><div class="acc">个人账号</div>
+    <div class="st"><span class="before" style="--d:45.37s">可签到</span><span class="after" style="--d:45.37s">+50 积分</span></div>
+  </div>
+  <div class="ck up" style="left:225px;top:534px;--d:43.45s">
+    <div class="hd"><img src="{{workbuddy}}" alt="" />WorkBuddy AI<em>国际版</em></div><div class="acc">自动活跃奖励</div>
+    <div class="st"><span class="muted">无需签到</span></div>
+  </div>
+  <div class="ck on" style="left:719px;top:534px;--d0:43.55s;--d:45.6s">
+    <div class="hd"><img src="{{qoder}}" alt="" style="background:#fff;border-radius:7px;padding:2px" />Qoder<em>国际版</em></div><div class="acc">alex@example.com</div>
+    <div class="st"><span class="before" style="--d:45.6s">可签到</span><span class="after" style="--d:45.6s">+100 Credits</span></div>
+  </div>
+  <div class="ck up" style="left:1213px;top:534px;--d:43.65s">
+    <div class="hd"><svg><use href="#logo-trae" /></svg>Trae<em>国际版</em></div><div class="acc">官方暂未开放每日签到</div>
+    <div class="st"><span class="muted">暂未开放</span></div>
+  </div>
+  <div class="bigBtn press"><svg><use href="#i-cal" /></svg>一键签到</div>
+  <svg class="cursor" id="cur3"><use href="#cursor" /></svg>
+  <i class="rip" style="left:986px;top:796px;--d:44.74s"></i>
+  <div class="toast fromR" style="--d:45.95s"><i><svg><use href="#i-check" /></svg></i><div>签到完成<small>4 个账号已领取今日奖励</small></div></div>
+</section>
+
+<!-- ============ 07 一键签到 B 46.615–50.365s ============ -->
+<section class="scene" style="--in:46.615s;--out:50.15s">
+  <div class="abs" style="left:130px;top:330px;width:700px">
+    <div class="tag up" style="--d:46.65s"><b>05</b> 一键签到 · 签到记录</div>
+    <div class="h up" style="margin-top:28px;font-size:78px;--d:46.75s">每日福利，<br /><span class="g">一次领完</span></div>
+    <div style="margin-top:40px;display:flex;gap:12px;flex-wrap:wrap;width:620px">
+      <span class="chip pop" style="--d:47.5s">同平台添加多个账号</span>
+      <span class="chip pop" style="--d:47.97s">部分失败单独重试</span>
+      <span class="chip pop" style="--d:48.44s">累计积分可追溯</span>
+    </div>
+  </div>
+  <div class="tilt" style="left:860px;top:150px;width:1000px">
+    <div class="plane" style="--d:46.7s">
+      <img src="{{checkinDark}}" alt="" />
+      <div class="call" style="left:470px;top:255px;--d:48.49s"><i></i><span>今日签到奖励 · 100 Credits</span></div>
+      <div class="call" style="left:742px;top:300px;--d:49.2s"><i></i><span>本月签到 15 天</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 08 更多 A 50.365–54.115s ============ -->
+<section class="scene" style="--in:50.365s;--out:53.95s">
+  <div class="abs" style="left:130px;top:340px;width:700px">
+    <div class="tag up" style="--d:50.4s">用量统计 · Dashboard</div>
+    <div class="h up" style="margin-top:28px;font-size:80px;--d:50.5s">用量统计，<br /><span class="g">每笔有数</span></div>
+    <div class="mono" style="margin-top:34px;font-size:21px;color:#9fe7c3" data-type data-at="50.9" data-cps="24">Token · 费用 · 缓存命中 · 调用明细</div>
+  </div>
+  <div class="tilt" style="left:860px;top:150px;width:1000px">
+    <div class="plane" style="--d:50.45s">
+      <img src="{{usageDark}}" alt="" />
+      <div class="call" style="left:560px;top:150px;--d:52.24s"><i></i><span>今日费用 · $18.42</span></div>
+      <div class="call" style="left:600px;top:330px;--d:52.7s"><i></i><span>Token 趋势</span></div>
+      <div class="call" style="left:830px;top:370px;--d:53.17s"><i></i><span>模型分布</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 08 更多 B 54.115–57.865s ============ -->
+<section class="scene" style="--in:54.115s;--out:57.65s">
+  <div class="abs center" style="top:110px"><div class="tag up" style="--d:54.15s">还有更多</div></div>
+  <div class="abs center h up" style="top:170px;font-size:72px;--d:54.25s">会话、Skills、设置，<span class="g">一应俱全</span></div>
+  <div class="trio" style="left:100px"><div class="pl" style="--ry:16deg;--d:54.45s"><img src="{{sessionsDark}}" alt="" /></div><h4 class="up" style="--d:54.9s">会话线程</h4><p class="up" style="--d:55.0s">跨工具搜索会话，回原工具继续</p></div>
+  <div class="trio" style="left:680px"><div class="pl" style="--ry:0deg;--d:54.65s"><img src="{{skillsDark}}" alt="" /></div><h4 class="up" style="--d:55.37s">Skills 管理</h4><p class="up" style="--d:55.47s">多个工具的 Skills 一处管理</p></div>
+  <div class="trio" style="left:1260px"><div class="pl" style="--ry:-16deg;--d:54.85s"><img src="{{settingsDark}}" alt="" /></div><h4 class="up" style="--d:55.84s">设置与更新</h4><p class="up" style="--d:55.94s">外观、网络代理，后台自动更新</p></div>
+</section>
+
+<!-- ============ 09 片尾 57.865–61.55s ============ -->
+<section class="scene" style="--in:57.865s;--out:70s">
+  <i class="endRing"></i>
+  <div class="tile pop" style="left:870px;top:200px;width:180px;height:180px;--d:58.2s"><img src="{{icon}}" alt="" /></div>
+  <svg class="abs wordmark" style="left:795px;top:400px;width:330px;height:133px" viewBox="0 0 67 27" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#f2f4fa" stroke-width="2.8">
+      <path pathLength="100" style="--d:58.5s" d="M4 4h11v12c0 9-12 9-12 1" />
+      <path pathLength="100" style="--d:58.75s" d="M44 3l-4 15q-1 6 5 4" />
+      <path pathLength="100" style="--d:58.9s" d="M51 11l-2 7q-1 6 5 5 5-1 7-12m0 0l-2 10q0 3 4 1" />
+    </g>
+    <path pathLength="100" style="--d:58.62s" d="M29 10c-9 0-11 13-3 13 9 0 12-13 3-13z" stroke="#22d27c" stroke-width="2.8" />
+  </svg>
+  <div class="abs center up" style="top:570px;font-size:38px;font-weight:900;--d:58.85s">把 AI 编程工具，<span class="g">管在一处</span></div>
+  <div class="abs" style="top:660px;left:0;right:0;height:62px">
+    <div class="dl main"><span>立即下载 →</span></div>
+    <div class="dl sub up" style="--d:59.3s"><svg style="width:22px;height:22px;margin-right:10px"><use href="#i-github" /></svg>GitHub 搜索 Jolu</div>
+  </div>
+  <div class="abs center up mono" style="top:770px;font-size:18px;letter-spacing:0.3em;color:#69728d;--d:59.5s">WINDOWS 10 / 11 · 灵动岛 · 自动化 · 账号管理 · 压缩会话 · 一键签到</div>
+  <svg class="cursor" id="cur4"><use href="#cursor" /></svg>
+  <i class="rip" style="left:805px;top:691px;--d:60.5s"></i>
+</section>
+
+<div class="demo">演示数据</div>
+<div class="black"></div>
+
+<script>
+  // 固定种子的伪随机数，保证每次渲染画面一致
+  function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 } }
+  const R = rng(20261028)
+  const el = (tag, cls, style, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (style) e.style.cssText = style; if (html) e.innerHTML = html; return e }
+
+  // 星点与光线
+  const stars = document.getElementById("stars")
+  for (let i = 0; i < 150; i++) stars.append(el("i", "star", `left:${R() * 1920}px;top:${R() * 1080}px;--tw:${2 + R() * 3}s;--td:${-R() * 5}s;transform:scale(${0.6 + R()})`))
+  const streaks = document.getElementById("streaks")
+  for (let i = 0; i < 7; i++) streaks.append(el("i", "streak", `left:${R() * 600}px;top:${80 + R() * 920}px;width:${700 + R() * 700}px;--sd:${6 + R() * 6}s;--sdel:${-R() * 10}s`))
+
+  // 开场：六边形墙被冲破的碎片
+  const frags = document.getElementById("frags")
+  for (let i = 0; i < 70; i++) {
+    const y = R() * 1080, dx = 120 + R() * 900, dy = (R() - 0.5) * 700
+    frags.append(el("i", "frag", `left:${762 + R() * 80}px;top:${y}px;--dx:${dx}px;--dy:${dy}px;--rot:${R() * 540}deg;width:${6 + R() * 12}px;height:${6 + R() * 12}px`))
+  }
+
+  // 供应商卡片：两行五列，按十六分音符依次弹出
+  const providers = [
+    ["#logo-claude", "Claude Code", "订阅账号 / API Key"], ["#logo-codex", "Codex", "订阅账号 / API Key"],
+    ["#logo-gemini", "Gemini", "账号授权 / API Key"], ["oc", "OpenCode", "先选择模型服务"],
+    ["#logo-grok", "Grok", "按可用接入方式连接"], ["{{zcode}}", "ZCode", "订阅套餐 / API Key"],
+    ["{{qoder}}", "Qoder", "账号登录 / 可用模型"], ["#logo-trae", "Trae", "账号登录 / 本机登录"],
+    ["{{workbuddy}}", "WorkBuddy", "账号登录 / 原工具配置"], ["#logo-custom", "自定义供应商", "Base URL / API Key"],
+  ]
+  const pcards = document.getElementById("pcards")
+  providers.forEach(([logo, name, desc], i) => {
+    const icon = logo === "oc" ? `<span class="oc">oc</span>` : logo.startsWith("#") ? `<svg><use href="${logo}"/></svg>` : `<img src="${logo}" style="${name === "Qoder" ? "background:#fff;border-radius:7px;padding:2px" : ""}"/>`
+    pcards.append(el("div", "pcard pop", `left:${130 + (i % 5) * 336}px;top:${430 + Math.floor(i / 5) * 150}px;--d:${32.0 + i * 0.117}s`, `<div class="hd">${icon}${name}</div><p>${desc}</p>`))
+  })
+
+  // 压缩会话：3D 消息墙
+  const msgs = [
+    ["你", "把会话列表和详情放在同一页，切换时保留筛选条件"], ["Codex", "已整理为左右分栏：左侧筛选与列表，右侧当前会话"],
+    ["你", "按供应商、项目和时间快速定位"], ["Codex", "新增三个筛选下拉，状态写入地址栏"],
+    ["你", "账号无法确认归属时单独标注"], ["Codex", "未归属账号显示灰色标签，可手动关联"],
+    ["你", "从详情返回原工具继续会话"], ["Codex", "已接入「在 Codex 中继续」按钮"],
+    ["你", "补一下列表滚动位置的测试"], ["Codex", "新增 3 个用例，全部通过"],
+    ["你", "空状态文案再友好一点"], ["Codex", "已按设计稿调整空状态与插图"],
+  ]
+  const wall = document.getElementById("msgwall")
+  for (let i = 0; i < 56; i++) {
+    const [who, text] = msgs[(i * 5 + Math.floor(i / 4)) % msgs.length]
+    const hh = String(12 + Math.floor(i / 6)).padStart(2, "0"), mm = String((i * 7) % 60).padStart(2, "0")
+    wall.append(el("div", "msg" + (who === "你" ? " u" : ""), "", `<b>${who}<i>${hh}:${mm}</i></b>${text}`))
+  }
+
+  // ---------- 按时间计算的文字效果 ----------
+  const typers = [...document.querySelectorAll("[data-type]")].map((e) => ({ e, text: e.textContent, at: +e.dataset.at, cps: +(e.dataset.cps || 30) }))
+  const counters = [...document.querySelectorAll("[data-count]")].map((e) => ({ e, at: +e.dataset.at, dur: +e.dataset.dur, to: +e.dataset.to, dec: +(e.dataset.decimals || 0), pre: e.dataset.prefix || "" }))
+  const clocks = [...document.querySelectorAll("[data-clock]")].map((e) => { const m = (s) => { const [h, mi] = s.split(":"); return +h * 60 + +mi }; return { e, at: +e.dataset.at, dur: +e.dataset.dur, from: m(e.dataset.from), to: m(e.dataset.to) } })
+  const scrambles = [...document.querySelectorAll("[data-scramble]")].map((e) => ({ e, text: e.textContent, at: +e.dataset.at, dur: +e.dataset.dur }))
+  const glyphs = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789#*/=+"
+  const ease = (p) => 1 - Math.pow(1 - Math.min(1, Math.max(0, p)), 3)
+
+  function textAt(t) {
+    for (const x of typers) {
+      const n = Math.max(0, Math.min(x.text.length, Math.floor((t - x.at) * x.cps)))
+      x.e.textContent = x.text.slice(0, n)
+      const end = x.at + x.text.length / x.cps
+      x.e.classList.toggle("caret", t >= x.at && (t < end || (t < end + 1.2 && Math.floor(t / 0.4) % 2 === 0)))
+    }
+    for (const x of counters) { const v = x.to * ease((t - x.at) / x.dur); x.e.textContent = x.pre + v.toFixed(x.dec) }
+    for (const x of clocks) { const v = Math.round(x.from + (x.to - x.from) * ease((t - x.at) / x.dur)); x.e.textContent = `${String(Math.floor(v / 60)).padStart(2, "0")}:${String(v % 60).padStart(2, "0")}` }
+    for (const x of scrambles) {
+      const p = (t - x.at) / x.dur, f = Math.floor(t * 30)
+      x.e.textContent = p <= 0 ? "" : [...x.text].map((c, i) => (c === " " || c === "·" || p >= (i + 1) / x.text.length ? c : glyphs[(f * 7 + i * 13) % glyphs.length])).join("")
+    }
+  }
+
+  // build.mjs 调用：暂停全部动画，拨到第 t 秒
+  window.__seek = (t) => {
+    for (const a of document.getAnimations()) { a.pause(); a.currentTime = t * 1000 }
+    textAt(t)
+  }
+  // 浏览器里直接打开时按真实时间预览：?t=秒 从指定时刻开始
+  if (!navigator.webdriver) {
+    const dur = +document.querySelector('meta[name="promo-duration"]').content
+    const t0 = performance.now() - Number(new URLSearchParams(location.search).get("t") || 0) * 1000
+    const tick = () => { window.__seek(((performance.now() - t0) / 1000) % dur); requestAnimationFrame(tick) }
+    requestAnimationFrame(tick)
+  }
+</script>
+</body>
+</html>
