@@ -56,6 +56,8 @@ export interface Connection {
   protocol: "openai" | "anthropic" | null
   /** 账号汇聚网关：是否进入模型池对外服务（旧连接默认 false） */
   serve_enabled: boolean
+  /** 模型入口的持久化菜单 id 前缀（`<slug>/<model>`）；改名不变 */
+  slug?: string | null
 }
 
 /** 额度窗口是一组可变窗口，不是固定的两个字段（§7.4） */

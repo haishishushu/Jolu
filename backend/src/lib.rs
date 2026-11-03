@@ -23,6 +23,7 @@ mod startup;
 mod tray_icon;
 mod connections;
 mod creds;
+mod cli_switch;
 mod db;
 mod data_files;
 mod dock;
@@ -32,6 +33,7 @@ mod pricing;
 mod proxy;
 mod proxy_config;
 pub mod gateway;
+mod fx;
 mod quota;
 mod checkin_types;
 mod checkin_stats;
@@ -1644,6 +1646,40 @@ fn proxy_status(app: tauri::AppHandle) -> proxy::ProxyStatus {
     proxy::status(&app)
 }
 
+/// 费用估算的汇率（USD → 目标币种）。带 24 小时缓存；失败时 fallback=true 用参考价。
+#[derive(serde::Serialize)]
+struct FxRateDto {
+    currency: String,
+    rate: f64,
+    as_of: String,
+    fallback: bool,
+}
+
+/// 设置费用估算的显示币种
+#[tauri::command]
+fn set_cost_currency(app: tauri::AppHandle, currency: String) -> Result<crate::settings::Settings, String> {
+    if !matches!(currency.as_str(), "USD" | "CNY") {
+        return Err("币种只支持 USD 或 CNY".into());
+    }
+    let next = app.state::<Cfg>().0.try_update(|settings| settings.cost_currency = currency.clone())?;
+    let _ = app.emit("settings-changed", next.clone());
+    Ok(next)
+}
+
+#[tauri::command]
+fn fx_rate(currency: String) -> Result<FxRateDto, String> {
+    if currency != "CNY" {
+        return Ok(FxRateDto { currency, rate: 1.0, as_of: "基准币种".into(), fallback: false });
+    }
+    let client = crate::net::blocking_builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("创建汇率客户端失败：{e}"))?;
+    let rate = crate::fx::usd_cny(&client);
+    Ok(FxRateDto { currency, rate: rate.rate, as_of: rate.as_of, fallback: rate.fallback })
+}
+
 /* ------------------------- 账号汇聚网关（模块 J） ------------------------- */
 
 /// 网关总览：模式、端口、模型池与接线状态。凭证不外泄（只给掩码与 slug）。
@@ -1670,7 +1706,15 @@ fn gateway_status(app: tauri::AppHandle) -> GatewayStatus {
         default_connection: settings.gateway_default_connection.clone(),
         wiring: crate::gateway::wiring::AGENTS
             .iter()
-            .map(|agent| crate::gateway::wiring::status(agent, settings.proxy_port))
+            .map(|agent| {
+                let record = app
+                    .state::<Db>()
+                    .0
+                    .lock()
+                    .ok()
+                    .and_then(|conn| crate::gateway::wiring_store::load(&conn, agent));
+                crate::gateway::wiring::status_with(agent, settings.proxy_port, record.as_ref())
+            })
             .collect(),
     }
 }
@@ -1691,14 +1735,42 @@ fn gateway_set_mode(
         // 离开网关模式：先还原接线，再切模式
         crate::gateway::escape::manual(&app);
     }
+    if mode == "relay" && settings.proxy_mode != "relay" {
+        // 进入中转模式：先撤销观测接管（同一个端口，两种模式不能并存），
+        // 再启动监听；端口被占用时 start() 会明确报错，不再悄悄换端口。
+        crate::cli_switch::with_switch(|| {
+            crate::proxy::stop();
+            let _ = crate::proxy_config::restore_all_saved(&app);
+            Ok::<(), String>(())
+        })?;
+    }
+    let previous_mode = settings.proxy_mode.clone();
+    let previous_enabled = settings.proxy_enabled;
     let next = app
         .state::<Cfg>()
         .0
         .try_update(|settings| {
             settings.proxy_mode = mode.clone();
             settings.gateway_default_connection = default_connection;
+            if mode == "relay" {
+                settings.proxy_enabled = true;
+            }
         })
         .map_err(|error| format!("保存网关设置失败：{error}"))?;
+    if mode == "relay" {
+        if let Err(error) = crate::proxy::start(&app) {
+            let restored = app.state::<Cfg>().0.update(|settings| {
+                settings.proxy_mode = previous_mode;
+                settings.proxy_enabled = previous_enabled;
+            });
+            let _ = app.emit("settings-changed", restored);
+            // 之前本来在运行：按旧模式把它恢复起来，不留一个「开关是开的、监听不在」的状态。
+            if previous_enabled {
+                let _ = crate::proxy::set_proxy(&app, settings.proxy_port, true, settings.proxy_fallback_direct);
+            }
+            return Err(format!("启动模型入口失败：{error}"));
+        }
+    }
     let _ = app.emit("settings-changed", next.clone());
     Ok(next)
 }
@@ -1719,16 +1791,26 @@ fn gateway_wiring_set(app: tauri::AppHandle, agent: String, wired: bool) -> Resu
         Ok(format!("已接入 {}", wired_agents.join("、")))
     } else {
         let settings = app.state::<Cfg>().0.get();
-        let snapshot = settings.gateway_wiring.get(&agent).map(String::as_str);
-        let restored = crate::gateway::wiring::unwire(&agent, settings.proxy_port, snapshot)?;
-        if restored {
-            let _ = app.state::<Cfg>().0.try_update(|settings| {
-                settings.gateway_wiring.remove(&agent);
-            });
-            Ok(format!("已断开 {agent}"))
-        } else {
-            Ok(format!("{agent} 的配置已被外部修改，未覆盖"))
-        }
+        crate::cli_switch::with_switch(|| {
+            let record = app
+                .state::<Db>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|conn| crate::gateway::wiring_store::load(&conn, &agent));
+            let restored = crate::gateway::wiring::unwire(&agent, settings.proxy_port, record.as_ref())?;
+            if restored {
+                if let Ok(conn) = app.state::<Db>().0.lock() {
+                    let _ = crate::gateway::wiring_store::mark_idle(&conn, &agent);
+                }
+                let _ = app.state::<Cfg>().0.try_update(|settings| {
+                    settings.gateway_wiring.remove(&agent);
+                });
+                Ok(format!("已断开 {agent}"))
+            } else {
+                Ok(format!("{agent} 的配置已被外部修改，未覆盖"))
+            }
+        })
     }
 }
 
@@ -1736,6 +1818,93 @@ fn gateway_wiring_set(app: tauri::AppHandle, agent: String, wired: bool) -> Resu
 #[tauri::command]
 fn gateway_escape(app: tauri::AppHandle) -> String {
     crate::gateway::escape::manual(&app).summary()
+}
+
+#[tauri::command]
+fn gateway_groups(app: tauri::AppHandle) -> Result<crate::gateway::groups::GroupsDto, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::groups::list(&conn).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn gateway_group_create(
+    app: tauri::AppHandle,
+    kind: String,
+    name: String,
+) -> Result<crate::gateway::groups::GroupDto, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::groups::create(&conn, &kind, &name)
+}
+
+#[tauri::command]
+fn gateway_group_rename(app: tauri::AppHandle, kind: String, id: String, name: String) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::groups::rename(&conn, &kind, &id, &name)
+}
+
+#[tauri::command]
+fn gateway_group_delete(app: tauri::AppHandle, kind: String, id: String) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::groups::delete(&conn, &kind, &id)
+}
+
+#[tauri::command]
+fn gateway_group_reorder(app: tauri::AppHandle, kind: String, ids: Vec<String>) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::groups::reorder(&conn, &kind, &ids)
+}
+
+#[tauri::command]
+fn gateway_group_move(
+    app: tauri::AppHandle,
+    kind: String,
+    member: String,
+    group_id: Option<String>,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::groups::move_member(&conn, &kind, &member, group_id.as_deref())
+}
+
+/// 改菜单 id。旧 id 会进入历史，之后请求旧 id 会得到 404 说明现在叫什么。
+#[tauri::command]
+fn gateway_set_slug(app: tauri::AppHandle, connection_id: String, slug: String) -> Result<String, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    connections::set_slug(&conn, &connection_id, &slug)
+}
+
+/// 模型清单：只读数据库缓存，不打上游。
+#[tauri::command]
+fn gateway_catalog(app: tauri::AppHandle) -> Result<Vec<crate::gateway::catalog::CatalogModel>, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::catalog::list(&conn).map_err(|error| error.to_string())
+}
+
+/// 路由流水：最近 20 条网关请求（不含提示词与凭证）。
+#[tauri::command]
+fn gateway_route_log(app: tauri::AppHandle) -> Result<Vec<crate::gateway::route_log::RouteLogEntry>, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::route_log::recent(&conn, 20).map_err(|error| error.to_string())
+}
+
+/// 接受接线漂移：只清接线记录，不改用户的配置文件。
+#[tauri::command]
+fn gateway_wiring_accept(app: tauri::AppHandle, agent: String) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::wiring_store::mark_idle(&conn, &agent).map_err(|error| error.to_string())?;
+    let _ = app.state::<Cfg>().0.try_update(|settings| {
+        settings.gateway_wiring.remove(&agent);
+    });
+    Ok(())
 }
 
 /* --------------------------- 连接管理（§6.3） --------------------------- */
@@ -2625,6 +2794,8 @@ fn initialize_app(app: &tauri::AppHandle, data_dir: &std::path::Path) -> Result<
     if !validation::isolated() { watcher::start(app.clone()); }
     if !validation::isolated() { watcher::start_config_sync(app.clone()); }
     if !validation::isolated() { proxy::startup(app); }
+    // 预建右键菜单窗口：把首次右键的 WebView 构建耗时挪到启动后的空闲期
+    context_menu::prewarm(app);
 
     if let Some(days) = app.state::<Cfg>().0.get().retention_days {
         if let Ok(cutoff) = retention_cutoff(days) {
@@ -3039,10 +3210,22 @@ pub fn run() {
             set_proxy,
             proxy_status,
             gateway_status,
+            fx_rate,
+            set_cost_currency,
             gateway_set_mode,
             gateway_set_serve,
             gateway_wiring_set,
             gateway_escape,
+            gateway_groups,
+            gateway_group_create,
+            gateway_group_rename,
+            gateway_group_delete,
+            gateway_group_reorder,
+            gateway_group_move,
+            gateway_set_slug,
+            gateway_wiring_accept,
+            gateway_catalog,
+            gateway_route_log,
             dock_undock,
             cost_estimate,
             connection_quota,
@@ -3087,6 +3270,7 @@ pub fn run() {
             data_files::discard_import,
             // 任务 2.4 结束
             updater::set_auto_check_updates,
+            updater::set_update_interval,
             updater::check_app_update_available,
             updater::download_app_update,
             updater::cancel_app_update_download,

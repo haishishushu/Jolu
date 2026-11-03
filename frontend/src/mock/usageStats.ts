@@ -2,7 +2,7 @@
  * 用量统计页的浏览器预览示例（取自 Jolu.pen 画板 30 / 32 / 34 的示例数值）。
  * 只在没有 Tauri 的 `pnpm dev` 预览里使用；桌面端查询失败时不回落到这里。
  */
-import type { StatsActivityDto, StatsCallPageDto, StatsCallRowDto, StatsOverviewDto } from "@/lib/api"
+import type { PriceSnapshotDto, StatsActivityDto, StatsCallPageDto, StatsCallRowDto, StatsOverviewDto } from "@/lib/api"
 import { addDays, dateKey } from "@/lib/usageStats"
 
 const series = [
@@ -17,7 +17,7 @@ export function demoOverview(start: number): StatsOverviewDto {
     requests: 846,
     failed: 12,
     cache_hit_rate: 0.482,
-    cost: { amount: 18.42, priced_requests: 810, requests: 846 },
+    cost: { amount: 18.42, priced_requests: 810, requests: 846, unpriced_no_price: ["grok:grok-4-fast"], unpriced_no_usage: 12 },
     previous_total: 10_523_000,
     trend: {
       bucket: "2h",
@@ -71,17 +71,35 @@ export function demoActivity(now: Date): StatsActivityDto {
   return { first_date: first, last_date: last, days, today_active_minutes: 169, week_active_days: 3, month_active_days: 14 }
 }
 
+
+/** 示例单价（每百万 token，USD），与真实价目表同量级，仅用于浏览器预览演示拆解 */
+const DEMO_PRICES: Record<string, { input: number; cached: number; output: number; write: number | null; source: string }> = {
+  "claude-sonnet-4-5": { input: 3, cached: 0.3, output: 15, write: null, source: "https://platform.claude.com/docs/en/about-claude/pricing" },
+  "claude-haiku-4-5": { input: 1, cached: 0.1, output: 5, write: null, source: "https://platform.claude.com/docs/en/about-claude/pricing" },
+  "gpt-5": { input: 1.25, cached: 0.125, output: 10, write: null, source: "https://developers.openai.com/api/docs/pricing" },
+  "gpt-5-mini": { input: 0.25, cached: 0.025, output: 2, write: null, source: "https://developers.openai.com/api/docs/pricing" },
+  "gemini-2.5-pro": { input: 1.25, cached: 0.125, output: 10, write: null, source: "https://ai.google.dev/gemini-api/docs/pricing" },
+  "gemini-2.5-flash": { input: 0.3, cached: 0.03, output: 2.5, write: null, source: "https://ai.google.dev/gemini-api/docs/pricing" },
+}
+
+/** 按模型名生成示例单价快照；无价目的模型返回 null（演示「未收录」状态） */
+function demoPrice(model: string, longContext = false): PriceSnapshotDto | null {
+  const p = DEMO_PRICES[model]
+  if (!p) return null
+  return { input: p.input, cached_input: p.cached, output: p.output, cache_write: p.write, source: p.source, long_context: longContext, off_peak: false }
+}
+
 const DEMO_CALLS: Omit<StatsCallRowDto, "id" | "ts">[] = [
-  { call_id: "call_demo_0138", platform: "claude", model: "claude-sonnet-4-5", session_id: "demo-1", fresh_input: 8_400, cache_read: 12_000, cache_write: 0, output: 1_200, total: 21_600, cost: 0.026, effort: "high", duration_ms: 1600, first_token_ms: 400, status_code: null, failed: false },
-  { call_id: "call_demo_0137", platform: "codex", model: "gpt-5", session_id: "demo-2", fresh_input: 12_000, cache_read: 18_000, cache_write: null, output: 4_200, total: 34_200, cost: 0.082, effort: "high", duration_ms: 3200, first_token_ms: 800, status_code: 200, failed: false },
-  { call_id: "call_demo_0136", platform: "codex", model: "gpt-5-mini", session_id: "demo-4", fresh_input: 3_000, cache_read: 4_800, cache_write: null, output: 600, total: 8_400, cost: 0.009, effort: null, duration_ms: 800, first_token_ms: 200, status_code: 200, failed: false },
-  { call_id: "call_demo_0135", platform: "gemini", model: "gemini-2.5-pro", session_id: "demo-3", fresh_input: 5_200, cache_read: 6_400, cache_write: null, output: 1_200, total: 12_800, cost: null, effort: "medium", duration_ms: 2100, first_token_ms: 500, status_code: null, failed: false },
-  { call_id: "call_demo_0134", platform: "grok", model: "grok-4", session_id: null, fresh_input: null, cache_read: null, cache_write: null, output: null, total: null, cost: null, effort: null, duration_ms: 400, first_token_ms: null, status_code: 429, failed: true },
-  { call_id: "call_demo_0133", platform: "claude", model: "claude-haiku-4-5", session_id: "demo-5", fresh_input: 6_000, cache_read: 9_200, cache_write: 0, output: 1_200, total: 16_400, cost: 0.02, effort: "medium", duration_ms: 1500, first_token_ms: 300, status_code: null, failed: false },
-  { call_id: "call_demo_0132", platform: "claude", model: "claude-sonnet-4-5", session_id: "demo-1", fresh_input: 7_500, cache_read: 9_600, cache_write: 0, output: 1_800, total: 18_900, cost: 0.041, effort: "high", duration_ms: 2600, first_token_ms: 600, status_code: null, failed: false },
-  { call_id: "call_demo_0131", platform: "codex", model: "gpt-5-mini", session_id: "demo-4", fresh_input: 2_400, cache_read: 4_000, cache_write: null, output: 400, total: 6_800, cost: 0.008, effort: "low", duration_ms: 900, first_token_ms: 200, status_code: 200, failed: false },
-  { call_id: "call_demo_0130", platform: "gemini", model: "gemini-2.5-flash", session_id: "demo-3", fresh_input: 4_000, cache_read: 5_400, cache_write: null, output: 800, total: 10_200, cost: 0.012, effort: null, duration_ms: 1100, first_token_ms: 300, status_code: null, failed: false },
-  { call_id: "call_demo_0129", platform: "codex", model: "gpt-5", session_id: null, fresh_input: null, cache_read: null, cache_write: null, output: null, total: null, cost: null, effort: null, duration_ms: 30_000, first_token_ms: null, status_code: 504, failed: true },
+  { call_id: "call_demo_0138", platform: "claude", model: "claude-sonnet-4-5", session_id: "demo-1", fresh_input: 8_400, cache_read: 12_000, cache_write: 0, output: 1_200, total: 21_600, price: demoPrice("claude-sonnet-4-5"), cost: 0.026, effort: "high", duration_ms: 1600, first_token_ms: 400, status_code: null, failed: false },
+  { call_id: "call_demo_0137", platform: "codex", model: "gpt-5", session_id: "demo-2", fresh_input: 12_000, cache_read: 18_000, cache_write: null, output: 4_200, total: 34_200, price: demoPrice("gpt-5"), cost: 0.082, effort: "high", duration_ms: 3200, first_token_ms: 800, status_code: 200, failed: false },
+  { call_id: "call_demo_0136", platform: "codex", model: "gpt-5-mini", session_id: "demo-4", fresh_input: 3_000, cache_read: 4_800, cache_write: null, output: 600, total: 8_400, price: demoPrice("gpt-5-mini"), cost: 0.009, effort: null, duration_ms: 800, first_token_ms: 200, status_code: 200, failed: false },
+  { call_id: "call_demo_0135", platform: "gemini", model: "gemini-2.5-pro", session_id: "demo-3", fresh_input: 5_200, cache_read: 6_400, cache_write: null, output: 1_200, total: 12_800, price: demoPrice("gemini-2.5-pro"), cost: null, effort: "medium", duration_ms: 2100, first_token_ms: 500, status_code: null, failed: false },
+  { call_id: "call_demo_0134", platform: "grok", model: "grok-4", session_id: null, fresh_input: null, cache_read: null, cache_write: null, output: null, total: null, price: demoPrice("grok-4"), cost: null, effort: null, duration_ms: 400, first_token_ms: null, status_code: 429, failed: true },
+  { call_id: "call_demo_0133", platform: "claude", model: "claude-haiku-4-5", session_id: "demo-5", fresh_input: 6_000, cache_read: 9_200, cache_write: 0, output: 1_200, total: 16_400, price: demoPrice("claude-haiku-4-5"), cost: 0.02, effort: "medium", duration_ms: 1500, first_token_ms: 300, status_code: null, failed: false },
+  { call_id: "call_demo_0132", platform: "claude", model: "claude-sonnet-4-5", session_id: "demo-1", fresh_input: 7_500, cache_read: 9_600, cache_write: 0, output: 1_800, total: 18_900, price: demoPrice("claude-sonnet-4-5"), cost: 0.041, effort: "high", duration_ms: 2600, first_token_ms: 600, status_code: null, failed: false },
+  { call_id: "call_demo_0131", platform: "codex", model: "gpt-5-mini", session_id: "demo-4", fresh_input: 2_400, cache_read: 4_000, cache_write: null, output: 400, total: 6_800, price: demoPrice("gpt-5-mini"), cost: 0.008, effort: "low", duration_ms: 900, first_token_ms: 200, status_code: 200, failed: false },
+  { call_id: "call_demo_0130", platform: "gemini", model: "gemini-2.5-flash", session_id: "demo-3", fresh_input: 4_000, cache_read: 5_400, cache_write: null, output: 800, total: 10_200, price: demoPrice("gemini-2.5-flash"), cost: 0.012, effort: null, duration_ms: 1100, first_token_ms: 300, status_code: null, failed: false },
+  { call_id: "call_demo_0129", platform: "codex", model: "gpt-5", session_id: null, fresh_input: null, cache_read: null, cache_write: null, output: null, total: null, price: demoPrice("gpt-5"), cost: null, effort: null, duration_ms: 30_000, first_token_ms: null, status_code: 504, failed: true },
 ]
 
 export function demoCalls(end: number, page: number): StatsCallPageDto {

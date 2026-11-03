@@ -372,6 +372,11 @@
   --radius-island: 18px;
   --radius-sm2: 8px;
 
+  /* 辅助字号语义名。取值与设计稿一致：note = 原 10px、meta = 原 11px，
+     仅用于新代码避免散落魔法数字，不代表对设计稿字号的改动。 */
+  --text-note: 10px;
+  --text-meta: 11px;
+
   --font-ui: "Inter", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -575,6 +580,89 @@ html.reduce-motion .motion-toast { transform: none; transition: none; }
 }
 .motion-select-chevron { transition: transform 160ms var(--motion-ease); }
 [data-state="open"] > .motion-select-chevron { transform: rotate(180deg); }
+
+/* 模型入口（画板 OX4b7）：链路描线、悬停高亮、流光点、模型池呼吸、分组展开。 */
+@keyframes gw-breathe {
+  from { box-shadow: 0 1px 2px rgba(20, 60, 40, 0.10), 0 8px 22px rgba(20, 60, 40, 0.16); }
+  to { box-shadow: 0 1px 2px rgba(20, 60, 40, 0.16), 0 14px 34px rgba(20, 60, 40, 0.30); }
+}
+@keyframes gw-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gw-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.gw-hub-running { animation: gw-breathe 3.2s ease-in-out infinite alternate; }
+.gw-group-enter { animation: gw-pop 240ms var(--motion-ease) both; }
+.gw-dialog-enter { animation: gw-rise 200ms var(--motion-ease) both; }
+.gw-link {
+  transition: stroke-width 180ms var(--motion-ease), opacity 180ms var(--motion-ease),
+    stroke 400ms var(--motion-ease);
+}
+.gw-card {
+  max-height: 1200px;
+  transition: box-shadow 160ms var(--motion-ease), border-color 160ms ease,
+    max-height 200ms var(--motion-ease), transform 120ms var(--motion-ease);
+}
+.gw-card:hover { box-shadow: 0 6px 18px rgba(20, 60, 40, 0.10); }
+.gw-card-closing {
+  max-height: 0 !important;
+  opacity: 0;
+  margin-top: -10px;
+  overflow: hidden;
+  transition: max-height 200ms var(--motion-ease), opacity 200ms var(--motion-ease),
+    margin-top 200ms var(--motion-ease);
+}
+.gw-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms var(--motion-ease);
+}
+.gw-expand.open { grid-template-rows: 1fr; }
+.gw-expand > div { overflow: hidden; min-height: 0; }
+html.reduce-motion .gw-hub-running,
+html.reduce-motion .gw-group-enter,
+html.reduce-motion .gw-dialog-enter { animation: none; }
+html.reduce-motion .gw-link,
+html.reduce-motion .gw-card,
+html.reduce-motion .gw-expand,
+html.reduce-motion .gw-card-closing { transition: none; }
+@keyframes gw-draw { to { stroke-dashoffset: 0; } }
+@keyframes gw-row {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gw-fail {
+  from { box-shadow: inset 3px 0 0 #f59e0b, inset 0 0 0 20px rgba(245, 158, 11, 0.12); }
+  to { box-shadow: inset 3px 0 0 #f59e0b, inset 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+.gw-link-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: gw-draw 400ms var(--motion-ease) forwards;
+}
+.gw-card-lifting {
+  transform: scale(1.02);
+  box-shadow: 0 14px 30px rgba(20, 60, 40, 0.22);
+  opacity: 0.92;
+  z-index: 20;
+}
+.gw-row-in { animation: gw-row 240ms var(--motion-ease) both; }
+.gw-row-fail { box-shadow: inset 3px 0 0 #f59e0b; animation: gw-row 240ms var(--motion-ease) both, gw-fail 1.2s ease-out; }
+::view-transition-group(*) { animation-duration: 180ms; animation-timing-function: var(--motion-ease); }
+html.reduce-motion .gw-flow-dot { display: none; }
+html.reduce-motion .gw-link-draw,
+html.reduce-motion .gw-row-in,
+html.reduce-motion .gw-row-fail { animation: none; }
+html.reduce-motion .gw-card-lifting { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .gw-hub-running, .gw-group-enter, .gw-dialog-enter, .gw-link-draw, .gw-row-in, .gw-row-fail { animation: none; }
+  .gw-link, .gw-card, .gw-expand, .gw-card-closing { transition: none; }
+  .gw-flow-dot { display: none; }
+  .gw-card-lifting { transform: none; }
+}
 
 /* 主题只渐变静态背景，避免全树重绘或覆盖控件的 transform/opacity 过渡。 */
 .theme-transition :where(.bg-bg, .bg-surface, .bg-surface-2, .bg-surface-3):not(button):not(.motion-dialog):not(.motion-popover):not(.motion-indicator) {

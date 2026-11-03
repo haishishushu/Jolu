@@ -588,11 +588,13 @@ mod tests {
         let entry = PoolEntry {
             connection_id: "c-codex".into(),
             slug: "codex".into(),
+            name: "Codex 订阅".into(),
             platform: "codex".into(),
             kind: "auth".into(),
             protocol: "openai".into(),
             base_url: None,
             secret: None,
+            account_fp: None,
             model: None,
             status: "connected".into(),
         };
@@ -630,11 +632,13 @@ mod tests {
             let entry = PoolEntry {
                 connection_id: "c-codex".into(),
                 slug: "codex".into(),
+                name: "Codex 订阅".into(),
                 platform: "codex".into(),
                 kind: "auth".into(),
                 protocol: "openai".into(),
                 base_url: None,
                 secret: None,
+                account_fp: None,
                 model: None,
                 status: "connected".into(),
             };
@@ -645,7 +649,7 @@ mod tests {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
             if code == 429 {
                 let cooldowns = deps.cooldowns.as_ref().unwrap().lock().unwrap();
-                assert!(cooldowns.remaining_ms("c-codex", now) > 0, "429 后必须进入冷却");
+                assert!(cooldowns.remaining_ms(&entry.cred_key(), now) > 0, "429 后必须按账号进入冷却");
             } else {
                 let status: String = deps.db.lock().unwrap()
                     .query_row("SELECT status FROM connections WHERE id='c-codex'", [], |r| r.get(0)).unwrap();

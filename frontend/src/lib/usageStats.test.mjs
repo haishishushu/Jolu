@@ -96,3 +96,89 @@ test("时区名", () => {
   assert.equal(zoneName("Asia/Shanghai"), "上海")
   assert.equal(zoneName("Europe/Paris"), "Europe/Paris")
 })
+
+test("快捷日期范围覆盖今天、近 N 天、本月与上月", async () => {
+  const { RANGE_PRESETS } = await import("./usageStats.ts")
+  const now = new Date(2026, 10, 2, 15, 30) // 2026-11-02
+  const get = (key) => RANGE_PRESETS.find((p) => p.key === key).range(now)
+
+  assert.deepEqual(get("today"), { start: "2026-11-02", end: "2026-11-02" })
+  assert.deepEqual(get("yesterday-today"), { start: "2026-11-01", end: "2026-11-02" })
+  assert.deepEqual(get("last-3"), { start: "2026-10-31", end: "2026-11-02" })
+  assert.deepEqual(get("last-7"), { start: "2026-10-27", end: "2026-11-02" })
+  assert.deepEqual(get("this-month"), { start: "2026-11-01", end: "2026-11-02" })
+  assert.deepEqual(get("last-month"), { start: "2026-10-01", end: "2026-10-31" })
+  assert.deepEqual(get("last-month-to-today"), { start: "2026-10-01", end: "2026-11-02" })
+})
+
+test("快捷范围的起止都不晚于今天且开始不晚于结束", async () => {
+  const { RANGE_PRESETS } = await import("./usageStats.ts")
+  const now = new Date(2026, 0, 15, 9, 0) // 跨年边界：2026-01-15
+  for (const preset of RANGE_PRESETS) {
+    const { start, end } = preset.range(now)
+    assert.ok(start <= end, `${preset.key} 开始不能晚于结束：${start} > ${end}`)
+    assert.ok(end <= "2026-01-15", `${preset.key} 不能选到未来：${end}`)
+  }
+  // 跨年时上月应为 2025-12
+  assert.deepEqual(RANGE_PRESETS.find((p) => p.key === "last-month").range(now), {
+    start: "2025-12-01",
+    end: "2025-12-31",
+  })
+})
+
+test("未计价说明区分「全部已计价」与三种未计价原因", async () => {
+  const { unpricedNote } = await import("./usageStats.ts")
+
+  // 全部已计价
+  assert.equal(
+    unpricedNote({ requests: 100, priced_requests: 100 }),
+    "100 次全部已计价 · 不含月费",
+  )
+
+  // 模型未收录
+  const noPrice = unpricedNote({
+    requests: 396, priced_requests: 0,
+    unpriced_no_price: ["zcode:deepseek-v4.1-flash-1017"],
+  })
+  assert.match(noPrice, /已计价 0 \/ 396 次/)
+  assert.match(noPrice, /deepseek-v4\.1-flash-1017/)
+  assert.match(noPrice, /未收录价目/)
+
+  // 多个模型：卡片只有一行，报个数；完整清单交给悬停提示（unpricedModels）
+  const many = unpricedNote({
+    requests: 100, priced_requests: 10,
+    unpriced_no_price: ["zcode:a", "claude:b", "codex:c"],
+  })
+  assert.match(many, /3 个模型未收录价目/)
+
+  const { unpricedModels } = await import("./usageStats.ts")
+  assert.deepEqual(
+    unpricedModels({ unpriced_no_price: ["zcode:a", "claude:b", "codex:c"] }),
+    ["a", "b", "c"],
+    "悬停提示要拿到去掉 platform 前缀的完整清单",
+  )
+  assert.deepEqual(
+    unpricedModels({ unpriced_no_price: ["zcode:<synthetic>", "zcode:real"] }),
+    ["real"],
+    "<synthetic> 不该出现在未收录清单",
+  )
+
+  // 失败占位 <synthetic> 不算「未收录模型」
+  const synthetic = unpricedNote({
+    requests: 10, priced_requests: 7,
+    unpriced_no_price: ["zcode:<synthetic>"],
+  })
+  assert.doesNotMatch(synthetic, /未收录价目/, "<synthetic> 不该出现在未收录列表")
+
+  // 无用量数据
+  const noUsage = unpricedNote({ requests: 50, priced_requests: 40, unpriced_no_usage: 10 })
+  assert.match(noUsage, /10 次无用量/)
+
+  // 两种原因并存
+  const both = unpricedNote({
+    requests: 100, priced_requests: 50,
+    unpriced_no_price: ["zcode:x"], unpriced_no_usage: 5,
+  })
+  assert.match(both, /未收录价目/)
+  assert.match(both, /5 次无用量/)
+})

@@ -14,6 +14,8 @@ import type { NetworkMode } from "@/lib/networkSettings"
 const DEFAULTS: AppSettings = {
   silent_startup: true,
   auto_check_updates: true,
+  update_interval_minutes: 30,
+  cost_currency: "USD",
   island_platform: "claude",
   island_kind: "api",
   island_connection_id: null,
@@ -151,6 +153,8 @@ export function useSettings() {
   const setTopmost = useCallback((on: boolean) => save("always_on_top", () => api.islandTopmost(on)), [save])
   const setIslandVisible = useCallback((visible: boolean) => save("island_visible", () => api.setIslandVisibility(visible)), [save])
   const setAutoCheckUpdates = useCallback((on: boolean) => save("auto_check_updates", () => api.setAutoCheckUpdates(on)), [save])
+  const setUpdateInterval = useCallback((minutes: number) => save("update_interval", () => api.setUpdateInterval(minutes)), [save])
+  const setCostCurrency = useCallback((currency: "USD" | "CNY") => save("cost_currency", () => api.setCostCurrency(currency)), [save])
   const setSilentStartup = useCallback((on: boolean) => save("silent_startup", () => api.setSilentStartup(on)), [save])
   const setProxy = useCallback(
     (port: number, enabled: boolean, fallbackDirect: boolean) => save("proxy", () => api.setProxy(port, enabled, fallbackDirect)),
@@ -179,6 +183,6 @@ export function useSettings() {
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setAutoCheckUpdates, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
+  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setAutoCheckUpdates, setUpdateInterval, setCostCurrency, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
 }
 

@@ -129,8 +129,10 @@ pub(crate) fn register_accounts(conn:&Connection,platform:&str,_name:Option<&str
         for account in accounts {
             let official = account.account.as_deref().map(str::trim).filter(|value| !value.is_empty() && value.len() <= 320 && !value.chars().any(char::is_control));
             let display=crate::connections::validate_name(&official.unwrap_or(account.name).chars().take(80).collect::<String>())?;
-            let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,account_email) VALUES(?1,?2,'auth',?3,'本机来源','','connected',?4,?5)",
-                params![format!("monitor:{}",account.source_id),platform,display,chrono::Utc::now().timestamp_millis(),official]).map_err(|_|"保存本机账号失败")?;
+            let id=format!("monitor:{}",account.source_id);
+            let slug=crate::gateway::identity::allocate_slug(conn,&id,platform,&display,None).map_err(|_|"分配本机账号标识失败")?;
+            let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,account_email,slug) VALUES(?1,?2,'auth',?3,'本机来源','','connected',?4,?5,?6)",
+                params![id,platform,display,chrono::Utc::now().timestamp_millis(),official,slug]).map_err(|_|"保存本机账号失败")?;
             added+=changed;
             existing+=usize::from(changed==0);
         }
@@ -142,7 +144,9 @@ pub fn register(conn:&Connection,platform:&str,_name:Option<&str>) -> Result<(us
     if platform=="opencode" {
         if !crate::opencode::openai_logged_in(){return Err("请先在 OpenCode 中登录 OpenAI".into())}
         let name=crate::connections::validate_name("OpenCode · OpenAI")?;
-        let n=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,service) VALUES('monitor:native:opencode:openai','opencode','auth',?1,'OpenAI 订阅','','connected',?2,'openai')",params![name,chrono::Utc::now().timestamp_millis()]).map_err(|e|e.to_string())?;
+        let id="monitor:native:opencode:openai";
+        let slug=crate::gateway::identity::allocate_slug(conn,id,"opencode",&name,None).map_err(|e|e.to_string())?;
+        let n=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,masked,status,created_ms,service,slug) VALUES(?1,'opencode','auth',?2,'OpenAI 订阅','','connected',?3,'openai',?4)",params![id,name,chrono::Utc::now().timestamp_millis(),slug]).map_err(|e|e.to_string())?;
         return Ok((n,usize::from(n==0),vec!["只读关联本机登录；不复制或刷新 OAuth 凭证".into()]));
     }
     if !crate::platforms::native(platform) {
@@ -174,9 +178,11 @@ fn register_sources(
             continue;
         }
         let id = format!("monitor:{}", s.id);
-        let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,secret,masked,status,created_ms)
-            VALUES(?1,?2,'auth',?3,'本机来源',NULL,'','paused',?4)",
-            params![id,s.platform,name.map(str::trim).unwrap_or(&s.name),chrono::Utc::now().timestamp_millis()]).map_err(|e|e.to_string())?;
+        let display = name.map(str::trim).unwrap_or(&s.name);
+        let slug = crate::gateway::identity::allocate_slug(conn, &id, &s.platform, display, None).map_err(|e| e.to_string())?;
+        let changed=conn.execute("INSERT OR IGNORE INTO connections(id,platform,kind,name,label,secret,masked,status,created_ms,slug)
+            VALUES(?1,?2,'auth',?3,'本机来源',NULL,'','paused',?4,?5)",
+            params![id,s.platform,display,chrono::Utc::now().timestamp_millis(),slug]).map_err(|e|e.to_string())?;
         if changed > 0 {
             added += 1;
         } else {
@@ -600,13 +606,21 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
     }
     // 读取第三方库不占本应用写锁。
     let input = readonly(&source.path)?;
+    // 旧版 ZCode 的 session 表可能没有 directory 列：探测后决定是否取它，
+    // 缺列时用 NULL 占位，保持列序不变（同一次查询内不能混用两种投影）。
+    let has_directory: bool = input
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('session') WHERE name = 'directory'")
+        .and_then(|mut s| s.query_row([], |r| r.get::<_, i64>(0)))
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    let directory_expr = if has_directory { "s.directory" } else { "NULL" };
     let mut stmt = input
-        .prepare(
+        .prepare(&format!(
             "SELECT u.id,u.session_id,u.model_id,u.status,u.started_at,u.completed_at,
         u.input_tokens,u.output_tokens,u.cache_read_input_tokens,u.cache_creation_input_tokens,
-        u.provider_total_tokens,u.computed_total_tokens,u.reasoning_tokens,u.raw_usage_json,s.title
+        u.provider_total_tokens,u.computed_total_tokens,u.reasoning_tokens,u.raw_usage_json,s.title,{directory_expr}
         FROM model_usage u LEFT JOIN session s ON s.id=u.session_id",
-        )
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -676,6 +690,7 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
                 },
                 status,
                 row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -684,12 +699,14 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
     drop(stmt);
     drop(input);
     // 同一会话只需按最新一条写活动状态与标题（活动更新本身按时间只进不退）。
-    let mut sessions: HashMap<String, (&'static str, i64, Option<String>)> = HashMap::new();
+    // 第四个元素是会话的项目目录（ZCode 的 session.directory）；
+    // 库型来源没有源文件可读 cwd，只能在这一步带出去落库，否则全归「未识别项目」。
+    let mut sessions: HashMap<String, (&'static str, i64, Option<String>, Option<String>)> = HashMap::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    for (r, status, title) in &rows {
+    for (r, status, title, directory) in &rows {
         let Some(id) = &r.request.session_id else { continue };
         let state = zcode_session_state(status, r.request.ts, now_ms);
-        let entry = sessions.entry(id.clone()).or_insert((state, r.request.ts, None));
+        let entry = sessions.entry(id.clone()).or_insert((state, r.request.ts, None, None));
         if r.request.ts >= entry.1 {
             entry.0 = state;
             entry.1 = r.request.ts;
@@ -697,21 +714,27 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
         if entry.2.is_none() {
             entry.2 = title.clone();
         }
+        if entry.3.is_none() {
+            entry.3 = directory.clone().filter(|d| !d.trim().is_empty());
+        }
     }
     db.write(|conn| -> Result<usize, String> {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let records: Vec<Record> = rows.iter().map(|(r, _, _)| r.clone()).collect();
+        let records: Vec<Record> = rows.iter().map(|(r, _, _, _)| r.clone()).collect();
         let changed = source_store::write(&tx, &records).map_err(|e| e.to_string())?;
         let mut outcome = tx.prepare_cached("UPDATE requests SET native_outcome=?1 WHERE source=?2 AND dedup_key=?3 AND native_outcome IS NOT ?1")
             .map_err(|e| e.to_string())?;
-        for (r, status, _) in &rows {
+        for (r, status, _, _) in &rows {
             outcome.execute(params![match status.as_str() {"completed"=>"success","error"|"cancelled"=>"failed",_=>"unknown"},source.id,r.request.dedup_key])
                 .map_err(|e| e.to_string())?;
         }
         drop(outcome);
-        for (id, (state, ts, title)) in &sessions {
+        for (id, (state, ts, title, cwd)) in &sessions {
             if let Some(title) = title {
                 crate::db::upsert_session_title(&tx, "zcode", id, title).map_err(|e| e.to_string())?;
+            }
+            if let Some(cwd) = cwd {
+                crate::db::set_session_cwd(&tx, "zcode", id, cwd).map_err(|e| e.to_string())?;
             }
             crate::db::set_session_activity(&tx, "zcode", id, state, *ts).map_err(|e| e.to_string())?;
         }
@@ -831,6 +854,59 @@ pub fn watch_roots() -> Vec<PathBuf> {
         .filter(|source| collects_sessions(source))
         .map(|source| watch_root(&source))
         .collect()
+}
+
+/// 回填历史会话的项目目录：旧版本采集没有写 `sessions.cwd`，增量扫描也不会重扫
+/// 未变化的库文件，所以启动时补一次。只填 cwd 仍为空的会话，不覆盖已有值。
+pub fn backfill_zcode_cwd(db: &mut impl Store, home: &Path) -> usize {
+    let path = home.join(".zcode/cli/db/db.sqlite");
+    if !path.exists() {
+        return 0;
+    }
+    let Ok(input) = readonly(&path) else { return 0 };
+    let has_directory: bool = input
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('session') WHERE name = 'directory'")
+        .and_then(|mut s| s.query_row([], |r| r.get::<_, i64>(0)))
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    if !has_directory {
+        return 0;
+    }
+    let Ok(mut stmt) = input.prepare(
+        "SELECT id, directory FROM session WHERE directory IS NOT NULL AND TRIM(directory) <> ''",
+    ) else {
+        return 0;
+    };
+    let rows: Vec<(String, String)> = match stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => return 0,
+    };
+    drop(stmt);
+    drop(input);
+    db.write(|conn| -> Result<usize, String> {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut updated = 0;
+        for (session_id, directory) in &rows {
+            let key = format!("native:zcode:main:{session_id}");
+            // 只补空值：已有真实路径的会话不覆盖
+            updated += tx
+                .execute(
+                    "UPDATE sessions SET cwd = ?2 WHERE platform = 'zcode' AND session_id = ?1 AND (cwd IS NULL OR cwd = '')",
+                    params![key, directory],
+                )
+                .unwrap_or(0);
+            let key_ai = format!("native:zcode:ai:{session_id}");
+            updated += tx
+                .execute(
+                    "UPDATE sessions SET cwd = ?2 WHERE platform = 'zcode' AND session_id = ?1 AND (cwd IS NULL OR cwd = '')",
+                    params![key_ai, directory],
+                )
+                .unwrap_or(0);
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
+    })
+    .unwrap_or(0)
 }
 
 pub fn scan_at(db: &mut impl Store, home: &Path, app: &Path) -> ScanResult {
@@ -1259,5 +1335,48 @@ mod tests {
         assert!(validate_source(account).is_err(), "发现文件不等于登录有效");
         assert!(std::fs::read_to_string(&account.path).unwrap().contains("invalid credentials"));
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    /// ZCode 的 session.directory 必须落库成会话 cwd，否则全部归入「未识别项目」。
+    #[test]
+    fn zcode_directory_becomes_session_cwd() {
+        let root = fixture_dir("zcode-cwd");
+        let folder = root.join(".zcode/cli/db");
+        std::fs::create_dir_all(&folder).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let input = Connection::open(folder.join("db.sqlite")).unwrap();
+            input.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+                CREATE TABLE model_usage(id TEXT PRIMARY KEY, session_id TEXT, model_id TEXT,
+                  status TEXT, started_at INTEGER, completed_at INTEGER, input_tokens INTEGER,
+                  output_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+                  provider_total_tokens INTEGER, computed_total_tokens INTEGER, reasoning_tokens INTEGER,
+                  raw_usage_json TEXT);").unwrap();
+            input.execute(
+                "INSERT INTO session(id,title,directory) VALUES('s1','修复入口','D:/develop/Jolu')",
+                [],
+            ).unwrap();
+            input.execute(
+                "INSERT INTO model_usage(id,session_id,model_id,status,started_at,completed_at,input_tokens,output_tokens)
+                 VALUES('u1','s1','glm-4.6','completed',?1,?1,10,5)",
+                [now - 1000],
+            ).unwrap();
+        }
+        let mut store = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        let source = Source {
+            id: "native:zcode:main".into(),
+            platform: "zcode".into(),
+            name: "ZCode".into(),
+            available: true,
+            capabilities: vec![],
+            reason: None,
+            path: folder.join("db.sqlite"),
+        };
+        zcode(&mut store, &source).unwrap();
+        let cwd: Option<String> = store
+            .query_row("SELECT cwd FROM sessions WHERE platform='zcode' AND session_id='native:zcode:main:s1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cwd.as_deref(), Some("D:/develop/Jolu"), "ZCode 的 directory 必须落库成会话 cwd");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

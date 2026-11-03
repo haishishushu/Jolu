@@ -2,7 +2,8 @@ import { useState } from "react"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parsePageInput } from "@/lib/paginationState"
-import { DASH, callStatus, effortLabel, formatSeconds, formatTokens, formatUsd, modelDisplayName, outputTps, pageWindow } from "@/lib/usageStats"
+import { DASH, callStatus, effortLabel, formatMoney, formatSeconds, formatTokens, modelDisplayName, outputTps, pageWindow } from "@/lib/usageStats"
+import { convertFromUsd, type FxState } from "@/lib/costCurrency"
 import type { StatsCallPageDto, StatsCallRowDto } from "@/lib/api"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import type { PlatformId } from "@/types"
@@ -27,9 +28,10 @@ function monthDay(ts: number): string {
 }
 
 /** 调用明细表格与选中调用的详情（画板 34）。「—」表示未取得或未计价，失败请求不默认免费 */
-export function CallsPanel({ data, selectedId, onSelect, onPage, onOpenSession }: {
+export function CallsPanel({ data, selectedId, fx, onSelect, onPage, onOpenSession }: {
   data: StatsCallPageDto
   selectedId: number | null
+  fx: FxState
   onSelect: (id: number) => void
   onPage: (page: number) => void
   onOpenSession: (target: { platform: string; sessionId: string }) => void
@@ -40,16 +42,21 @@ export function CallsPanel({ data, selectedId, onSelect, onPage, onOpenSession }
       <Card className="flex flex-col overflow-hidden">
         <div className="flex h-[42px] items-center justify-between px-4">
           <span className="text-[13px] font-semibold text-jolu-text">{data.total_count} 条调用记录</span>
-          <span className="text-[11px] text-jolu-muted">总成本为估算 · USD · {data.unpriced_count} 条未计价</span>
+          <span className="text-[11px] text-jolu-muted">总成本为估算 · {fx.currency} · {data.unpriced_count} 条未计价</span>
         </div>
-        <div className="flex h-9 items-center gap-1.5 border-y border-jolu-border bg-jolu-side px-4">
-          {COLUMNS.map(([label, width]) => <span key={label} className={cn("shrink-0 text-[11px] font-medium text-jolu-muted", width)}>{label}</span>)}
+        {/* 列宽固定且总宽超过容器时横向滚动：内容不再被右侧裁掉 */}
+        <div className="overflow-x-auto">
+          <div className="min-w-[1000px]">
+            <div className="flex h-9 items-center gap-1.5 border-y border-jolu-border bg-jolu-side px-4">
+              {COLUMNS.map(([label, width]) => <span key={label} className={cn("shrink-0 text-[11px] font-medium text-jolu-muted", width)}>{label}</span>)}
+            </div>
+            {data.rows.map((row) => <CallRow key={row.id} row={row} active={row.id === selectedId} fx={fx} onSelect={() => onSelect(row.id)} />)}
+            {!data.rows.length && <div className="px-4 py-8 text-center text-xs text-jolu-muted">没有符合筛选条件的调用</div>}
+          </div>
         </div>
-        {data.rows.map((row) => <CallRow key={row.id} row={row} active={row.id === selectedId} onSelect={() => onSelect(row.id)} />)}
-        {!data.rows.length && <div className="px-4 py-8 text-center text-xs text-jolu-muted">没有符合筛选条件的调用</div>}
         <Pagination page={data.page} pageCount={data.page_count} pageSize={data.page_size} onPage={onPage} />
       </Card>
-      {selected && <CallDetail row={selected} onOpenSession={onOpenSession} />}
+      {selected && <CallDetail row={selected} fx={fx} onOpenSession={onOpenSession} />}
       <p className="text-[10px] text-jolu-muted">— 表示未取得或未计价，失败请求不默认免费。导出遵循当前筛选，不包含 API Key 或对话正文。</p>
     </>
   )
@@ -59,7 +66,7 @@ function Num({ value, className }: { value: number | null; className?: string })
   return <span className={cn("tnum text-[11px]", value === null ? "text-jolu-muted" : "text-jolu-text", className)}>{formatTokens(value)}</span>
 }
 
-function CallRow({ row, active, onSelect }: { row: StatsCallRowDto; active: boolean; onSelect: () => void }) {
+function CallRow({ row, active, fx, onSelect }: { row: StatsCallRowDto; active: boolean; fx: FxState; onSelect: () => void }) {
   const status = callStatus(row)
   const tps = outputTps(row)
   const metric = (label: string, value: string, known: boolean) => (
@@ -87,7 +94,7 @@ function CallRow({ row, active, onSelect }: { row: StatsCallRowDto; active: bool
       <Num value={sumKnown(row.cache_read, row.cache_write)} className="w-[72px] shrink-0" />
       <Num value={row.output} className="w-[72px] shrink-0" />
       <Num value={row.total} className="w-[80px] shrink-0 font-semibold" />
-      <span className={cn("tnum w-[84px] shrink-0 text-xs", row.cost === null ? "text-jolu-muted" : "font-semibold text-jolu-on")}>{formatUsd(row.cost)}</span>
+      <span className={cn("tnum w-[84px] shrink-0 text-xs", row.cost === null ? "text-jolu-muted" : "font-semibold text-jolu-on")}>{formatMoney(convertFromUsd(row.cost, fx), fx.currency)}</span>
       <span className="flex w-[124px] shrink-0 items-center gap-[7px]">
         <span className="h-11 w-[3px] rounded-sm bg-jolu-accent" />
         <span className="flex flex-col gap-px">
@@ -147,7 +154,7 @@ function Pagination({ page, pageCount, pageSize, onPage }: { page: number; pageC
   )
 }
 
-function CallDetail({ row, onOpenSession }: { row: StatsCallRowDto; onOpenSession: (target: { platform: string; sessionId: string }) => void }) {
+function CallDetail({ row, fx, onOpenSession }: { row: StatsCallRowDto; fx: FxState; onOpenSession: (target: { platform: string; sessionId: string }) => void }) {
   const items: [string, number | null][] = [
     ["普通输入", row.fresh_input], ["输出", row.output], ["缓存读取", row.cache_read], ["缓存写入", row.cache_write], ["合计", row.total],
   ]
@@ -165,9 +172,10 @@ function CallDetail({ row, onOpenSession }: { row: StatsCallRowDto; onOpenSessio
           </div>
         ))}
       </div>
+      <CostBreakdown row={row} fx={fx} />
       <div className="flex items-center gap-4">
         <span className="min-w-0 truncate text-[11px] text-jolu-muted">
-          来源：本机日志 · {row.cost === null ? "未计价" : `估算 ${formatUsd(row.cost)}（按内置价目表）`}
+          来源：本机日志 · {row.cost === null ? "未计价" : `估算 ${formatMoney(convertFromUsd(row.cost, fx), fx.currency)}`}
         </span>
         <span className="flex-1" />
         <button
@@ -182,4 +190,71 @@ function CallDetail({ row, onOpenSession }: { row: StatsCallRowDto; onOpenSessio
       </div>
     </Card>
   )
+}
+
+/**
+ * 单次调用费用拆解（价目与用量对齐展示）。
+ * 金额以 `row.cost` 为准；这里只解释"怎么算的"，前端不重算总额，
+ * 避免浮点/单位差异造成"明细加起来不等于总额"。
+ */
+function CostBreakdown({ row, fx }: { row: StatsCallRowDto; fx: FxState }) {
+  const p = row.price
+  if (!p || row.cost === null) {
+    return (
+      <div className="rounded-lg bg-jolu-side px-3 py-2 text-meta text-jolu-muted">
+        {row.model ? `「${row.model}」未收录价目，无法估算费用` : "该记录没有模型信息，无法估算费用"}
+      </div>
+    )
+  }
+  // 四项用量 × 生效单价；单价为每百万 token
+  const lines: { label: string; tokens: number | null; unit: number }[] = [
+    { label: "输入", tokens: row.fresh_input, unit: p.input },
+    { label: "输出", tokens: row.output, unit: p.output },
+    { label: "缓存读", tokens: row.cache_read, unit: p.cached_input },
+    { label: "缓存写", tokens: row.cache_write, unit: p.cache_write ?? 0 },
+  ].filter((line) => (line.tokens ?? 0) > 0 && line.unit > 0)
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg bg-jolu-side px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="text-meta font-medium text-jolu-text">费用拆解</span>
+        {p.long_context && <Tag tone="warn">长上下文加价</Tag>}
+        {p.off_peak && <Tag tone="on">谷时半价</Tag>}
+        <span className="flex-1" />
+        <span className="text-note text-jolu-muted">{shortSource(p.source)}</span>
+      </div>
+      {lines.map((line) => (
+        <div key={line.label} className="flex items-baseline gap-2 text-note">
+          <span className="w-12 shrink-0 text-jolu-muted">{line.label}</span>
+          <span className="tnum w-16 shrink-0 text-right text-jolu-text">{formatTokens(line.tokens)}</span>
+          <span className="text-jolu-muted">×</span>
+          <span className="tnum w-20 shrink-0 text-right text-jolu-text">${line.unit.toFixed(3)}/M</span>
+          <span className="text-jolu-muted">=</span>
+          <span className="tnum text-jolu-text">{formatMoney(convertFromUsd(((line.tokens ?? 0) * line.unit) / 1_000_000, fx), fx.currency)}</span>
+        </div>
+      ))}
+      <div className="flex items-baseline gap-2 border-t border-jolu-border pt-1.5 text-meta">
+        <span className="w-12 shrink-0 text-jolu-muted">合计</span>
+        <span className="flex-1" />
+        <span className="tnum font-semibold text-jolu-on">{formatMoney(convertFromUsd(row.cost, fx), fx.currency)}</span>
+      </div>
+    </div>
+  )
+}
+
+function Tag({ tone, children }: { tone: "warn" | "on"; children: React.ReactNode }) {
+  return (
+    <span className={cn(
+      "rounded px-1.5 py-0.5 text-note",
+      tone === "warn" ? "bg-jolu-status-error-bg text-jolu-danger" : "bg-jolu-selected text-jolu-on",
+    )}>
+      {children}
+    </span>
+  )
+}
+
+/** 价目来源只显示域名，完整 URL 放 title */
+function shortSource(url: string): string {
+  const match = url.match(/^https?:\/\/([^/]+)/)
+  return match ? match[1] : url
 }

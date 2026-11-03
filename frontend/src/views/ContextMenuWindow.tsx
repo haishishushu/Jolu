@@ -175,6 +175,9 @@ export function ContextMenuWindow() {
           {separator}
           {row("开启分身", command("clone_create"), { disabled: !canCreate })}
           {row("销毁分身", command("clone_destroy"), { disabled: !canDestroy })}
+          {separator}
+          {/* 灵动岛上的右键也应能隐藏本体：以前只有托盘菜单有这个入口 */}
+          {row("隐藏灵动岛", command("toggle_island"), { checked: settings.island_visible })}
           </>}
           {!islandMenu && <>
           {row("免打扰", command("dnd"), { checked: settings.dnd })}

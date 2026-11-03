@@ -23,6 +23,10 @@ pub(crate) fn build_upstream_headers(
     let mut out = HeaderMap::new();
     for (name, value) in caller_headers {
         let lower = name.as_str().to_ascii_lowercase();
+        // Jolu 自己的归属 / 会话头不外泄
+        if lower.starts_with("x-jolu-") {
+            continue;
+        }
         // 剥调用方凭证（jolu-<agent> 令牌）、host 与 hop-by-hop；上游不需要也不该看到
         if matches!(
             lower.as_str(),
@@ -280,11 +284,13 @@ mod tests {
         let entry = PoolEntry {
             connection_id: "c1".into(),
             slug: "kimi".into(),
+            name: "Kimi".into(),
             platform: "custom".into(),
             kind: "api".into(),
             protocol: "anthropic".into(),
             base_url: Some(format!("http://{addr}")),
             secret: Some("sk-upstream-key".into()),
+            account_fp: Some("fp-kimi".into()),
             model: None,
             status: "connected".into(),
         };

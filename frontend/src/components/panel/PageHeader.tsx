@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { useRef, type ReactNode } from "react"
 import { CircleFadingArrowUp, Github, LoaderCircle, Moon, PanelLeft, PictureInPicture2, Sun } from "lucide-react"
 import { isTauri, openUrl } from "@/lib/api"
 import { cn } from "@/lib/utils"
@@ -49,10 +49,15 @@ function HeaderActions() {
   const visible = cfg.settings.island_visible
   const desktopOnly = isTauri ? undefined : "（仅桌面端可用）"
 
+  // 连点保护：检查在途时忽略后续点击，避免同一结果反复播报（Toast 会合并成 ×5）。
+  const checkingRef = useRef(false)
   const onUpdate = () => {
+    if (checkingRef.current) return
+    checkingRef.current = true
     void update.checkNow()
       .then((available) => toast.success(available ? "发现新版本，正在后台下载" : "已是最新版本"))
       .catch((reason) => toast.danger("检查更新失败", String(reason)))
+      .finally(() => { checkingRef.current = false })
   }
 
   return (

@@ -108,6 +108,21 @@ fn where_clause(f: &StatsFilter, calls: bool) -> (String, Vec<Value>) {
 /// 失败请求：上游返回非 2xx，或原生来源明确标记失败。没有状态码的本机记录按成功处理（能写入用量即已返回）。
 const FAILED_SQL: &str = "(r.status_code IS NOT NULL AND (r.status_code < 200 OR r.status_code >= 300)) OR COALESCE(r.native_outcome, '') = 'failed'";
 
+/// 某次请求命中的单价快照（每百万 token，USD）。仅用于界面展示拆解，金额以 `cost` 为准。
+#[derive(Debug, Clone, Serialize)]
+pub struct PriceSnapshot {
+    pub input: f64,
+    pub cached_input: f64,
+    pub output: f64,
+    pub cache_write: Option<f64>,
+    /// 官方定价页，供界面标注来源
+    pub source: String,
+    /// 是否命中长上下文加价
+    pub long_context: bool,
+    /// 是否命中谷时折价
+    pub off_peak: bool,
+}
+
 /// 一条请求的统计视图；`None` 表示来源没提供
 #[derive(Debug, Clone)]
 struct Req {
@@ -124,6 +139,8 @@ struct Req {
     total: Option<i64>,
     hit_denominator: Option<i64>,
     cost: Option<f64>,
+    /// 该次请求命中的单价（每百万 token，USD），用于界面的费用拆解；无价目时为 None
+    price: Option<PriceSnapshot>,
     effort: Option<String>,
     duration_ms: Option<i64>,
     first_token_ms: Option<i64>,
@@ -177,13 +194,27 @@ fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec
         });
         let status_code: Option<i64> = r.get(20)?;
         let outcome: Option<String> = r.get(21)?;
+        let ts: i64 = r.get(4)?;
+        // 单价快照：只在能计价时取，时间用请求自身的时间戳（峰谷价依赖它）
+        let price = cost.and_then(|_| {
+            let at = chrono::DateTime::from_timestamp_millis(ts)?;
+            crate::pricing::applied_price(Some(&platform), model.as_deref()?, input.unwrap_or(0), at).map(|p| PriceSnapshot {
+                input: p.input,
+                cached_input: p.cached_input,
+                output: p.output,
+                cache_write: p.cache_write,
+                source: p.source.to_string(),
+                long_context: p.long_context,
+                off_peak: p.off_peak,
+            })
+        });
         Ok(Req {
             id: r.get(0)?,
             call_id: r.get(1)?,
             failed: status_code.is_some_and(|c| !(200..300).contains(&c)) || outcome.as_deref() == Some("failed"),
             platform,
             model,
-            ts: r.get(4)?,
+            ts,
             session_id: r.get(5)?,
             fresh_input,
             output,
@@ -192,6 +223,7 @@ fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec
             total: value(10, 15)?,
             hit_denominator,
             cost,
+            price,
             effort: r.get(17)?,
             duration_ms: r.get(18)?,
             first_token_ms: r.get(19)?,
@@ -201,7 +233,9 @@ fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec
     rows.collect()
 }
 
-/// 已知值求和：任一请求缺该项则整体未知；没有请求时为 `empty`
+/// 已知值求和：任一请求缺该项则整体未知；没有请求时为 `empty`。
+/// 这是刻意的保守口径——不把「部分来源的已知值」当成全量展示。
+/// 供界面参考的「已知值小计」由 [`known_subtotal`] 单独提供。
 fn sum_known<'a>(reqs: impl IntoIterator<Item = &'a Req>, pick: impl Fn(&Req) -> Option<i64>, empty: Option<i64>) -> Option<i64> {
     let mut any = false;
     let mut total = 0i64;
@@ -210,6 +244,23 @@ fn sum_known<'a>(reqs: impl IntoIterator<Item = &'a Req>, pick: impl Fn(&Req) ->
         total += pick(r)?;
     }
     if any { Some(total) } else { empty }
+}
+
+/// 已知值小计 + 未知条数：当 [`sum_known`] 返回 `None` 时，界面用它展示
+/// 「已知部分有多少、多少条来源未提供」，而不是只给一个破折号。
+fn known_subtotal<'a>(
+    reqs: impl IntoIterator<Item = &'a Req>,
+    pick: impl Fn(&Req) -> Option<i64>,
+) -> (i64, i64) {
+    let mut known = 0i64;
+    let mut unknown = 0i64;
+    for r in reqs {
+        match pick(r) {
+            Some(value) => known += value,
+            None => unknown += 1,
+        }
+    }
+    (known, unknown)
 }
 
 fn hit_rate<'a>(reqs: impl IntoIterator<Item = &'a Req> + Clone) -> Option<f64> {
@@ -225,15 +276,41 @@ pub struct TokenSplit {
     pub cache_read: Option<i64>,
     pub cache_write: Option<i64>,
     pub total: Option<i64>,
+    /// 分项为未知时，已知部分的合计与缺该字段的请求数。
+    /// 界面据此显示「已知小计 X（N 条来源未提供）」，而不是只给破折号。
+    pub fresh_input_known: Option<i64>,
+    pub fresh_input_unknown: i64,
+    pub output_known: Option<i64>,
+    pub output_unknown: i64,
+    pub cache_read_known: Option<i64>,
+    pub cache_read_unknown: i64,
+    pub cache_write_known: Option<i64>,
+    pub cache_write_unknown: i64,
 }
 
 fn split<'a>(reqs: impl IntoIterator<Item = &'a Req> + Clone, empty: Option<i64>) -> TokenSplit {
+    let coverage = |pick: &dyn Fn(&Req) -> Option<i64>| {
+        let (known, unknown) = known_subtotal(reqs.clone(), pick);
+        (if unknown > 0 { Some(known) } else { None }, unknown)
+    };
+    let (fresh_input_known, fresh_input_unknown) = coverage(&|r| r.fresh_input);
+    let (output_known, output_unknown) = coverage(&|r| r.output);
+    let (cache_read_known, cache_read_unknown) = coverage(&|r| r.cache_read);
+    let (cache_write_known, cache_write_unknown) = coverage(&|r| r.cache_write);
     TokenSplit {
         fresh_input: sum_known(reqs.clone(), |r| r.fresh_input, empty),
         output: sum_known(reqs.clone(), |r| r.output, empty),
         cache_read: sum_known(reqs.clone(), |r| r.cache_read, empty),
         cache_write: sum_known(reqs.clone(), |r| r.cache_write, empty),
         total: sum_known(reqs, |r| r.total, empty),
+        fresh_input_known,
+        fresh_input_unknown,
+        output_known,
+        output_unknown,
+        cache_read_known,
+        cache_read_unknown,
+        cache_write_known,
+        cache_write_unknown,
     }
 }
 
@@ -243,17 +320,39 @@ pub struct CostSummary {
     pub amount: f64,
     pub priced_requests: i64,
     pub requests: i64,
+    /// 未计价原因细分：让用户知道是「模型没收录」还是「上游没给用量」
+    pub unpriced_no_price: Vec<String>,
+    pub unpriced_no_usage: i64,
 }
 
 fn cost<'a>(reqs: impl IntoIterator<Item = &'a Req>) -> CostSummary {
-    let mut out = CostSummary { amount: 0.0, priced_requests: 0, requests: 0 };
+    let mut out = CostSummary {
+        amount: 0.0,
+        priced_requests: 0,
+        requests: 0,
+        unpriced_no_price: Vec::new(),
+        unpriced_no_usage: 0,
+    };
     for r in reqs {
         out.requests += 1;
         if let Some(c) = r.cost {
             out.amount += c;
             out.priced_requests += 1;
+            continue;
+        }
+        // 未计价归因：模型没有价目 vs 上游没返回用量 vs 有价目但字段不全
+        match (r.model.as_deref(), r.total) {
+            (Some(model), _) if !crate::pricing::has_price(Some(&r.platform), model) => {
+                let key = format!("{}:{}", r.platform, model);
+                if !out.unpriced_no_price.contains(&key) {
+                    out.unpriced_no_price.push(key);
+                }
+            }
+            (_, None) => out.unpriced_no_usage += 1,
+            _ => out.unpriced_no_usage += 1,
         }
     }
+    out.unpriced_no_price.sort();
     out
 }
 
@@ -586,6 +685,8 @@ pub fn activity(conn: &Connection, platform: Option<String>, connections: Vec<St
 
 #[derive(Debug, Serialize)]
 pub struct CallRow {
+    /// 本次请求的单价快照（用于费用拆解）；无价目时为 None
+    pub price: Option<PriceSnapshot>,
     pub id: i64,
     pub call_id: String,
     pub ts: i64,
@@ -608,6 +709,7 @@ pub struct CallRow {
 impl From<Req> for CallRow {
     fn from(r: Req) -> Self {
         Self {
+            price: r.price,
             id: r.id,
             call_id: r.call_id,
             ts: r.ts,

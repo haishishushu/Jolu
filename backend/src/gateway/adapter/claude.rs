@@ -410,11 +410,13 @@ mod tests {
         PoolEntry {
             connection_id: "c-claude".into(),
             slug: "claude".into(),
+            name: "Claude 订阅".into(),
             platform: "claude".into(),
             kind: "auth".into(),
             protocol: "anthropic".into(),
             base_url: None,
             secret: None,
+            account_fp: None,
             model: None,
             status: "connected".into(),
         }

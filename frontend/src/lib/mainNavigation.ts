@@ -12,7 +12,7 @@ export interface MainPageItem {
   label: string
 }
 
-/** 侧栏上部的八个模块（模块 J 账号汇聚网关排在 Skills 管理之后）；「设置」固定在侧栏底部，单独列出。 */
+/** 侧栏上部的八个模块（模块 J「模型入口」排在 Skills 管理之后）；「设置」固定在侧栏底部，单独列出。 */
 export const PRIMARY_PAGES: readonly MainPageItem[] = [
   { id: "island", label: "灵动岛" },
   { id: "providers", label: "供应商" },
@@ -21,7 +21,7 @@ export const PRIMARY_PAGES: readonly MainPageItem[] = [
   { id: "sessions", label: "会话线程" },
   { id: "automation", label: "自动化" },
   { id: "skills", label: "Skills 管理" },
-  { id: "gateway", label: "账号汇聚网关" },
+  { id: "gateway", label: "模型入口" },
 ]
 
 export const SETTINGS_PAGE: MainPageItem = { id: "settings", label: "设置" }

@@ -1,5 +1,6 @@
 import { ArrowDownLeft, ArrowUpRight, HardDriveDownload, HardDriveUpload } from "lucide-react"
-import { formatPercent, formatSeconds, formatTokens, formatUsd, modelDisplayName, share } from "@/lib/usageStats"
+import { formatMoney, formatPercent, formatSeconds, formatTokens, modelDisplayName, share } from "@/lib/usageStats"
+import { convertFromUsd, type FxState } from "@/lib/costCurrency"
 import type { StatsActivityDto, StatsModelRowDto, StatsOverviewDto } from "@/lib/api"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import type { PlatformId } from "@/types"
@@ -7,15 +8,28 @@ import { ActivityCalendar } from "./ActivityCalendar"
 import { Card, CardTitle, MetricCard, providerName } from "./usageControls"
 
 /** 用量分析（画板 32）：Token 四分项、全年活跃日历、模型消耗与费用、供应商费用 */
-export function AnalysisPanel({ data, activity, activityError, onDrillModel, onDrillProvider }: {
+export function AnalysisPanel({ data, activity, activityError, fx, onDrillModel, onDrillProvider }: {
   data: StatsOverviewDto
   activityError?: string | null
   activity: StatsActivityDto | null
+  fx: FxState
   onDrillModel: (model: StatsModelRowDto) => void
   onDrillProvider: (platform: string) => void
 }) {
   const t = data.tokens
   const part = (value: number | null, note: string) => `${formatPercent(share(value, t.total))} · ${note}`
+  // 分项为 null 时后端仍会给出「已知部分小计 + 未知条数」：
+  // 卡片显示已知小计并在说明里标注覆盖范围，而不是只给一个破折号。
+  const coverage = (
+    value: number | null,
+    known: number | null | undefined,
+    unknown: number | undefined,
+    note: string,
+  ) => {
+    if (value != null) return part(value, note)
+    if (known == null || known === 0) return "该范围内没有可汇总的已知值"
+    return `已知 ${formatTokens(known)} · ${unknown ?? 0} 条来源未提供`
+  }
   // 画板 32「按费用降序」：未计价的排在最后
   const models = [...data.models].sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1) || (b.tokens ?? 0) - (a.tokens ?? 0)).slice(0, 5)
   const priced = data.providers.filter((p) => p.cost.priced_requests > 0).sort((a, b) => b.cost.amount - a.cost.amount)
@@ -24,11 +38,16 @@ export function AnalysisPanel({ data, activity, activityError, onDrillModel, onD
   return (
     <>
       <div className="grid grid-cols-4 gap-3">
-        <MetricCard icon={<ArrowDownLeft />} label="未缓存输入" value={formatTokens(t.fresh_input)} note={part(t.fresh_input, "普通输入")} />
-        <MetricCard icon={<ArrowUpRight />} label="输出 Token" value={formatTokens(t.output)} note={part(t.output, "模型生成")} />
-        <MetricCard icon={<HardDriveDownload />} label="缓存读取" value={formatTokens(t.cache_read)} note={part(t.cache_read, "已复用输入")} />
-        <MetricCard icon={<HardDriveUpload />} label="缓存写入" value={formatTokens(t.cache_write)} note={part(t.cache_write, "新建缓存")} />
+        <MetricCard icon={<ArrowDownLeft />} label="未缓存输入" value={formatTokens(t.fresh_input ?? t.fresh_input_known ?? null)} note={coverage(t.fresh_input, t.fresh_input_known, t.fresh_input_unknown, "普通输入")} />
+        <MetricCard icon={<ArrowUpRight />} label="输出 Token" value={formatTokens(t.output ?? t.output_known ?? null)} note={coverage(t.output, t.output_known, t.output_unknown, "模型生成")} />
+        <MetricCard icon={<HardDriveDownload />} label="缓存读取" value={formatTokens(t.cache_read ?? t.cache_read_known ?? null)} note={coverage(t.cache_read, t.cache_read_known, t.cache_read_unknown, "已复用输入")} />
+        <MetricCard icon={<HardDriveUpload />} label="缓存写入" value={formatTokens(t.cache_write ?? t.cache_write_known ?? null)} note={coverage(t.cache_write, t.cache_write_known, t.cache_write_unknown, "新建缓存")} />
       </div>
+      {(t.total == null && data.requests > 0) && (
+        <p className="text-[11px] text-jolu-muted">
+          {`当前范围内 ${data.requests} 次调用中，部分来源（如 ZCode）未提供完整分项，卡片显示的是已知部分小计；模型消耗表按各来源已知值汇总。`}
+        </p>
+      )}
 
       <ActivityCalendar activity={activity} error={activityError} />
 
@@ -41,7 +60,7 @@ export function AnalysisPanel({ data, activity, activityError, onDrillModel, onD
             <span className="w-16 text-right">Token</span>
             <span className="w-14 text-right">缓存命中</span>
             <span className="w-14 text-right">平均响应</span>
-            <span className="w-20 text-right">估算费用 USD</span>
+            <span className="w-20 text-right">估算费用 {fx.currency}</span>
           </div>
           {models.map((m) => (
             <button
@@ -59,7 +78,7 @@ export function AnalysisPanel({ data, activity, activityError, onDrillModel, onD
               <span className="w-16 text-right">{formatTokens(m.tokens)}</span>
               <span className="w-14 text-right">{formatPercent(m.cache_hit_rate)}</span>
               <span className="w-14 text-right">{formatSeconds(m.avg_duration_ms, true)}</span>
-              <span className="w-20 text-right">{formatUsd(m.cost)}</span>
+              <span className="w-20 text-right">{formatMoney(convertFromUsd(m.cost, fx), fx.currency)}</span>
             </button>
           ))}
           {!models.length && <span className="py-2 text-xs text-jolu-muted">范围内没有模型记录</span>}
@@ -68,10 +87,10 @@ export function AnalysisPanel({ data, activity, activityError, onDrillModel, onD
         </Card>
 
         <Card className="flex flex-col gap-2.5 p-4">
-          <CardTitle title="供应商费用" note="估算 · USD" />
+          <CardTitle title="供应商费用" note={`估算 · ${fx.currency}`} />
           <div className="flex h-9 items-center justify-between rounded-lg bg-jolu-selected px-2.5">
             <span className="text-[11px] text-jolu-on">当前范围合计</span>
-            <span className="tnum text-xl font-semibold text-jolu-on">{formatUsd(data.cost.priced_requests ? total : null)}</span>
+            <span className="tnum text-xl font-semibold text-jolu-on">{formatMoney(convertFromUsd(data.cost.priced_requests ? total : null, fx), fx.currency)}</span>
           </div>
           <div className="flex flex-col gap-1">
             {priced.map((p) => {
@@ -86,7 +105,7 @@ export function AnalysisPanel({ data, activity, activityError, onDrillModel, onD
                   <span className="flex w-full items-center gap-2">
                     <span className="grid size-5 place-items-center rounded-[5px] bg-jolu-side"><PlatformLogo platform={p.platform as PlatformId} size={16} /></span>
                     <span className="min-w-0 flex-1 truncate text-xs text-jolu-text">{providerName(p.platform)}</span>
-                    <span className="tnum text-xs font-semibold text-jolu-text">{formatUsd(p.cost.amount)}</span>
+                    <span className="tnum text-xs font-semibold text-jolu-text">{formatMoney(convertFromUsd(p.cost.amount, fx), fx.currency)}</span>
                     <span className="tnum w-11 text-right text-[10px] text-jolu-muted">{formatPercent(ratio)}</span>
                   </span>
                   <span className="h-[3px] w-full rounded-sm bg-jolu-track">

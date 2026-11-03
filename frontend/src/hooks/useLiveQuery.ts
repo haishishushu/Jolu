@@ -35,7 +35,13 @@ export function useLiveQuery<T>(key: string, load: () => Promise<T>, demo: () =>
 
   useEffect(() => {
     if (!enabled) return
-    setResult((previous) => previous.key === key ? previous : { key, data: queryCache.get<T>(key) })
+    // key 变化（如翻页）：新 key 通常不在缓存里。这里保留上一次的数据作为占位，
+    // 避免列表整块消失再出现（用户观感是「整页刷新」）。数据到达后再替换。
+    setResult((previous) => {
+      if (previous.key === key) return previous
+      const cached = queryCache.get<T>(key)
+      return cached !== undefined ? { key, data: cached } : { key, data: previous.data }
+    })
     setError(null)
     const current = ++revision.current
     if (!isTauri) {

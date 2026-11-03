@@ -148,7 +148,7 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
                 SUM(r.cache_read_tokens), MIN(r.cache_read_known), SUM(r.cache_write_tokens), MIN(r.cache_write_known),
                 SUM(r.output_tokens), MIN(r.output_known),
                 MIN(r.connection_id), MAX(r.connection_id), SUM(r.connection_id IS NULL),
-                s.title, s.activity_state
+                s.title, s.activity_state, s.cwd
          FROM requests r LEFT JOIN sessions s ON s.platform = r.platform AND s.session_id = r.session_id
          WHERE r.session_id IS NOT NULL AND r.session_id <> ''",
     );
@@ -180,7 +180,9 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
                 output: known(11, 12)?,
                 connection_id: if nulls == 0 && min_conn == max_conn { min_conn } else { None },
                 title: r.get::<_, Option<String>>(16)?.filter(|t| !t.trim().is_empty()),
-                cwd: None,
+                // 库里的 cwd 优先（ZCode 这类库型来源没有源文件可读）；
+                // 源文件能读到时会覆盖它（Claude / Codex 的 cwd 更权威）
+                cwd: r.get::<_, Option<String>>(18)?.filter(|c| !c.trim().is_empty()),
                 status: String::new(),
                 has_source: false,
                 platform,
@@ -203,7 +205,9 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
         }
         let file = files.get(&(item.platform.clone(), item.session_id.clone()));
         item.has_source = file.is_some_and(|p| p.exists());
-        item.cwd = file.filter(|_| item.has_source).and_then(|p| read_cwd(p));
+        if let Some(from_file) = file.filter(|_| item.has_source).and_then(|p| read_cwd(p)) {
+            item.cwd = Some(from_file);
+        }
         if let Some(project) = &f.project {
             if item.cwd.as_deref().unwrap_or("") != project {
                 continue;

@@ -1,7 +1,8 @@
 import { useState } from "react"
 import { ChevronRight, CircleDollarSign, Layers, Repeat2, Target } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { bucketLabel, changeText, formatPercent, formatTokens, formatUsd, modelDisplayName, share } from "@/lib/usageStats"
+import { bucketLabel, changeText, formatMoney, formatPercent, formatTokens, modelDisplayName, share, unpricedModels, unpricedNote } from "@/lib/usageStats"
+import { convertFromUsd, type FxState } from "@/lib/costCurrency"
 import { projectName } from "@/lib/sessionThreads"
 import type { StatsModelRowDto, StatsOverviewDto, StatsTrendBucketDto } from "@/lib/api"
 import { Card, CardTitle, MetricCard, providerName } from "./usageControls"
@@ -13,8 +14,16 @@ const MODES: { value: TrendMode; label: string }[] = [
   { value: "cost", label: "费用" },
 ]
 
+/** 费用卡片悬停提示：卡片位置放不下完整模型名，这里逐行列出未收录的模型。 */
+function costNoteTitle(cost: StatsOverviewDto["cost"]): string | undefined {
+  const missing = unpricedModels(cost)
+  if (missing.length === 0) return undefined
+  return `未收录价目的模型（${missing.length}）：\n${missing.join("\n")}`
+}
+
 /** 概览（画板 30）：四项指标、趋势与模型分布、供应商用量与高消耗会话 */
-export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOpenSession }: {
+export function OverviewPanel({ data, isToday, fx, onDrillBucket, onDrillModel, onOpenSession }: {
+  fx: FxState
   data: StatsOverviewDto
   isToday: boolean
   onDrillBucket: (point: StatsTrendBucketDto) => void
@@ -45,9 +54,10 @@ export function OverviewPanel({ data, isToday, onDrillBucket, onDrillModel, onOp
         <MetricCard icon={<Repeat2 />} label="调用次数" value={String(data.requests)} note={`成功率 ${formatPercent(success)} · ${data.failed} 次失败`} />
         <MetricCard
           icon={<CircleDollarSign />}
-          label="估算费用 · USD"
-          value={formatUsd(data.cost.priced_requests ? data.cost.amount : null)}
-          note={`已计价 ${data.cost.priced_requests} / ${data.cost.requests} 次 · 不含月费`}
+          label={`估算费用 · ${fx.currency === "CNY" ? "CNY" : "USD"}`}
+          value={formatMoney(convertFromUsd(data.cost.priced_requests ? data.cost.amount : null, fx), fx.currency)}
+          note={unpricedNote(data.cost)}
+          noteTitle={costNoteTitle(data.cost)}
         />
         <MetricCard icon={<Target />} label="输入缓存命中率" value={formatPercent(cacheRate)} note={partialCache ? `${data.token_coverage.cache_requests} / ${data.requests} 次可计算 · 基于已知输入` : "缓存读取 / 全部输入 Token"} />
       </div>

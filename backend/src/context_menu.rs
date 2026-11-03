@@ -15,17 +15,10 @@ fn fit_position(x: f64, y: f64, width: f64, height: f64, area: (f64, f64, f64, f
     (x.clamp(left, (left + w - width).max(left)), y.clamp(top, (top + h - height).max(top)))
 }
 
-pub fn open(app: &tauri::AppHandle, island: bool, clone: Option<String>) -> Result<(), String> {
-    let cursor = app.cursor_position().map_err(|e| e.to_string())?;
-    *ANCHOR.lock().map_err(|e| e.to_string())? = Some((cursor.x, cursor.y));
-    let clone = if island { clone } else { None };
-    *TARGET.lock().map_err(|e| e.to_string())? = clone.clone();
-    if let Some(window) = app.get_webview_window(LABEL) {
-        window.emit("menu-reopen", MenuSource { island, clone }).map_err(|e| e.to_string())?;
-        // 前端切回根菜单并完成布局后再更新尺寸，避免先撑大再收缩。
-        return Ok(());
-    }
-    let query = clone.as_deref().map(|id| format!("&clone={id}")).unwrap_or_default();
+/// 构建右键菜单窗口（隐藏状态）。首次构建要拉起一个 WebView，耗时明显——
+/// 调用方应在应用启动后用 [`prewarm`] 提前建好，右键时才能立刻显示。
+fn build_window(app: &tauri::AppHandle, island: bool, clone: Option<&str>) -> Result<tauri::WebviewWindow, String> {
+    let query = clone.map(|id| format!("&clone={id}")).unwrap_or_default();
     let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(format!("index.html?window=menu&source={}{query}", if island { "island" } else { "tray" }).into()))
         .title("Jolu Menu").inner_size(292.0, 390.0)
         .decorations(false).transparent(true).shadow(false).resizable(false)
@@ -39,16 +32,46 @@ pub fn open(app: &tauri::AppHandle, island: bool, clone: Option<String>) -> Resu
         } else if matches!(event, tauri::WindowEvent::Focused(false))
             && focused_once.load(std::sync::atomic::Ordering::Relaxed)
         {
-            let _ = handle.close();
+            // 只隐藏不销毁：保留 WebView 供下次右键立即复用（销毁后重建要几百毫秒）
+            let _ = handle.hide();
         }
     });
+    Ok(window)
+}
+
+/// 预建右键菜单窗口：应用启动后调用，把首次右键的 WebView 构建耗时挪到空闲期。
+/// 窗口建好后保持隐藏；失败只记录，不影响右键本身的按需创建路径。
+pub fn prewarm(app: &tauri::AppHandle) {
+    if super::validation::isolated() {
+        return;
+    }
+    if app.get_webview_window(LABEL).is_some() {
+        return;
+    }
+    if let Err(error) = build_window(app, true, None) {
+        eprintln!("[菜单] 预建右键菜单窗口失败（不影响使用，右键时按需创建）：{error}");
+    }
+}
+
+pub fn open(app: &tauri::AppHandle, island: bool, clone: Option<String>) -> Result<(), String> {
+    let cursor = app.cursor_position().map_err(|e| e.to_string())?;
+    *ANCHOR.lock().map_err(|e| e.to_string())? = Some((cursor.x, cursor.y));
+    let clone = if island { clone } else { None };
+    *TARGET.lock().map_err(|e| e.to_string())? = clone.clone();
+    if let Some(window) = app.get_webview_window(LABEL) {
+        window.emit("menu-reopen", MenuSource { island, clone }).map_err(|e| e.to_string())?;
+        // 前端切回根菜单并完成布局后再更新尺寸，避免先撑大再收缩。
+        return Ok(());
+    }
+    let _window = build_window(app, island, clone.as_deref())?;
     // 前端应用布局后由 menu_show 显示，避免空白闪烁与提前失焦。
     Ok(())
 }
 
+/// 关闭菜单：只隐藏窗口，保留 WebView 供下次右键立即复用。
 #[tauri::command]
 pub fn menu_close(app: tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window(LABEL) { let _ = window.close(); }
+    if let Some(window) = app.get_webview_window(LABEL) { let _ = window.hide(); }
 }
 
 #[tauri::command]

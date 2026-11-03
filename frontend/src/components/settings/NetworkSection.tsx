@@ -245,6 +245,9 @@ function ProxyGroup({ cfg, setDirty }: { cfg: Cfg; setDirty: SetDirty }) {
   }
 
   const disabled = !cfg.ready || busy
+  // 端口被占用时后端会自动改用随机端口并落库；这里如实标出实际值，
+  // 否则用户看到的永远是自己填的数字，看不出已经被替换。
+  const portSwitched = s.proxy_enabled && !!status?.running && !!status.port && status.port !== s.proxy_port
   const runningNote = (() => {
     if (!s.proxy_enabled) return "当前关闭 · 本地 Token 统计正常采集"
     if (status?.fallback_reason) return `已自动回退直连：${status.fallback_reason}`
@@ -266,7 +269,14 @@ function ProxyGroup({ cfg, setDirty }: { cfg: Cfg; setDirty: SetDirty }) {
         <div className="flex items-center gap-5">
           <div className="flex min-w-0 flex-1 flex-col gap-1.5">
             <span className="text-[13px] font-medium text-jolu-text">监听端口</span>
-            <span className="text-[11px] text-jolu-muted">仅监听本机 127.0.0.1</span>
+            <span className="text-[11px] text-jolu-muted">
+              仅监听本机 127.0.0.1
+              {portSwitched && (
+                <span className="text-jolu-danger">
+                  {` · 端口 ${s.proxy_port} 被占用，实际使用 ${status.port}`}
+                </span>
+              )}
+            </span>
           </div>
           <input
             aria-label="监听端口"

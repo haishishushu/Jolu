@@ -17,11 +17,9 @@ pub struct ApplyNote {
     pub message: String,
 }
 
-/// 同一进程的所有窗口共享一个配置切换锁；仅在 blocking 线程里持有。
+/// 所有窗口、所有入口共用一把锁（进程内 + 跨进程）；仅在 blocking 线程里持有。
 pub(crate) fn serialized_switch<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock().map_err(|_| "CLI 配置切换锁不可用，请重启应用")?;
-    work()
+    crate::cli_switch::with_switch(work)
 }
 
 pub fn apply_to_cli(

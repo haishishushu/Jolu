@@ -36,6 +36,54 @@ export function todayRange(now: Date = new Date()): DateRange {
   return { start: key, end: key }
 }
 
+/** 日期范围的快捷预设（画板 36 扩展）；label 直接用于按钮文案。 */
+export interface RangePreset {
+  key: string
+  label: string
+  range: (now: Date) => DateRange
+}
+
+/**
+ * 快捷范围：覆盖「今天 / 昨天到今天 / 近 3 天 / 近 7 天 / 本月 / 上月 / 上月到今天」。
+ * 近 N 天都包含今天，与「今日已过部分也算一天」的直觉一致。
+ */
+export const RANGE_PRESETS: readonly RangePreset[] = [
+  { key: "today", label: "今天", range: (now) => ({ start: dateKey(now), end: dateKey(now) }) },
+  {
+    key: "yesterday-today",
+    label: "昨天–今天",
+    range: (now) => ({ start: addDays(dateKey(now), -1), end: dateKey(now) }),
+  },
+  {
+    key: "last-3",
+    label: "近 3 天",
+    range: (now) => ({ start: addDays(dateKey(now), -2), end: dateKey(now) }),
+  },
+  {
+    key: "last-7",
+    label: "近 7 天",
+    range: (now) => ({ start: addDays(dateKey(now), -6), end: dateKey(now) }),
+  },
+  {
+    key: "this-month",
+    label: "本月",
+    range: (now) => ({ start: dateKey(new Date(now.getFullYear(), now.getMonth(), 1)), end: dateKey(now) }),
+  },
+  {
+    key: "last-month",
+    label: "上月",
+    range: (now) => ({
+      start: dateKey(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+      end: dateKey(new Date(now.getFullYear(), now.getMonth(), 0)),
+    }),
+  },
+  {
+    key: "last-month-to-today",
+    label: "上月–今天",
+    range: (now) => ({ start: dateKey(new Date(now.getFullYear(), now.getMonth() - 1, 1)), end: dateKey(now) }),
+  },
+]
+
 /** 转成后端的 [start, end) 毫秒区间；结束日是今天时统计到当前时刻（画板 36 说明） */
 export function rangeToMillis(range: DateRange, now: Date = new Date()): { start: number; end: number } {
   const start = parseDateKey(range.start).getTime()
@@ -138,6 +186,36 @@ export function formatUsd(n: number | null | undefined): string {
   if (n === null || n === undefined) return DASH
   if (n === 0) return "$0.00"
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
+}
+
+/**
+ * 按显示币种格式化费用。USD 保持 $ 前缀；CNY 用 ¥ 前缀。
+ * 值应是已换算后的目标币种金额（换算发生在 convertFromUsd）。
+ */
+export function formatMoney(n: number | null | undefined, currency: "USD" | "CNY"): string {
+  const text = formatUsd(n)
+  if (currency === "USD") return text
+  if (n === null || n === undefined) return text
+  if (n === 0) return "¥0.00"
+  const symbol = "¥"
+  return n >= 1 ? `${symbol}${n.toFixed(2)}` : `${symbol}${n.toFixed(3)}`
+}
+
+/**
+ * 把 USD 金额换算到目标币种（纯函数，无依赖）。
+ * 费用基准始终是 USD，展示时按当日汇率换算；null 保持 null（未知不等于零）。
+ */
+export function convertFromUsd(
+  usd: number | null | undefined,
+  fx: { rate: number },
+): number | null {
+  if (usd === null || usd === undefined) return null
+  return usd * fx.rate
+}
+
+/** 币种标题后缀：估算费用 · USD / 估算费用 · CNY */
+export function currencyLabel(currency: "USD" | "CNY"): string {
+  return currency
 }
 
 export function formatPercent(rate: number | null | undefined, digits = 1): string {
@@ -271,4 +349,38 @@ export function activityLevel(tokens: number, sortedNonZero: number[]): 0 | 1 | 
 export function share(part: number | null, whole: number | null): number | null {
   if (part === null || whole === null || whole <= 0) return null
   return part / whole
+}
+
+/** 未收录价目的模型名（去掉 platform 前缀，剔除失败占位）。 */
+export function unpricedModels(cost: { unpriced_no_price?: string[] }): string[] {
+  return (cost.unpriced_no_price ?? [])
+    .map((key) => key.split(":").pop() ?? key)
+    // 失败占位（<synthetic>）不是真实模型，不列进「未收录」
+    .filter((name) => !name.startsWith("<"))
+}
+
+/**
+ * 未计价说明：把「为什么没算钱」讲清楚，而不是只给一个「0 / N」。
+ *
+ * 卡片上只有一行位置，所以模型名在这里只给个数；完整清单由 `unpricedModels`
+ * 交给悬停提示展示，避免长模型名把说明截成「未收录价目：d...」。
+ */
+export function unpricedNote(cost: {
+  requests: number
+  priced_requests: number
+  unpriced_no_price?: string[]
+  unpriced_no_usage?: number
+}): string {
+  const total = cost.requests
+  const priced = cost.priced_requests
+  if (priced === total) return `${priced} 次全部已计价 · 不含月费`
+
+  const missingModels = unpricedModels(cost)
+  const noUsage = cost.unpriced_no_usage ?? 0
+  const parts: string[] = [`已计价 ${priced} / ${total} 次`]
+  if (missingModels.length > 0) {
+    parts.push(missingModels.length === 1 ? `未收录价目：${missingModels[0]}` : `${missingModels.length} 个模型未收录价目`)
+  }
+  if (noUsage > 0) parts.push(`${noUsage} 次无用量`)
+  return `${parts.join(" · ")} · 不含月费`
 }

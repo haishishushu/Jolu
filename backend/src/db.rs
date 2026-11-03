@@ -40,6 +40,8 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // 分组成员、接线记录都靠外键级联：删连接 / 删分组不能留下悬空成员。
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     tune(&conn)?;
     init(&conn)?;
     // 长连接按官方建议在打开时做一次有上限的统计更新，让新索引立刻被规划器采用。
@@ -180,6 +182,69 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             parser_initialized INTEGER NOT NULL DEFAULT 0,
             parser_effort TEXT
         );
+
+        -- 模型入口（原账号汇聚网关）：身份、接线与分组。
+        -- 分组表只影响排序，路由与接线代码不得读取（见 docs/specs/2026-11-03-gateway-dedup-and-wiring.md）。
+        CREATE TABLE IF NOT EXISTS slug_history (
+            slug          TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL,
+            account_fp    TEXT,
+            retired_ms    INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY
+        );
+        INSERT OR IGNORE INTO agents(id) VALUES ('claude-code'),('codex'),('zcode'),('gemini'),('opencode');
+        CREATE TABLE IF NOT EXISTS agent_wiring (
+            agent_id      TEXT PRIMARY KEY REFERENCES agents(id),
+            instance_id   TEXT NOT NULL,
+            owner         TEXT NOT NULL DEFAULT 'none',
+            state         TEXT NOT NULL DEFAULT 'idle',
+            original_json TEXT,
+            applied_json  TEXT,
+            token         TEXT UNIQUE,
+            wired_ms      INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS source_groups (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            sort       INTEGER NOT NULL DEFAULT 0,
+            created_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS source_group_members (
+            connection_id TEXT PRIMARY KEY REFERENCES connections(id) ON DELETE CASCADE,
+            group_id      TEXT NOT NULL REFERENCES source_groups(id) ON DELETE CASCADE,
+            sort          INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS agent_groups (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            sort       INTEGER NOT NULL DEFAULT 0,
+            created_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agent_group_members (
+            agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+            group_id TEXT NOT NULL REFERENCES agent_groups(id) ON DELETE CASCADE,
+            sort     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS migration_log (
+            id     INTEGER PRIMARY KEY,
+            at_ms  INTEGER NOT NULL,
+            kind   TEXT NOT NULL,
+            detail TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS gateway_route_log (
+            id             INTEGER PRIMARY KEY,
+            ts             INTEGER NOT NULL,
+            agent          TEXT,
+            requested_model TEXT NOT NULL,
+            source         TEXT,
+            upstream_model TEXT,
+            status_code    INTEGER,
+            result         TEXT NOT NULL,
+            duration_ms    INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_gateway_route_log_ts ON gateway_route_log(ts DESC);
         "#,
     )?;
 
@@ -228,6 +293,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN service TEXT", []);
     // 可空展示元数据：保留旧连接，仅在凭证准确匹配时补齐。
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN account_email TEXT", []);
+    // 会话项目目录：Claude / Codex 从源文件读，ZCode 等库型来源只能落库保存。
+    // 旧库升级后为 NULL，仍按「未识别项目」展示，不伪造路径。
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT", []);
     // 账号汇聚网关：该连接是否进入模型池、接受其他工具的请求。
     // 默认 0，旧库升级后全部不对外服务，观测模式行为完全不变。
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN serve_enabled INTEGER NOT NULL DEFAULT 0", []);
@@ -257,6 +325,19 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     // 本地代理按凭证指纹把请求归到具体连接；未经代理的记录保持 NULL，统计默认仍按平台合并。
     let _ = conn.execute("ALTER TABLE requests ADD COLUMN connection_id TEXT", []);
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_requests_connection ON requests(connection_id, ts);")?;
+    // 模型入口：持久化 slug（菜单 id 前缀）与账号指纹（去重 / 冷却 / 服务唯一性）。
+    let _ = conn.execute("ALTER TABLE connections ADD COLUMN slug TEXT", []);
+    let _ = conn.execute("ALTER TABLE connections ADD COLUMN account_fp TEXT", []);
+    // 上次成功拉到的模型清单：来源暂停 / 失效或重启后，模型菜单里的 id 仍要保留。
+    let _ = conn.execute("ALTER TABLE connections ADD COLUMN models_json TEXT", []);
+    // 身份迁移：开发期直接暴露问题；发布期只记诊断，不阻止应用启动。
+    let migration = crate::gateway::identity::migrate(conn);
+    #[cfg(debug_assertions)]
+    migration?;
+    #[cfg(not(debug_assertions))]
+    if let Err(error) = migration {
+        eprintln!("[模型入口] 连接身份迁移失败，本次按降级状态启动：{error}");
+    }
     crate::daily_checkin::init(conn)?;
     Ok(())
 }
@@ -1018,6 +1099,21 @@ pub fn upsert_session_title(
          ON CONFLICT(platform, session_id) DO UPDATE SET title = ?3
          WHERE sessions.title IS NOT excluded.title",
     )?.execute(params![platform, session_id, title])?;
+    Ok(())
+}
+
+/// 记录会话的项目目录（cwd）。库型来源（ZCode）没有源文件可读，只能靠这里落库。
+/// 已存在非空值时不覆盖为空——真实路径丢失比保留旧值更糟。
+pub fn set_session_cwd(conn: &Connection, platform: &str, session_id: &str, cwd: &str) -> rusqlite::Result<()> {
+    let trimmed = cwd.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO sessions(platform, session_id, cwd) VALUES(?1, ?2, ?3)
+         ON CONFLICT(platform, session_id) DO UPDATE SET cwd = COALESCE(sessions.cwd, excluded.cwd)",
+    )?;
+    stmt.execute(rusqlite::params![platform, session_id, trimmed])?;
     Ok(())
 }
 

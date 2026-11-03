@@ -95,6 +95,8 @@ export interface ConnectionDto {
   protocol: "openai" | "anthropic" | null
   /** 账号汇聚网关：是否进入模型池对外服务（后端默认 false） */
   serve_enabled?: boolean
+  /** 模型入口的持久化菜单 id 前缀（`<slug>/<model>`）；改名不变 */
+  slug?: string | null
 }
 
 export interface FetchResult {
@@ -280,6 +282,10 @@ export interface MenuSourceEvent {
 export interface AppSettings {
   silent_startup: boolean
   auto_check_updates: boolean
+  /** 自动检查更新的间隔（分钟，5–1440） */
+  update_interval_minutes?: number
+  /** 费用估算的显示币种：USD（基准）或 CNY（按当日汇率换算展示） */
+  cost_currency?: "USD" | "CNY" | string
   island_platform: string
   island_kind: "auth" | "api"
   island_connection_id: string | null
@@ -445,6 +451,11 @@ export const api = {
   setAutostart: (on: boolean) => invoke<boolean>("set_autostart", { on }),
   /** 只查询是否有新版本，不下载（§更新：启动 1 秒后与设置页手动检查共用） */
   setAutoCheckUpdates: (on: boolean) => invoke<AppSettings>("set_auto_check_updates", { on }),
+  setUpdateInterval: (minutes: number) => invoke<AppSettings>("set_update_interval", { minutes }),
+  setCostCurrency: (currency: "USD" | "CNY") => invoke<AppSettings>("set_cost_currency", { currency }),
+  /** 费用汇率：USD 为基准币种（rate=1）；CNY 返回当日汇率，失败时 fallback=true 用参考价 */
+  fxRate: (currency: "USD" | "CNY") =>
+    invoke<{ currency: string; rate: number; as_of: string; fallback: boolean }>("fx_rate", { currency }),
   checkAppUpdate: () => invoke<UpdateCheckDto>("check_app_update_available"),
   /** 下载并验证签名，返回本次下载的版本 */
   downloadAppUpdate: () => invoke<UpdateCheckDto>("download_app_update"),
@@ -635,11 +646,24 @@ export interface TokenSplitDto {
   cache_read: number | null
   cache_write: number | null
   total: number | null
+  /** 分项为 null 时的已知部分小计；界面据此显示「已知 X（N 条未提供）」 */
+  fresh_input_known?: number | null
+  fresh_input_unknown?: number
+  output_known?: number | null
+  output_unknown?: number
+  cache_read_known?: number | null
+  cache_read_unknown?: number
+  cache_write_known?: number | null
+  cache_write_unknown?: number
 }
 
 export interface CostSummaryDto {
   amount: number
   priced_requests: number
+  /** 未计价的模型（platform:model 形式），说明这些模型没有收录价目 */
+  unpriced_no_price?: string[]
+  /** 未计价且没有可用 token 用量的请求数 */
+  unpriced_no_usage?: number
   requests: number
 }
 
@@ -702,7 +726,22 @@ export interface StatsActivityDto {
   month_active_days: number
 }
 
+/** 某次请求命中的单价快照（每百万 token，USD），仅用于界面展示费用拆解 */
+export interface PriceSnapshotDto {
+  input: number
+  cached_input: number
+  output: number
+  cache_write: number | null
+  source: string
+  /** 是否命中长上下文加价 */
+  long_context: boolean
+  /** 是否命中谷时折价 */
+  off_peak: boolean
+}
+
 export interface StatsCallRowDto {
+  /** 无价目时为 null */
+  price: PriceSnapshotDto | null
   id: number
   call_id: string
   ts: number

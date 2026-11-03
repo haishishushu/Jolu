@@ -128,6 +128,18 @@ pub fn set_auto_check_updates(app: AppHandle, on: bool) -> Result<crate::setting
     Ok(next)
 }
 
+/// 自动检查更新的间隔（分钟）。允许 5–1440；越界直接拒绝而不是悄悄夹紧，
+/// 免得用户填了 1 分钟却按 5 分钟跑还以为是 bug。
+#[tauri::command]
+pub fn set_update_interval(app: AppHandle, minutes: u32) -> Result<crate::settings::Settings, String> {
+    if !(5..=1440).contains(&minutes) {
+        return Err("检查间隔需在 5 到 1440 分钟之间".into());
+    }
+    let next = app.state::<crate::Cfg>().0.try_update(|settings| settings.update_interval_minutes = minutes)?;
+    let _ = app.emit("settings-changed", &next);
+    Ok(next)
+}
+
 /// 只查询是否有新版本，不下载。端点不可达或公钥校验失败时返回 Err，
 /// 由前端决定静默（启动检查失败不打扰）或提示（手动检查 toast）。
 #[tauri::command]

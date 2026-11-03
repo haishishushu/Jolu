@@ -754,6 +754,9 @@ pub struct ConnectionDto {
     /// 账号汇聚网关：是否进入模型池对外服务。旧连接默认 false，不改变观测行为。
     #[serde(default)]
     pub serve_enabled: bool,
+    /// 模型入口的持久化菜单 id 前缀（`<slug>/<model>`）；改名不变。
+    #[serde(default)]
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -842,6 +845,7 @@ fn row_to_dto(r: &rusqlite::Row, now: i64) -> rusqlite::Result<ConnectionDto> {
         protocol: r.get("protocol")?,
         service: r.get("service")?,
         serve_enabled: r.get::<_, Option<i64>>("serve_enabled")?.unwrap_or(0) != 0,
+        slug: r.get("slug")?,
     })
 }
 
@@ -855,7 +859,7 @@ fn list_with_account_lookup(
 ) -> rusqlite::Result<Vec<ConnectionDto>> {
     let now = chrono::Local::now().timestamp_millis();
     let mut stmt = conn.prepare(
-        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, service, account_email, serve_enabled, secret
+        "SELECT id, platform, kind, name, label, masked, status, last_sync_ms, base_url, model, effort, context_1m, protocol, service, account_email, serve_enabled, secret, slug
          FROM connections ORDER BY created_ms ASC",
     )?;
     let rows = stmt
@@ -990,14 +994,17 @@ pub fn add(conn: &Sql, c: NewConnection) -> Result<String, String> {
     let label = if c.kind == "api" { "API Key" } else { "官方订阅" };
     let base = c.base_url;
     let account_email = if c.kind == "auth" { c.secret.as_deref().and_then(|s| crate::login_detect::account_for_secret(&c.platform, s)) } else { None };
+    let account_fp = crate::gateway::identity::account_fingerprint(&c.platform, &c.kind, c.secret.as_deref());
+    let slug = crate::gateway::identity::allocate_slug(conn, &id, &c.platform, &c.name, account_fp.as_deref())
+        .map_err(|error| format!("分配连接标识失败：{error}"))?;
 
     conn.execute_batch("SAVEPOINT jolu_add_connection").map_err(|e| e.to_string())?;
     let result = (|| -> Result<(), String> {
     conn.execute(
         "INSERT INTO connections
-           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol, service, account_email)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13, ?14, ?15)",
-        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol, c.service, account_email],
+           (id, platform, kind, name, label, secret, masked, base_url, model, effort, context_1m, status, last_sync_ms, created_ms, protocol, service, account_email, slug, account_fp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'connected', ?12, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![id, c.platform, c.kind, c.name, label, c.secret, masked, base, c.model, c.effort, c.context_1m, now, c.protocol, c.service, account_email, slug, account_fp],
     ).map_err(|e| e.to_string())?;
     if c.kind == "auth" {
         crate::auth_snapshot::capture(conn, &id, &c.platform, c.secret.as_deref().unwrap_or_default())?;
@@ -1236,7 +1243,26 @@ pub fn remove(conn: &Sql, id: &str) -> Result<(), String> {
             return Err("该连接仍被自动化任务使用，请先调整任务使用的账号或取消任务，再删除账号".into());
         }
     }
-    conn.execute("DELETE FROM connections WHERE id = ?1", params![id]).map_err(|error| error.to_string())?;
+    // slug 历史与删除在同一事务：旧模型 id 以后要能回答「现在叫什么 / 已删除」，
+    // 同一账号重建时也靠它恢复原来的 id。
+    let tx = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = tx
+        .query_row("SELECT slug, account_fp, secret FROM connections WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some((slug, account_fp, _)) = row {
+        if let Some(slug) = slug {
+            tx.execute(
+                "INSERT OR REPLACE INTO slug_history(slug, connection_id, account_fp, retired_ms) VALUES(?1, ?2, ?3, ?4)",
+                params![slug, id, account_fp, chrono::Local::now().timestamp_millis()],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    tx.execute("DELETE FROM connections WHERE id = ?1", params![id]).map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -1256,22 +1282,94 @@ pub fn set_paused(conn: &Sql, id: &str, paused: bool) -> Result<(), String> {
 /// Tauri 命令 `gateway_set_serve` 在第 11 步接线，先保留公共 API。
 #[allow(dead_code)]
 pub fn set_serve(conn: &Sql, id: &str, enabled: bool) -> Result<(), String> {
-    let row: Option<(String, String)> = conn
-        .query_row("SELECT platform, kind FROM connections WHERE id = ?1", [id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    let row: Option<(String, String, Option<String>, Option<String>)> = conn
+        .query_row("SELECT platform, kind, protocol, account_fp FROM connections WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
         .map(Some)
         .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e.to_string()) })
         .map_err(|e: String| e)?;
-    let Some((platform, kind)) = row else { return Err("连接不存在".into()); };
+    let Some((platform, kind, protocol, account_fp)) = row else { return Err("连接不存在".into()); };
     let capable = kind == "api" || matches!((platform.as_str(), kind.as_str()), ("claude", "auth") | ("codex", "auth"));
     if enabled && !capable {
         return Err(format!("{platform} 的订阅连接暂不支持对外服务"));
+    }
+    if enabled {
+        conflict_of_serving(conn, id, &platform, &kind, protocol.as_deref(), account_fp.as_deref())?;
     }
     conn.execute(
         "UPDATE connections SET serve_enabled = ?2 WHERE id = ?1",
         params![id, enabled as i64],
     ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 开启服务前的唯一性检查：同一账号同一协议、同平台订阅都只能有一条参与服务。
+/// 与数据库部分唯一索引同口径；这里先给出可读的名字，避免用户只看到一个约束错误。
+fn conflict_of_serving(
+    conn: &Sql,
+    id: &str,
+    platform: &str,
+    kind: &str,
+    protocol: Option<&str>,
+    account_fp: Option<&str>,
+) -> Result<(), String> {
+    if kind == "auth" {
+        let conflict: Option<String> = conn
+            .query_row(
+                "SELECT name FROM connections
+                 WHERE serve_enabled = 1 AND kind = 'auth' AND platform = ?1 AND id != ?2
+                 LIMIT 1",
+                params![platform, id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(name) = conflict {
+            return Err(format!("同平台只能有一个订阅参与服务：「{name}」已在服务中，请先关闭它"));
+        }
+        return Ok(());
+    }
+    let Some(fp) = account_fp else {
+        return Err("该连接没有可用的凭证指纹，无法参与服务".into());
+    };
+    let conflict: Option<String> = conn
+        .query_row(
+            "SELECT name FROM connections
+             WHERE serve_enabled = 1 AND kind = 'api' AND account_fp = ?1
+               AND IFNULL(protocol, '') = ?2 AND id != ?3
+             LIMIT 1",
+            params![fp, protocol.unwrap_or(""), id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(name) = conflict {
+        return Err(format!("该 Key 与「{name}」重复：同一账号同一协议只能有一个来源参与服务"));
+    }
+    Ok(())
+}
+
+/// 凭证更新后重算 account_fp。新指纹与正在服务的来源重复时，只关闭本连接的服务并记日志，
+/// 凭证照常保存（不删数据、不阻断用户改 Key）。
+pub(crate) fn refresh_account_fp(conn: &Sql, id: &str) -> rusqlite::Result<()> {
+    let row: Option<(String, String, Option<String>)> = conn
+        .query_row("SELECT platform, kind, secret FROM connections WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()?;
+    let Some((platform, kind, secret)) = row else { return Ok(()); };
+    let fp = crate::gateway::identity::account_fingerprint(&platform, &kind, secret.as_deref());
+    if let Err(error) = conn.execute("UPDATE connections SET account_fp = ?2 WHERE id = ?1", params![id, fp]) {
+        let unique = error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation);
+        if !unique { return Err(error); }
+        conn.execute("UPDATE connections SET serve_enabled = 0 WHERE id = ?1", [id])?;
+        conn.execute(
+            "INSERT INTO migration_log(at_ms, kind, detail) VALUES(?1, 'duplicate_serve', ?2)",
+            params![chrono::Local::now().timestamp_millis(), format!("{id}: 凭证更新后与已有来源重复，已关闭本连接的服务")],
+        )?;
+        conn.execute("UPDATE connections SET account_fp = ?2 WHERE id = ?1", params![id, fp])?;
+    }
     Ok(())
 }
 
@@ -1378,10 +1476,62 @@ pub fn replace_api_key(conn: &Sql, id: &str, secret: &str) -> Result<(), String>
         params![id, secret, mask(secret), chrono::Local::now().timestamp_millis()],
     ).map_err(|e| e.to_string())?;
     if changed == 0 { return Err("API Key 连接不存在".into()); }
+    refresh_account_fp(conn, id).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// 重命名连接：只改显示名称，凭证、脱敏标识与状态一概不动。
+/// 改菜单 id（slug）：保留字与字符集校验；旧 id 写进历史，404 时能说明现在叫什么。
+pub fn set_slug(conn: &Sql, id: &str, slug: &str) -> Result<String, String> {
+    let slug = slug.trim().to_ascii_lowercase();
+    if !crate::gateway::identity::valid_slug(&slug) {
+        return Err("菜单 id 只能使用小写字母、数字和连字符，不能以连字符开头，也不能是 route / auto / jolu / group / default".into());
+    }
+    let current: Option<(Option<String>, Option<String>)> = conn
+        .query_row("SELECT slug, account_fp FROM connections WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((old_slug, account_fp)) = current else {
+        return Err("连接不存在".into());
+    };
+    if old_slug.as_deref() == Some(slug.as_str()) {
+        return Ok(slug);
+    }
+    let taken: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM connections WHERE slug = ?1 AND id != ?2)",
+            params![slug, id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if taken {
+        return Err(format!("菜单 id「{slug}」已被其他来源使用"));
+    }
+    let historical: Option<String> = conn
+        .query_row("SELECT connection_id FROM slug_history WHERE slug = ?1", [&slug], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(owner) = historical {
+        if owner != id {
+            return Err(format!("菜单 id「{slug}」属于另一个已删除的来源，不能复用"));
+        }
+        conn.execute("DELETE FROM slug_history WHERE slug = ?1", [&slug]).map_err(|e| e.to_string())?;
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if let Some(old) = old_slug.filter(|old| !old.is_empty()) {
+        tx.execute(
+            "INSERT OR REPLACE INTO slug_history(slug, connection_id, account_fp, retired_ms) VALUES(?1, ?2, ?3, ?4)",
+            params![old, id, account_fp, chrono::Local::now().timestamp_millis()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.execute("UPDATE connections SET slug = ?2 WHERE id = ?1", params![id, slug]).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(slug)
+}
+
+/// 重命名连接：只改显示名称，slug、凭证、脱敏标识与状态一概不动。
 /// 纯元数据操作，断开的连接同样允许改名。
 pub fn rename_connection(conn: &Sql, id: &str, name: &str) -> Result<(), String> {
     let name = validate_name(name)?;
@@ -1520,6 +1670,7 @@ pub(crate) fn apply_local(
               WHERE id = ?1",
             params![id, local.secret, masked, base_url, now, email],
         )?;
+        refresh_account_fp(conn, id)?;
         if kind == "auth" && platform == "codex" {
             let captured = crate::auth_snapshot::capture(conn, id, &platform, &local.secret)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error))))?;

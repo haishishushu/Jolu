@@ -134,13 +134,18 @@ fn save(conn: &Connection, id: &str, _name: &str, credential: &Credential, detec
     let plain = serde_json::to_vec(credential).map_err(|_| "无法保存浏览器授权")?;
     let protected = crate::auth_snapshot::protect(&plain, id.as_bytes(), true)?;
     let sealed = format!("{PREFIX}{}", STANDARD.encode(protected));
+    let platform = credential.platform();
     if existing.is_some() {
         // 复用连接 ID，保留用户名称、创建时间及关联历史；新凭证使旧同步结果失效。
         conn.execute("UPDATE connections SET secret=?2,masked='已加密保存',status='connected',last_sync_ms=NULL,account_email=?3 WHERE id=?1",
             params![id,sealed,account]).map_err(|_| "更新浏览器账号失败")?;
+        crate::connections::refresh_account_fp(conn, id).map_err(|_| "更新浏览器账号标识失败")?;
     } else {
-        conn.execute("INSERT INTO connections(id,platform,kind,name,label,secret,masked,status,created_ms,account_email) VALUES(?1,?2,'auth',?3,'浏览器授权',?4,'已加密保存','connected',?5,?6)",
-            params![id,credential.platform(),name,sealed,chrono::Utc::now().timestamp_millis(),account]).map_err(|_| "保存浏览器账号失败")?;
+        let fp = crate::gateway::identity::account_fingerprint(platform, "auth", Some(&sealed));
+        let slug = crate::gateway::identity::allocate_slug(conn, id, platform, &name, fp.as_deref())
+            .map_err(|_| "分配浏览器账号标识失败")?;
+        conn.execute("INSERT INTO connections(id,platform,kind,name,label,secret,masked,status,created_ms,account_email,slug,account_fp) VALUES(?1,?2,'auth',?3,'浏览器授权',?4,'已加密保存','connected',?5,?6,?7,?8)",
+            params![id,platform,name,sealed,chrono::Utc::now().timestamp_millis(),account,slug,fp]).map_err(|_| "保存浏览器账号失败")?;
     }
     Ok(id.into())
 }

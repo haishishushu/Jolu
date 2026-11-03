@@ -7,6 +7,7 @@
 pub mod claude;
 pub mod codex;
 pub mod direct;
+pub mod gemini;
 
 use std::sync::Arc;
 
@@ -34,7 +35,8 @@ pub(crate) fn record_upstream_signal(deps: &Arc<ProxyDeps>, entry: &PoolEntry, u
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                cooldowns.cool(&entry.connection_id, now + retry_after * 1000);
+                // 按账号冷却：同一把 Key 的多个端点一起退避，不互相「接力」撞限额
+                cooldowns.cool(&entry.cred_key(), now + retry_after * 1000);
             }
         }
         return;

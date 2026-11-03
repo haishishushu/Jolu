@@ -574,6 +574,11 @@ pub fn scan(db: &mut impl Store) -> ScanResult {
     result.errors.extend(scanned.errors);
     result.failed_sources.extend(scanned.failed_sources);
     merge(&mut result, crate::native_sources::scan(db));
+    // 历史会话的项目目录回填：旧版本没有写 sessions.cwd，增量扫描不会重扫未变的库文件，
+    // 这里补一次（只填空值）。失败不影响本次扫描结果。
+    if let Some(home) = crate::creds::home() {
+        let _ = crate::native_sources::backfill_zcode_cwd(db, &home);
+    }
     result
 }
 

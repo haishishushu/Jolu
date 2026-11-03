@@ -165,6 +165,7 @@ impl PreparedClaude {
             conn.execute("UPDATE connections SET secret=?2,masked=?3,account_email=?4,last_sync_ms=?5 WHERE id=?1",
                 rusqlite::params![id, token, crate::connections::mask(token), bundle["oauthAccount"]["emailAddress"].as_str(), chrono::Utc::now().timestamp_millis()])
                 .map_err(|_| "无法更新 Claude 授权")?;
+            crate::connections::refresh_account_fp(conn, id).map_err(|_| "无法更新 Claude 授权标识".to_string())?;
             self.check_unchanged()?;
             Ok(())
         })();

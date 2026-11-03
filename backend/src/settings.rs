@@ -16,6 +16,12 @@ pub struct Settings {
     /// 仅控制启动时静默检查；手动检查仍可用，发布总开关独立。
     #[serde(default = "yes")]
     pub auto_check_updates: bool,
+    /// 费用估算的显示币种：`USD` 或 `CNY`。成本基准始终是 USD，展示时按当日汇率换算。
+    #[serde(default = "default_cost_currency")]
+    pub cost_currency: String,
+    /// 自动检查更新的间隔（分钟）。0 或缺失按默认 30 分钟；允许用户自定义。
+    #[serde(default = "default_update_interval")]
+    pub update_interval_minutes: u32,
     /// 灵动岛当前显示的平台。与设置里「灵动岛显示配置」是同一个值
     pub island_platform: String,
     #[serde(default = "default_kind")]
@@ -93,7 +99,12 @@ pub struct Settings {
     /// 网关模式：是否允许自动熔断（关闭后只能手动切回）。
     #[serde(default = "yes")]
     pub gateway_auto_escape: bool,
+    /// 本实例标识：接线 token 带它的前 8 位，用来识别「这个配置是哪个 Jolu 写的」。
+    /// 首次启动生成后固定，正式版、验收版、改名测试包各自不同。
+    #[serde(default)]
+    pub instance_id: String,
     /// 接线状态：agent_id → 还原所需的原值快照 JSON，支持逐 agent 还原。
+    /// 过渡版本继续写入，方便回退到旧版；状态判断以 `agent_wiring` 表为准。
     #[serde(default)]
     pub gateway_wiring: std::collections::BTreeMap<String, String>,
     /// 默认打开页面（画板 86）：`last` 表示上次访问的页面，其余为七个主窗口页面之一。
@@ -139,10 +150,37 @@ fn default_dock_enabled() -> bool { true }
 fn default_proxy_port() -> u16 { 12731 }
 fn default_proxy_fallback() -> bool { true }
 fn default_proxy_mode() -> String { "observe".into() }
+fn default_update_interval() -> u32 { 30 }
+fn default_cost_currency() -> String { "USD".into() }
 fn default_gateway_circuit() -> u32 { 5 }
 fn default_default_page() -> String { "last".into() }
 fn default_main_zoom() -> u16 { 100 }
 fn default_list_density() -> String { "comfortable".into() }
+
+/// 16 字节随机数的十六进制表示；Windows 用系统加密随机数，其他平台退回时间 + 进程号。
+fn new_instance_id() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        let mut output = [0u8; 16];
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                output.as_mut_ptr(),
+                output.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status >= 0 {
+            return output.iter().map(|b| format!("{b:02x}")).collect();
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{now:032x}{:08x}", std::process::id())[..32].to_string()
+}
 
 /// 主窗口的八个页面，与前端 `MainPage` 一致。
 const MAIN_PAGES: [&str; 8] = ["island", "providers", "checkin", "usage", "sessions", "automation", "skills", "settings"];
@@ -169,6 +207,8 @@ impl Default for Settings {
         Self {
             silent_startup: true,
             auto_check_updates: true,
+            update_interval_minutes: default_update_interval(),
+            cost_currency: default_cost_currency(),
             island_platform: "claude".into(),
             island_kind: default_kind(),
             island_connection_id: None,
@@ -198,6 +238,7 @@ impl Default for Settings {
             gateway_default_connection: None,
             gateway_circuit_threshold: default_gateway_circuit(),
             gateway_auto_escape: true,
+            instance_id: String::new(),
             gateway_wiring: std::collections::BTreeMap::new(),
             default_page: default_default_page(),
             last_page: None,
@@ -221,10 +262,18 @@ impl Store {
     pub fn load(dir: &std::path::Path) -> Self {
         let path = dir.join("settings.json");
         // 缺失字段逐项补默认值，保留旧版本已经保存的连接；仅无法解析时回落。
-        let inner = std::fs::read_to_string(&path)
+        let mut inner = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
             .unwrap_or_default();
+        // 实例标识必须落盘：每次启动换一个会让「另一个 Jolu 接管」误判。
+        if inner.instance_id.trim().is_empty() {
+            inner.instance_id = new_instance_id();
+            if let Ok(json) = serde_json::to_vec_pretty(&inner) {
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::fs::write(&path, json);
+            }
+        }
         Self {
             path,
             inner: Mutex::new(inner),

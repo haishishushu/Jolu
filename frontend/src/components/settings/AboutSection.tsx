@@ -15,6 +15,10 @@ import { ActionButton, SettingsGroup, SettingsRow, Switch } from "./settingsUi"
 export function AboutSection() {
   const cfg = useSettings()
   const [version, setVersion] = useState<string | null>(null)
+  const interval = cfg.settings.update_interval_minutes ?? 30
+  const intervalHint = cfg.settings.auto_check_updates
+    ? `每 ${formatInterval(interval)} 检查一次；可在下拉中选择常用值或自定义`
+    : "关闭自动检查时不生效"
   useEffect(() => {
     let stopped = false
     settingsApi.appVersion().then((v) => { if (!stopped) setVersion(v) }).catch(() => {})
@@ -45,8 +49,20 @@ export function AboutSection() {
         <SettingsRow
           className="min-h-[72px]"
           title="自动检查更新"
-          desc={UPDATES_ENABLED ? "启动时和每 30 分钟检查一次，新版本自动在后台下载，安装由你确认。" : "当前发布通道尚未开放，偏好会保留；启用更新后生效。"}
+          desc={UPDATES_ENABLED ? "启动时检查一次，之后按下面的间隔复查；新版本自动在后台下载，安装由你确认。" : "当前发布通道尚未开放，偏好会保留；启用更新后生效。"}
           control={<Switch label="自动检查更新" on={cfg.settings.auto_check_updates} disabled={!cfg.ready || cfg.isSaving("auto_check_updates")} onChange={(on) => void cfg.setAutoCheckUpdates(on)} />}
+        />
+        <SettingsRow
+          className="min-h-[72px]"
+          title="检查间隔"
+          desc={intervalHint}
+          control={
+            <UpdateIntervalPicker
+              value={cfg.settings.update_interval_minutes ?? 30}
+              disabled={!cfg.ready || !cfg.settings.auto_check_updates || cfg.isSaving("update_interval")}
+              onCommit={(minutes) => void cfg.setUpdateInterval(minutes)}
+            />
+          }
         />
       </SettingsGroup>
 
@@ -111,5 +127,83 @@ function UpdateRow({ versionText }: { versionText: string }) {
         </ActionButton>
         : <ActionButton icon={<RefreshCw aria-hidden className="size-3.5" />} busy={checking} onClick={check}>{checking ? "检查中…" : "检查更新"}</ActionButton>}
     />
+  )
+}
+
+/** 常用间隔；不在列表中的值走「自定义」输入。 */
+const PRESET_INTERVALS = [5, 10, 15, 30, 60, 120, 240] as const
+
+export function formatInterval(minutes: number): string {
+  if (minutes < 60) return `${minutes} 分钟`
+  if (minutes % 60 === 0) return `${minutes / 60} 小时`
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
+}
+
+/**
+ * 检查间隔选择：预设下拉 + 自定义输入。
+ * 自定义值只在离开输入框或按回车时提交，避免每敲一个数字就写一次设置。
+ */
+function UpdateIntervalPicker({
+  value, disabled, onCommit,
+}: {
+  value: number
+  disabled: boolean
+  onCommit: (minutes: number) => void
+}) {
+  const [custom, setCustom] = useState(false)
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => { setDraft(String(value)) }, [value])
+  const preset = PRESET_INTERVALS.includes(value as (typeof PRESET_INTERVALS)[number])
+
+  const commit = () => {
+    const minutes = Number(draft)
+    if (!Number.isFinite(minutes) || minutes < 5 || minutes > 1440) {
+      setDraft(String(value))
+      setCustom(false)
+      return
+    }
+    onCommit(minutes)
+    setCustom(false)
+  }
+
+  if (custom) {
+    return (
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          min={5}
+          max={1440}
+          value={draft}
+          disabled={disabled}
+          aria-label="自定义检查间隔（分钟）"
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => { if (event.key === "Enter") commit() }}
+          className="h-8 w-24 rounded-lg border border-jolu-border bg-jolu-bg px-2 text-xs text-jolu-text outline-none disabled:opacity-45"
+        />
+        <span className="text-meta text-jolu-muted">分钟</span>
+      </div>
+    )
+  }
+
+  return (
+    <select
+      value={preset ? String(value) : "custom"}
+      disabled={disabled}
+      aria-label="检查间隔"
+      onChange={(event) => {
+        if (event.target.value === "custom") {
+          setCustom(true)
+          return
+        }
+        onCommit(Number(event.target.value))
+      }}
+      className="h-8 rounded-lg border border-jolu-border bg-jolu-bg px-2 text-xs text-jolu-text outline-none disabled:opacity-45"
+    >
+      {PRESET_INTERVALS.map((minutes) => (
+        <option key={minutes} value={minutes}>{formatInterval(minutes)}</option>
+      ))}
+      <option value="custom">自定义…</option>
+    </select>
   )
 }

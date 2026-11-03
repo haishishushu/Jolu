@@ -244,12 +244,14 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     if (!UPDATES_ENABLED || !cfg.ready || !cfg.settings.auto_check_updates) return
     const run = () => { void checkRef.current().catch(() => {}) }
     const first = window.setTimeout(run, 1000)
-    const interval = window.setInterval(run, AUTO_CHECK_INTERVAL_MS)
+    // 间隔来自设置（默认 30 分钟）；0 或缺失按默认值，避免 0ms 轮询
+    const minutes = cfg.settings.update_interval_minutes ?? 0
+    const interval = window.setInterval(run, minutes > 0 ? minutes * 60_000 : AUTO_CHECK_INTERVAL_MS)
     return () => {
       window.clearTimeout(first)
       window.clearInterval(interval)
     }
-  }, [cfg.ready, cfg.settings.auto_check_updates])
+  }, [cfg.ready, cfg.settings.auto_check_updates, cfg.settings.update_interval_minutes])
 
   const value = useMemo<UpdateContextValue>(
     () => ({

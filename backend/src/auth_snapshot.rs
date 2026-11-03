@@ -93,6 +93,7 @@ fn preserve_current_value(conn: &Connection, value: &Value) -> Result<(), String
         let result = (|| {
             save(conn, &id, &current)?;
             conn.execute("UPDATE connections SET secret=?2,masked=?3 WHERE id=?1", rusqlite::params![id, secret, crate::connections::mask(secret)]).map_err(|_| "无法保存轮换后的授权")?;
+            crate::connections::refresh_account_fp(conn, &id).map_err(|_| "无法更新授权标识")?;
             Ok(())
         })();
         if let Err(error) = result {

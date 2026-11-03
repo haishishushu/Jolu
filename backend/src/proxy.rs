@@ -562,11 +562,54 @@ pub fn set_proxy(
     enabled: bool,
     fallback_direct: bool,
 ) -> Result<crate::settings::Settings, String> {
+    // 与网关接线共用一把锁：接管 / 还原与「把工具指向网关」不能同时改同一批配置文件。
+    crate::cli_switch::with_switch(|| set_proxy_locked(app, port, enabled, fallback_direct))
+}
+
+fn set_proxy_locked(
+    app: &tauri::AppHandle,
+    port: u16,
+    enabled: bool,
+    fallback_direct: bool,
+) -> Result<crate::settings::Settings, String> {
     if !(1024..=65535).contains(&port) {
         return Err("端口须在 1024–65535 之间".into());
     }
     if let Ok(mut slot) = FALLBACK_REASON.lock() {
         *slot = None;
+    }
+
+    // 中转模式与观测模式的「开关」含义不同：中转不做 CLI 接管，也不探测观测上游。
+    // 关闭时必须先还原接线，否则工具会指向一个已经停掉的端口。
+    let (current_mode, _) = crate::gateway::mode_from(&app.state::<crate::Cfg>().0.get());
+    if current_mode == crate::gateway::Mode::Relay {
+        if !enabled {
+            let outcome = crate::gateway::escape::restore_all(app);
+            stop();
+            let next = app.state::<crate::Cfg>().0.try_update(|settings| {
+                settings.proxy_enabled = false;
+                settings.proxy_port = port;
+                settings.proxy_fallback_direct = fallback_direct;
+            })?;
+            let _ = app.emit("settings-changed", next.clone());
+            if !outcome.failed.is_empty() {
+                eprintln!("[模型入口] 关闭时部分工具还原失败：{}", outcome.summary());
+            }
+            return Ok(next);
+        }
+        stop();
+        let next = app.state::<crate::Cfg>().0.try_update(|settings| {
+            settings.proxy_enabled = true;
+            settings.proxy_port = port;
+            settings.proxy_fallback_direct = fallback_direct;
+        })?;
+        if let Err(error) = start(app) {
+            let rolled = app.state::<crate::Cfg>().0.update(|settings| settings.proxy_enabled = false);
+            let _ = app.emit("settings-changed", rolled);
+            return Err(error);
+        }
+        let _ = app.emit("settings-changed", next.clone());
+        return Ok(next);
     }
 
     if !enabled {
@@ -619,19 +662,31 @@ pub fn set_proxy(
         })
         .map_err(|error| format!("保存代理设置失败：{error}"))?;
 
-    let proxy_base = format!("http://127.0.0.1:{port}");
-    if let Err(error) = crate::proxy_config::apply_takeover(app, &proxy_base) {
-        rollback(app);
-        return Err(error);
-    }
+    // 必须先启动监听、拿到实际端口，再写 CLI 配置：
+    // 端口被占用时 start() 会改用随机端口，若先按用户填的端口写进 CLI，
+    // CLI 会连到一个没人监听的端口，全部请求失败。
     if let Err(error) = start(app) {
         rollback(app);
         return Err(format!("代理监听启动失败：{error}"));
     }
+    let actual_port = PROXY
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|runtime| runtime.port))
+        .unwrap_or(port);
+    let proxy_base = format!("http://127.0.0.1:{actual_port}");
+    if let Err(error) = crate::proxy_config::apply_takeover(app, &proxy_base) {
+        rollback(app);
+        return Err(error);
+    }
 
     let next = app.state::<crate::Cfg>().0.get();
     let _ = app.emit("settings-changed", next.clone());
-    println!("[代理] 已启动 127.0.0.1:{port}");
+    if actual_port != port {
+        eprintln!("[代理] 端口 {port} 已被占用，实际监听 127.0.0.1:{actual_port}，CLI 已按实际端口接管");
+    } else {
+        println!("[代理] 已启动 127.0.0.1:{actual_port}");
+    }
     Ok(next)
 }
 
@@ -756,15 +811,31 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
 
     let router = build_router(mode, deps.clone());
 
-    // 同步上下文里绑定端口：占用等错误要直接反馈给设置页，不能吞进后台任务
-    let listener = tauri::async_runtime::block_on(tokio::net::TcpListener::bind(("127.0.0.1", port)))
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AddrInUse {
-                format!("端口 {port} 已被占用，请更换端口")
-            } else {
-                format!("监听 127.0.0.1:{port} 失败：{error}")
+    // 同步上下文里绑定端口：占用等错误要直接反馈给设置页，不能吞进后台任务。
+    // 端口被占用时自动改用系统分配的随机端口并落库——用户配置的端口只是"首选"，
+    // 不能因为别的程序临时占用就整条链路不可用（CLI 接线写的是实际生效端口）。
+    let (listener, port) = tauri::async_runtime::block_on(async move {
+        match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => Ok((listener, port)),
+            // 观测模式不依赖固定端口：CLI 配置会按实际端口写入，可以回退随机端口。
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && mode == crate::gateway::Mode::Observe => {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.map_err(|fallback| {
+                    format!("端口 {port} 已被占用，且无法分配随机端口：{fallback}")
+                })?;
+                let actual = listener.local_addr().map_err(|e| format!("读取监听端口失败：{e}"))?.port();
+                eprintln!("[代理] 端口 {port} 已被占用，改用 {actual}");
+                Ok((listener, actual))
             }
-        })?;
+            // 中转模式的端口已经写进各 agent 的配置：悄悄换端口会让它们全部连不上。
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Err(format!(
+                "端口 {port} 已被占用；模型入口必须使用固定端口，请先释放该端口或换一个端口再接入工具"
+            )),
+            Err(error) => Err(format!("监听 127.0.0.1:{port} 失败：{error}")),
+        }
+    })?;
+    // 刻意不改写 settings.proxy_port：那是用户填写的偏好（"首选端口"），
+    // 临时冲突不该永久改写它——改了下个版本默认值就跟着变了。
+    // 实际生效端口由 ProxyStatus.port 如实上报，界面据此提示。
 
     let signal = async move {
         let mut receiver = shutdown_rx;
@@ -831,6 +902,14 @@ pub fn startup(app: &tauri::AppHandle) {
 /// - 还原成功后**保留**设置里的上游（最近已知网关），同一残留再次出现时仍可修复；
 /// - 由 [`startup`] 与 [`on_config_changed`]（配置文件监听回调）共同调用，常驻生效。
 pub(crate) fn heal_orphans(app: &tauri::AppHandle) {
+    // 与网关接线 / 观测接管共用一把锁；调用方若已持锁请改用 inner 版本。
+    let _ = crate::cli_switch::with_switch(|| {
+        heal_orphans_locked(app);
+        Ok::<(), String>(())
+    });
+}
+
+fn heal_orphans_locked(app: &tauri::AppHandle) {
     const MIN_HEAL_INTERVAL: Duration = Duration::from_secs(10);
     // 频率限制：还原写入本身会再次触发配置监听，避免极端情况下反复写盘
     static LAST_HEAL: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
@@ -884,7 +963,14 @@ pub(crate) fn heal_orphans(app: &tauri::AppHandle) {
 /// 代理运行中：读到代理地址 → 自己写的，忽略；读到新网关地址 → 更新保存的上游并重写
 /// 代理地址保持接管；读到空 → 外部切回官方直连，放弃该平台接管并清掉代理地址。
 pub fn on_config_changed(app: &tauri::AppHandle) {
-    heal_orphans(app);
+    let _ = crate::cli_switch::with_switch(|| {
+        on_config_changed_locked(app);
+        Ok::<(), String>(())
+    });
+}
+
+fn on_config_changed_locked(app: &tauri::AppHandle) {
+    heal_orphans_locked(app);
     let Some(runtime) = PROXY.lock().expect("代理状态锁").clone() else {
         return;
     };

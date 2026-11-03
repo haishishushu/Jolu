@@ -4,8 +4,10 @@ import { CalendarDays, Download, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, isTauri, type StatsCallPageDto, type StatsFilterDto, type StatsModelRowDto, type StatsTrendBucketDto } from "@/lib/api"
 import { dateKey, localZone, rangeLabel, rangeToMillis, todayRange, utcOffsetLabel, zoneName, type DateRange } from "@/lib/usageStats"
+import { useCostFx } from "@/lib/costCurrency"
 import { accountsFor, keepApplicable } from "@/lib/usageFilters"
 import { useConnections } from "@/hooks/useConnections"
+import { useSettings } from "@/hooks/useSettings"
 import { useStatsQuery } from "@/hooks/useStatsQuery"
 import { demoActivity, demoCalls, demoOverview } from "@/mock/usageStats"
 import { useToast } from "@/components/ui/Toast"
@@ -74,6 +76,10 @@ export function UsageView({ active, request, onOpenSession }: {
 
   const statsFilter = (): StatsFilterDto => ({ ...rangeToMillis(range), platform, connections: accounts })
   const callsFilter = (): StatsFilterDto => ({ ...rangeToMillis(range), platform, connections: [], model, status, search: search.trim() || null })
+
+  const cfg = useSettings()
+  const costCurrency = (cfg.settings.cost_currency === "CNY" ? "CNY" : "USD") as "USD" | "CNY"
+  const fx = useCostFx(costCurrency)
 
   const overview = useStatsQuery(
     "stats-overview:" + JSON.stringify([range, platform, accounts]),
@@ -193,6 +199,7 @@ export function UsageView({ active, request, onOpenSession }: {
           <MenuFilter label="供应商筛选" value={platform ?? ALL} options={providerOptions()} onChange={(v) => changePlatform(v === ALL ? null : (v as PlatformId))} />
           <AccountFilter accounts={accountsFor(conn.connections, platform)} value={accounts} onChange={setAccounts} />
           <span className="flex-1" />
+          <CurrencyPicker value={costCurrency} loading={fx.loading} onChange={(next) => void cfg.setCostCurrency(next)} hint={fx} />
           <span className="text-[11px] text-jolu-muted">{range.end.slice(5).replace("-", "/")} · {zone}时区</span>
           <RefreshButton loading={overview.refreshing} onClick={() => { overview.refresh(); if (tab === "analysis") activity.refresh() }} />
         </div>
@@ -250,15 +257,15 @@ export function UsageView({ active, request, onOpenSession }: {
       <ContentTransition identity={`${tab}-${!!current.data}`} className="flex flex-col gap-4">
       {tab === "calls" ? (
         calls.data ? (
-          <CallsPanel data={calls.data} selectedId={selectedId} onSelect={setSelected} onPage={setPage} onOpenSession={onOpenSession} />
+          <CallsPanel data={calls.data} selectedId={selectedId} fx={fx} onSelect={setSelected} onPage={setPage} onOpenSession={onOpenSession} />
         ) : !calls.error && <LoadingCard />
       ) : overview.data ? (
         overview.data.requests === 0 ? (
           <EmptyCard onClear={platform || accounts.length ? clearFilters : undefined} />
         ) : tab === "overview" ? (
-          <OverviewPanel data={overview.data} isToday={isToday} onDrillBucket={drillBucket} onDrillModel={drillModel} onOpenSession={onOpenSession} />
+          <OverviewPanel data={overview.data} isToday={isToday} fx={fx} onDrillBucket={drillBucket} onDrillModel={drillModel} onOpenSession={onOpenSession} />
         ) : (
-          <AnalysisPanel data={overview.data} activity={activity.data} activityError={activity.error} onDrillModel={drillModel} onDrillProvider={drillProvider} />
+          <AnalysisPanel data={overview.data} activity={activity.data} fx={fx} activityError={activity.error} onDrillModel={drillModel} onDrillProvider={drillProvider} />
         )
       ) : !overview.error && <LoadingCard layout="stats" />}
       </ContentTransition>
@@ -274,5 +281,44 @@ export function UsageView({ active, request, onOpenSession }: {
         />
       )}
     </div>
+  )
+}
+
+/**
+ * 费用币种切换（USD / CNY）。CNY 用当日汇率换算，汇率来源显示在标题属性里，
+ * 离线参考价时在按钮旁标「参考」，不把兜底价伪装成最新汇率。
+ */
+function CurrencyPicker({ value, loading, hint, onChange }: {
+  value: "USD" | "CNY"
+  loading: boolean
+  hint: { rate: number; asOf: string; fallback: boolean }
+  onChange: (next: "USD" | "CNY") => void
+}) {
+  const title = value === "CNY"
+    ? `1 USD ≈ ${hint.rate.toFixed(3)} CNY · ${hint.asOf}${hint.fallback ? "（离线参考价）" : ""}`
+    : "费用按美元显示（基准币种）"
+  return (
+    <span className="flex items-center gap-1.5" title={title}>
+      <span className="flex h-[26px] items-center rounded-md bg-jolu-track p-0.5">
+        {(["USD", "CNY"] as const).map((currency) => (
+          <button
+            key={currency}
+            type="button"
+            onClick={() => value !== currency && onChange(currency)}
+            className={cn(
+              "h-[22px] rounded px-2 text-meta transition-colors",
+              value === currency ? "bg-jolu-bg text-jolu-text shadow-sm" : "text-jolu-muted hover:text-jolu-text",
+            )}
+          >
+            {currency === "USD" ? "$ USD" : "¥ CNY"}
+          </button>
+        ))}
+      </span>
+      {value === "CNY" && (
+        <span className={cn("text-note", hint.fallback ? "text-jolu-danger" : "text-jolu-muted")}>
+          {loading ? "汇率…" : hint.fallback ? "参考" : `≈${hint.rate.toFixed(2)}`}
+        </span>
+      )}
+    </span>
   )
 }

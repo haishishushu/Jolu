@@ -3,7 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog"
 import { useState } from "react"
 import { CalendarDays, ChevronLeft, ChevronRight, X } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { canConfirmRange, dateKey, monthGrid, parseDateKey, pickDate, rangeDays, rangeLabel, zoneName, localZone, type DateRange } from "@/lib/usageStats"
+import { RANGE_PRESETS, canConfirmRange, dateKey, monthGrid, parseDateKey, pickDate, rangeDays, rangeLabel, zoneName, localZone, type DateRange } from "@/lib/usageStats"
 
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
 
@@ -54,6 +54,27 @@ export function DateRangeDialog({ value, currentLabel, onConfirm, onClose: onDis
             </Dialog.Close>
           </div>
           <p className="text-xs text-jolu-muted">当前筛选：{currentLabel ?? rangeLabel(value)} · 以下日期为待确认范围</p>
+          <div className="flex flex-wrap gap-1.5">
+            {RANGE_PRESETS.map((preset) => {
+              const range = preset.range(new Date())
+              const active = draft.start === range.start && draft.end === range.end
+              return (
+                <button
+                  key={preset.key}
+                  type="button"
+                  onClick={() => setDraft({ start: range.start, end: range.end })}
+                  className={cn(
+                    "h-7 rounded-md border px-2.5 text-[11px]",
+                    active
+                      ? "border-jolu-accent bg-jolu-selected text-jolu-on"
+                      : "border-jolu-border text-jolu-muted hover:bg-jolu-stage",
+                  )}
+                >
+                  {preset.label}
+                </button>
+              )
+            })}
+          </div>
           <div className="flex gap-4">
             <DateBox label="开始日期" value={draft.start} active={editing === "start"} />
             <DateBox label="结束日期" value={draft.end} active={editing === "end"} />
