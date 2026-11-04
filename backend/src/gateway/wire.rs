@@ -298,6 +298,11 @@ pub(crate) async fn handle(
         )
     };
 
+    if let RouteDecision::Direct(entry, _) | RouteDecision::Subscription(entry) = &decision {
+        if !route::source_is_current(&deps, entry) {
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "来源已关闭或配置已变化，请刷新后重试");
+        }
+    }
     match decision {
         RouteDecision::Direct(entry, upstream_model) => {
             if entry.protocol != protocol.wire_name() {
@@ -345,7 +350,7 @@ pub(crate) async fn handle(
             response
         }
         RouteDecision::Subscription(entry) => {
-            let response = if entry.platform == "codex" {
+            let response = if matches!(entry.platform.as_str(), "codex" | "opencode") {
                 if protocol == CallerProtocol::Anthropic {
                     error_response(StatusCode::BAD_REQUEST, "Codex 订阅只服务 OpenAI 协议请求")
                 } else {
@@ -357,6 +362,31 @@ pub(crate) async fn handle(
                 } else {
                     crate::gateway::adapter::claude::forward(deps.clone(), entry, &session, body).await
                 }
+            } else if entry.platform == "grok" {
+                crate::gateway::adapter::grok::forward(deps.clone(), entry, protocol, body).await
+            } else if matches!(entry.platform.as_str(), "workbuddy" | "qoder" | "trae") {
+                // 只说 Chat 的来源：Anthropic 调用方（Claude Code）经协议转换后转发，回复再转回
+                let anthropic = protocol == CallerProtocol::Anthropic;
+                let converted = if anthropic {
+                    crate::gateway::translate::anthropic_request(&body).map(|b| (CallerProtocol::Chat, b))
+                } else {
+                    Ok((protocol, body))
+                };
+                match converted {
+                    Err(e) => error_response(StatusCode::BAD_REQUEST, &e),
+                    Ok((protocol, body)) => {
+                        let response = if entry.platform == "workbuddy" {
+                            crate::gateway::adapter::workbuddy::forward(deps.clone(), entry, protocol, body).await
+                        } else if entry.platform == "qoder" {
+                            crate::gateway::adapter::qoder::forward(deps.clone(), entry, protocol, body).await
+                        } else {
+                            crate::gateway::adapter::trae::forward(deps.clone(), entry, protocol, body, &session).await
+                        };
+                        if anthropic { crate::gateway::translate::anthropic_response(response, &model).await } else { response }
+                    }
+                }
+            } else if entry.platform == "zcode" {
+                crate::gateway::adapter::zcode::forward(deps.clone(), entry, protocol, body).await
             } else {
                 error_response(StatusCode::NOT_IMPLEMENTED, "该平台的订阅适配器尚未接入")
             };
@@ -408,6 +438,23 @@ fn wire_label(protocol: CallerProtocol) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closing_or_pausing_a_source_rejects_warmed_pool_before_upstream() {
+        let deps=crate::proxy::test_support::bare_deps();
+        let listener=tokio::net::TcpListener::bind(("127.0.0.1",0)).await.unwrap();
+        let base=format!("http://{}",listener.local_addr().unwrap());
+        deps.db.lock().unwrap().execute("INSERT INTO connections(id,platform,kind,name,secret,base_url,protocol,status,serve_enabled,created_ms,slug) VALUES('isolation-source','custom','api','isolated','fixture-token',?1,'openai','connected',1,1,'isolated')",[base]).unwrap();
+        let pool=route::pool_snapshot(&deps.db,deps.pool_index().unwrap());
+        assert_eq!(pool.len(),1);
+        for (enabled,status) in [(false,"connected"),(true,"paused")] {
+            deps.db.lock().unwrap().execute("UPDATE connections SET serve_enabled=?1,status=?2 WHERE id='isolation-source'",rusqlite::params![enabled,status]).unwrap();
+            let response=tokio::time::timeout(std::time::Duration::from_millis(500),handle(CallerProtocol::Chat,deps.clone(),HeaderMap::new(),axum::body::Bytes::from_static(br#"{"model":"isolated/fixture","messages":[{"role":"user","content":"test"}]}"#),"/v1/chat/completions")).await;
+            assert!(response.is_ok(),"不应等待上游；缓存中的来源已经关闭或暂停");
+            assert_eq!(response.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(20),listener.accept()).await.is_err(),"关闭后的来源不能收到新请求");
+        }
+    }
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn deps_with_circuit(threshold: u32, hits: Arc<AtomicU32>, enabled: bool) -> Arc<ProxyDeps> {

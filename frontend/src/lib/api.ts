@@ -664,6 +664,8 @@ export interface CostSummaryDto {
   unpriced_no_price?: string[]
   /** 未计价且没有可用 token 用量的请求数 */
   unpriced_no_usage?: number
+  /** 已有用量但分项不足以计价的请求数 */
+  unpriced_partial?: number
   requests: number
 }
 

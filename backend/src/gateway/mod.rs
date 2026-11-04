@@ -12,6 +12,7 @@
 //!   返回明确的 400 引导换端点，不做静默翻译（协议转换是后续扩展位）。
 
 pub mod adapter;
+pub mod access;
 pub mod bridge;
 pub mod catalog;
 pub mod escape;
@@ -20,6 +21,8 @@ pub mod identity;
 pub mod route_log;
 pub mod route;
 pub mod server;
+pub(crate) mod subscription;
+pub(crate) mod translate;
 pub mod wire;
 pub mod wiring;
 pub mod wiring_store;

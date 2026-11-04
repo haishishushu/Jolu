@@ -15,6 +15,9 @@ pub(crate) struct Session {
     pub expires_at: Option<String>,
     pub account: Option<String>,
     pub user_id: Option<String>,
+    /// 设备授权时上报的 machine_id；模型接口的 COSY 签名要用。旧授权没有此字段。
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 fn failed(reason: &str) -> QuotaState { QuotaState::Failed { reason: reason.into() } }
@@ -130,7 +133,7 @@ fn parse_local_auth(value:&Value,now:chrono::DateTime<chrono::Utc>) -> Result<Se
     let token = secret(&value, "token").ok_or_else(|| unauthorized("Qoder 桌面端尚未登录"))?;
     let user_id = text(&value["user"], "id").ok_or_else(|| unauthorized("Qoder 桌面登录缺少账号标识，请重新登录"))?;
     Ok(Session { token, refresh_token: secret(&value, "refreshToken"), expires_at: Some(expires_at),
-        account: text(&value["user"], "email").or_else(|| text(&value["user"], "name")), user_id: Some(user_id) })
+        account: text(&value["user"], "email").or_else(|| text(&value["user"], "name")), user_id: Some(user_id), machine_id: None })
 }
 
 pub(crate) fn local_auth_missing(edition:&str) -> bool { auth_path(edition).is_ok_and(|path|matches!(path.try_exists(),Ok(false))) }
@@ -228,7 +231,7 @@ pub(crate) fn login_url(edition: &str, nonce: &str, verifier: &str, machine_id: 
     Ok(login.to_string())
 }
 
-pub(crate) fn poll_login(edition: &str, nonce: &str, verifier: &str) -> Result<Option<Session>, String> {
+pub(crate) fn poll_login(edition: &str, nonce: &str, verifier: &str, machine_id: &str) -> Result<Option<Session>, String> {
     let (_, api, _) = endpoints(edition)?;
     if !auth_argument(nonce, 16, 256) || !auth_argument(verifier, 43, 128) { return Err("Qoder 授权参数无效".into()); }
     let client = crate::quota::client().map_err(|_| "无法创建 Qoder 授权客户端")?;
@@ -243,7 +246,7 @@ pub(crate) fn poll_login(edition: &str, nonce: &str, verifier: &str) -> Result<O
     let user = response_json(response).map_err(|_| "Qoder 授权账号校验失败，请重新授权")?;
     let (user_id, account) = verified_user(&user, None)?;
     let expires_at = value.get("expires_at").and_then(expiry).or_else(|| value["expires_in"].as_i64().filter(|s| *s > 0).and_then(chrono::TimeDelta::try_seconds).and_then(|delta| chrono::Utc::now().checked_add_signed(delta)).map(|date| date.to_rfc3339()));
-    Ok(Some(Session { token, refresh_token: Some(refresh_token), expires_at, account, user_id: Some(user_id) }))
+    Ok(Some(Session { token, refresh_token: Some(refresh_token), expires_at, account, user_id: Some(user_id), machine_id: Some(machine_id.into()) }))
 }
 
 #[cfg(test)]

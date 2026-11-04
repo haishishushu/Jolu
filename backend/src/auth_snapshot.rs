@@ -50,7 +50,7 @@ fn codex_identity(value: &Value) -> Option<(String, String)> {
     Some((workspace, user.to_owned()))
 }
 
-fn same_codex_identity(saved: &Value, current: &Value, new: &str) -> bool {
+pub(crate) fn same_codex_identity(saved: &Value, current: &Value, new: &str) -> bool {
     let Some(current) = complete_codex(current, new) else { return false };
     let Some(saved_identity) = codex_identity(saved) else { return false };
     codex_identity(&current).as_ref() == Some(&saved_identity)

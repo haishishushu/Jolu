@@ -502,7 +502,7 @@ pub(crate) fn points_at_gateway(value: &str, port: u16) -> bool {
 /// Jolu 建的 Codex provider 段名。
 const CODEX_PROVIDER: &str = "jolu-gateway";
 
-/// `jolu-<agent>.<实例前 8 位>`：网关只把它当归属标记，不做鉴权。
+/// `jolu-<agent>.<实例前 8 位>`：一键接线的归属标记，独立于可刷新的手动 Key。
 fn token_for(agent: &str, instance_short: &str) -> String {
     format!("jolu-{agent}.{instance_short}")
 }

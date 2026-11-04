@@ -7,11 +7,12 @@ import { cn } from "@/lib/utils"
 import { api, isTauri } from "@/lib/api"
 import {
   gatewayApi, type CatalogModelDto, type GatewayGroupDto, type GatewayGroupsDto, type GatewayMode,
-  type GatewayStatusDto, type GroupKind, type RouteLogDto, type WiringStatusDto,
+  type GatewayStatusDto, type SourceCapabilityDto, type GroupKind, type RouteLogDto, type WiringStatusDto,
 } from "@/lib/gatewayApi"
-import { agentLabel, canEscape, canServe, circuitText, gatewayRunLine, wiredCount } from "@/lib/gatewayPage"
+import { agentLabel, canEscape, canToggleSource, circuitText, wiredCount } from "@/lib/gatewayPage"
 import { useConnections } from "@/hooks/useConnections"
 import { useToast } from "@/components/ui/Toast"
+import { GatewayAccessBar } from "@/components/gateway/GatewayAccessBar"
 import { JoluSwitch } from "@/components/ui/JoluSwitch"
 import { AppIcon } from "@/components/brand/AppIcon"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
@@ -102,6 +103,7 @@ export function GatewayView() {
   const { connections, reload } = useConnections()
   const [status, setStatus] = useState<GatewayStatusDto | null>(null)
   const [groups, setGroups] = useState<GatewayGroupsDto>(EMPTY_GROUPS)
+  const [capabilities, setCapabilities] = useState<SourceCapabilityDto[]>([])
   const [catalog, setCatalog] = useState<CatalogModelDto[]>([])
   const [routeLog, setRouteLog] = useState<RouteLogDto[]>([])
   const initialView = readViewState()
@@ -137,9 +139,10 @@ export function GatewayView() {
       return
     }
     try {
-      const [nextStatus, nextGroups, nextCatalog, nextLog] = await Promise.all([
-        gatewayApi.status(), gatewayApi.groups(), gatewayApi.catalog(), gatewayApi.routeLog(),
+      const [nextStatus, nextGroups, nextCatalog, nextLog, nextCapabilities] = await Promise.all([
+        gatewayApi.status(), gatewayApi.groups(), gatewayApi.catalog(), gatewayApi.routeLog(), gatewayApi.sourceCapabilities(),
       ])
+      setCapabilities(nextCapabilities)
       setStatus(nextStatus)
       setGroups(nextGroups)
       setCatalog(nextCatalog)
@@ -175,7 +178,6 @@ export function GatewayView() {
 
   const mode: GatewayMode = status?.mode === "relay" ? "relay" : "observe"
   const running = mode === "relay" && !!status?.enabled
-  const runLine = gatewayRunLine(status)
   const agents = status?.wiring ?? EMPTY_WIRING
   const serving = connections.filter((connection) => connection.serve_enabled)
   const wired = wiredCount(status)
@@ -312,7 +314,8 @@ export function GatewayView() {
     setBusy(true)
     try {
       await gatewayApi.setServe(connection.id, true)
-      toast.success(`已把 ${connection.baseName} 加入模型池`)
+      const capability = capabilities.find(item => item.connection_id === connection.id)
+      toast.success(capability?.can_serve ? `已把 ${connection.baseName} 加入模型池` : `已选择 ${connection.baseName}，${capability?.state === "needs_auth" ? "请补全账号授权后调用" : "转发尚未就绪"}`)
       await Promise.all([refresh(), reload()])
     } catch (error) {
       setDialog({ kind: "serve-conflict", message: String(error) })
@@ -477,28 +480,9 @@ export function GatewayView() {
 
       {!isTauri && <Notice tone="muted">浏览器预览不读取网关状态；请在桌面端查看真实数据。</Notice>}
 
-      <section className="flex items-center gap-6 rounded-xl bg-jolu-status-success-bg px-4 py-3">
-        <div className="flex items-center gap-2">
-          <span className={cn("h-2 w-2 rounded-full", running ? "bg-jolu-accent" : runLine.tone === "danger" ? "bg-jolu-danger" : "bg-jolu-muted")} />
-          <span className="text-[15px] font-semibold text-jolu-text">{loading ? "读取中…" : running ? "接入中" : runLine.text}</span>
-          {status && <span className="rounded-md bg-jolu-bg px-2 py-1 font-mono text-[10px] text-jolu-on">127.0.0.1:{status.port}</span>}
-        </div>
-        <div className="flex items-center gap-5 text-jolu-muted">
-          <Metric value={serving.length} label="个来源接入" />
-          <span className="h-8 w-px bg-jolu-border" />
-          <Metric value={catalog.length} label="个模型可选" />
-          <span className="h-8 w-px bg-jolu-border" />
-          <Metric value={wired} label="个 Agent 已接入" />
-        </div>
-        <div className="flex-1" />
-        <div className="flex items-center gap-2">
-          <JoluSwitch on={running} label="允许 Agent 接入" disabled={busy || !isTauri} onChange={(on) => run(() => gatewayApi.setMode(on ? "relay" : "observe", status?.default_connection ?? null), on ? "已启动模型入口" : "已切回直连")} />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-jolu-text">允许 Agent 接入</span>
-            <span className="text-[9px] text-jolu-muted">关闭会先还原 Agent 配置，再停止监听。</span>
-          </div>
-        </div>
-      </section>
+      <GatewayAccessBar status={status} loading={loading} busy={busy} desktop={isTauri}
+        sources={serving.length} models={catalog.length} agents={wired}
+        onToggle={(on) => { void run(() => gatewayApi.setMode(on ? "relay" : "observe", status?.default_connection ?? null), on ? "模型转发已开启" : "已关闭模型转发，一键接入的工具已恢复原连接") }} />
 
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1 rounded-lg bg-jolu-track p-0.5">
@@ -591,7 +575,7 @@ export function GatewayView() {
                     {...groupDragProps("source", group)}
                   >
                     {visibleSources(members).map((connection) => (
-                      <SourceRow key={connection.id} connection={connection} busy={busy || !isTauri} editing={editing} groups={sourceGroups} onServe={() => void toggleServe(connection)} onRename={() => setDialog({ kind: "rename", connection })} onMove={(groupId) => void move("source", connection.id, groupId)} />
+                      <SourceRow key={connection.id} connection={connection} capability={capabilities.find(c => c.connection_id === connection.id)} busy={busy || !isTauri} editing={editing} groups={sourceGroups} onServe={() => void toggleServe(connection)} onRename={() => setDialog({ kind: "rename", connection })} onMove={(groupId) => void move("source", connection.id, groupId)} />
                     ))}
                   </GroupCard>
                 )
@@ -616,7 +600,7 @@ export function GatewayView() {
                 dropTarget={false}
               >
                 {visibleSources(ungroupedSources).map((connection) => (
-                  <SourceRow key={connection.id} connection={connection} busy={busy || !isTauri} editing={editing} groups={sourceGroups} onServe={() => void toggleServe(connection)} onRename={() => setDialog({ kind: "rename", connection })} onMove={(groupId) => void move("source", connection.id, groupId)} />
+                  <SourceRow key={connection.id} connection={connection} capability={capabilities.find(c => c.connection_id === connection.id)} busy={busy || !isTauri} editing={editing} groups={sourceGroups} onServe={() => void toggleServe(connection)} onRename={() => setDialog({ kind: "rename", connection })} onMove={(groupId) => void move("source", connection.id, groupId)} />
                 ))}
               </GroupCard>
               <AddCard label="新建来源分组" hint="或拖入来源" onClick={() => setDialog({ kind: "new-group", groupKind: "source" })} />
@@ -624,7 +608,7 @@ export function GatewayView() {
           ) : (
             <FlatList>
               {visibleSources(connections).map((connection) => (
-                <SourceRow key={connection.id} connection={connection} busy={busy || !isTauri} editing={editing} groups={sourceGroups} onServe={() => void toggleServe(connection)} onRename={() => setDialog({ kind: "rename", connection })} onMove={(groupId) => void move("source", connection.id, groupId)} />
+                <SourceRow key={connection.id} connection={connection} capability={capabilities.find(c => c.connection_id === connection.id)} busy={busy || !isTauri} editing={editing} groups={sourceGroups} onServe={() => void toggleServe(connection)} onRename={() => setDialog({ kind: "rename", connection })} onMove={(groupId) => void move("source", connection.id, groupId)} />
               ))}
             </FlatList>
           )}
@@ -915,14 +899,15 @@ function GroupCard({
   )
 }
 
-function SourceRow({ connection, busy, editing, groups, onServe, onRename, onMove }: {
-  connection: Connection; busy: boolean; editing: boolean; groups: GatewayGroupDto[]; onServe: () => void; onRename: () => void; onMove: (groupId: string | null) => void
+function SourceRow({ connection, capability, busy, editing, groups, onServe, onRename, onMove }: {
+  connection: Connection; capability?: SourceCapabilityDto; busy: boolean; editing: boolean; groups: GatewayGroupDto[]; onServe: () => void; onRename: () => void; onMove: (groupId: string | null) => void
 }) {
   return (
     <div className="flex items-center gap-2 border-b border-jolu-table-divider px-2.5 py-1.5 last:border-0" draggable={editing} onDragStart={(event) => { event.dataTransfer.setData("text/jolu-source", connection.id); event.dataTransfer.effectAllowed = "move" }}>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[10.5px] text-jolu-text">{connection.baseName}</span>
-        <span className="truncate text-[8.5px] text-jolu-muted">{connection.kind === "api" ? "API Key" : "官方订阅"} · {connection.masked || "本机来源"} · {connection.slug ?? "无 id"}</span>
+        <span className="truncate text-[8.5px] text-jolu-muted">{connection.kind === "api" ? "API Key" : "官方订阅"} · {connection.slug ?? "无 id"}</span>
+        <span title={capability?.reason} className={cn("truncate text-[8.5px]", capability?.state === "needs_auth" ? "text-jolu-danger" : "text-jolu-muted")}>{capability?.state === "needs_auth" ? "需要重新登录 · 到账号管理补全授权" : capability?.state === "unsupported" ? (connection.serve_enabled ? "已选择 · 转发适配尚未就绪" : "可选择接入 · 转发适配尚未就绪") : capability?.reason ?? "正在检查调用能力"}</span>
       </div>
       {editing && (
         <>
@@ -933,7 +918,7 @@ function SourceRow({ connection, busy, editing, groups, onServe, onRename, onMov
           <button type="button" onClick={onRename} className="text-[8.5px] text-jolu-muted hover:text-jolu-text">改 id</button>
         </>
       )}
-      <JoluSwitch on={connection.serve_enabled} label={`${connection.baseName} 对外服务`} disabled={busy || !canServe(connection.platformId, connection.kind)} onChange={onServe} />
+      <JoluSwitch on={connection.serve_enabled} label={`${connection.baseName} 对外服务`} disabled={!canToggleSource(connection.serve_enabled, busy, capability)} onChange={onServe} />
     </div>
   )
 }
@@ -1148,13 +1133,15 @@ function GeminiDialog({ busy, onClose, onConfirm }: { busy: boolean; onClose: ()
 }
 
 function CatalogDialog({ models, onClose }: { models: CatalogModelDto[]; onClose: () => void }) {
+  const toast = useToast()
   return (
     <Modal title="模型池里的模型" onClose={onClose} footer={<Button label="关闭" onClick={onClose} />}>
-      <p className="text-[9.5px] text-jolu-muted">菜单 id 是「来源/模型」；同名模型不会合并。</p>
+      <p className="text-[9.5px] text-jolu-muted">复制「来源/模型」填入调用工具。订阅模型菜单不代表已完成真实调用验收。</p>
       <div className="flex max-h-[50vh] flex-col gap-1 overflow-y-auto">
         {models.map((model) => (
           <div key={model.id} className="flex items-center gap-2 rounded-lg bg-jolu-side px-2.5 py-1.5">
             <span className="truncate text-[10px] text-jolu-text">{model.id}</span>
+            <button type="button" className="shrink-0 text-[9px] text-jolu-on" onClick={() => { void navigator.clipboard.writeText(model.id).then(() => toast.success("模型名已复制"), () => toast.danger("复制失败，请重试")) }}>复制模型名</button>
             <div className="flex-1" />
             <span className={cn("text-[8.5px]", model.status === "connected" ? "text-jolu-muted" : "text-jolu-danger")}>{model.status === "connected" ? model.source : "未连接"}</span>
           </div>

@@ -62,7 +62,17 @@ export interface GatewayStatusDto {
 
 export type GatewayMode = "observe" | "relay"
 
+export interface SourceCapabilityDto {
+  connection_id: string
+  can_serve: boolean
+  state: "ready" | "needs_auth" | "unsupported"
+  reason: string
+}
+
 export const gatewayApi = {
+  sourceCapabilities: () => invoke<SourceCapabilityDto[]>("gateway_source_capabilities"),
+  accessKey: (refresh: boolean) => invoke<string>("gateway_access_key", { refresh }),
+  copyKey: () => invoke<void>("gateway_copy_key"),
   status: () => invoke<GatewayStatusDto>("gateway_status"),
   /** 切换模式；切回 observe 时后端会先还原全部接线 */
   setMode: (mode: GatewayMode, defaultConnection: string | null) =>

@@ -6,8 +6,22 @@
 
 pub mod claude;
 pub mod codex;
+mod codex_stream;
 pub mod direct;
 pub mod gemini;
+pub mod grok;
+pub mod gemini_subscription;
+pub mod workbuddy;
+mod workbuddy_request;
+pub mod zcode;
+pub mod qoder;
+mod qoder_chat;
+mod qoder_cosy;
+mod text_calls;
+pub mod trae;
+pub(crate) mod trae_models;
+mod trae_chat;
+mod trae_stream;
 
 use std::sync::Arc;
 

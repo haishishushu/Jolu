@@ -664,6 +664,7 @@ mod tests {
             user_id: Some("synthetic-id".into()),
             account: None,
             expires_at: Some("2099-01-01T00:00:00Z".into()),
+            machine_id: None,
         };
         assert_eq!(
             Account::from_browser("cn", &session).unwrap().identity(),

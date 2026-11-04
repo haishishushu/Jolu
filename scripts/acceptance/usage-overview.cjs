@@ -15,7 +15,7 @@ assert.ok(['localhost','127.0.0.1'].includes(new URL(origin).hostname))
    const root=ReactDOM.createRoot(document.getElementById('root'));
    const base={tokens:{fresh_input:null,output:null,cache_read:null,cache_write:null,total:null},token_coverage:{known_total:150,known_requests:2,cache_hit_rate:0.5,cache_requests:2},requests:3,failed:0,cache_hit_rate:null,cost:{amount:0,priced_requests:0,requests:3},previous_total:100,trend:{bucket:'2h',points:[]},models:[{platform:'codex',model:'gpt-5',requests:1,tokens:120,cache_hit_rate:0.6,avg_duration_ms:null,cost:null},{platform:'qoder',model:'qfmodel',requests:1,tokens:null,cache_hit_rate:null,avg_duration_ms:null,cost:null}],providers:[],attributed:0,sessions:[]};
    base.trend.points=[0,10,null,35,10].map((value,i)=>({start:Date.UTC(2026,9,26,i*2),end:Date.UTC(2026,9,26,i*2+2),label:i*2+':00',fresh_input:value,output:value,cache_read:value,cache_write:value,total:value===null?null:value*4,requests:1,cost:1}));
-   window.renderOverview=patch=>root.render(React.createElement('div',{className:'flex flex-col gap-4 p-8'},React.createElement(OverviewPanel,{data:{...base,...patch},isToday:true,onDrillBucket:()=>{},onDrillModel:()=>{},onOpenSession:()=>{}})));
+   window.renderOverview=patch=>root.render(React.createElement('div',{className:'flex flex-col gap-4 p-8'},React.createElement(OverviewPanel,{data:{...base,...patch},isToday:true,fx:{currency:'USD',rate:1,asOf:'test',fallback:false,loading:false},onDrillBucket:()=>{},onDrillModel:()=>{},onOpenSession:()=>{}})));
    window.renderOverview({});
   `}))
   await page.goto(origin+'/usage-overview-check')
@@ -43,6 +43,9 @@ assert.ok(['localhost','127.0.0.1'].includes(new URL(origin).hostname))
   await page.evaluate(()=>window.renderOverview({tokens:{fresh_input:0,output:0,cache_read:0,cache_write:0,total:0},token_coverage:{known_total:0,known_requests:3,cache_hit_rate:null,cache_requests:3}}))
   await metric.getByText('总 Token',{exact:true}).waitFor()
   await metric.getByText('0',{exact:true}).waitFor()
+  await page.evaluate(()=>window.renderOverview({cost:{amount:0,priced_requests:0,requests:3,unpriced_no_usage:1,unpriced_partial:2}}))
+  await page.getByText('已计价 0 / 3 次 · 1 次无用量 · 2 次分项不完整 · 不含月费',{exact:true}).waitFor()
+  await page.screenshot({path:path.join(output,'unpriced-reasons.png'),fullPage:true})
   assert.deepEqual(errors,[])
   console.log('PASS: mixed known/unknown total and cache coverage, model ratios, continuous four series across missing points, truthful tooltip, all-unknown and real zero')
  }finally{await browser.close()}

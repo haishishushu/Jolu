@@ -49,6 +49,14 @@ fn verified_bundle(credentials: &Value, profile: &Value, response: &Value) -> Re
     complete(&bundle, token).ok_or_else(|| "Claude 本机授权不完整，请在原工具重新登录后同步".into())
 }
 
+/// 浏览器登录完成时核实临时目录内的账号；不读取原工具当前账号。
+pub(crate) fn prepare_browser(credentials: &Value, profile: &Value) -> Result<Value, String> {
+    let token = nonempty(credentials, "/claudeAiOauth/accessToken").ok_or("Claude 授权不完整")?;
+    nonempty(credentials, "/claudeAiOauth/refreshToken").ok_or("Claude 授权缺少刷新凭据")?;
+    identity(profile).ok_or("Claude 授权缺少账号和组织身份")?;
+    verified_bundle(credentials, profile, &fetch_profile(token)?)
+}
+
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,

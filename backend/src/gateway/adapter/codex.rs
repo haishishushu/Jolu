@@ -1,8 +1,7 @@
-//! Codex 订阅适配器：用本机 `~/.codex/auth.json` 的登录调 ChatGPT 后端。
+//! Codex 订阅适配器：用选中连接的加密授权快照调用 ChatGPT 后端。
 //!
 //! 依据执行文档 §7：
-//! - 凭证**现场重读**，不缓存到进程；`last_refresh` 超过 [`REFRESH_AFTER`] 才刷新，
-//!   刷新后回写 auth.json——回写前比对 mtime，外部（Codex CLI 自己）已改则以外部为准。
+//! - 按 connection_id 读取完整授权，刷新以旧凭据作比较条件，仅写回该连接；不改本机登录文件。
 //! - ChatGPT 后端只接受流式：非流式请求转流式采集，聚合 `response.completed` 携带的
 //!   完整 response 对象返回。
 //! - 后端拒绝的参数（temperature 等）剥掉，被剥清单放 `x-jolu-dropped-params` 响应头
@@ -28,6 +27,35 @@ const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const BACKEND_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 /// Codex CLI 每天刷新一次；跟随该节奏（提前量 4 小时，避免长会话中途过期）。
 const REFRESH_AFTER_SECS: i64 = 20 * 3600;
+
+async fn load_bound_auth_at(deps: &Arc<ProxyDeps>, id: &str, platform: &str, oauth_url: &str) -> Result<CodexAuth, String> {
+    let _guard = crate::gateway::subscription::lock(id).await;
+    let old = {
+        let conn = deps.db.lock().map_err(|_| "无法读取所选账号")?;
+        crate::gateway::subscription::load(&conn, id, platform)?
+    };
+    let mut value = old.bundle.clone();
+    if needs_refresh(&value, chrono::Utc::now()) {
+        let refresh = value.pointer("/tokens/refresh_token").and_then(|v| v.as_str()).ok_or("所选账号授权不完整")?;
+        let fresh = refresh_at(&deps.client, oauth_url, refresh).await.ok_or("所选账号授权刷新失败，请重新登录或稍后重试")?;
+        if fresh.get("access_token").and_then(|v| v.as_str()).is_none_or(|v| v.is_empty()) { return Err("订阅刷新未返回有效凭据".into()); }
+        for key in ["access_token", "refresh_token", "id_token", "account_id"] {
+            if let Some(next) = fresh.get(key) { value["tokens"][key] = next.clone(); }
+        }
+        value["last_refresh"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+        let conn = deps.db.lock().map_err(|_| "无法保存刷新后的授权")?;
+        crate::gateway::subscription::save_refresh(&conn, id, platform, &old, &value)?;
+    }
+    extract_tokens(&value).ok_or_else(|| "所选账号授权格式无效".into())
+}
+
+pub(super) fn chat_usage(usage: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for (source, target) in [("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"), ("total_tokens", "total_tokens"), ("input_tokens_details", "prompt_tokens_details"), ("output_tokens_details", "completion_tokens_details")] {
+        if let Some(value) = usage.get(source) { out.insert(target.into(), value.clone()); }
+    }
+    serde_json::Value::Object(out)
+}
 
 /// ChatGPT 后端会拒绝的请求参数（Responses 语义之外的传统采样参数）。
 const DROPPED_PARAMS: &[&str] = &[
@@ -178,12 +206,13 @@ pub(crate) fn chat_to_responses(body: &serde_json::Value) -> Result<serde_json::
         let content = message
             .get("content")
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
+            .ok_or("Chat 入口当前仅支持字符串文本，请用 Responses 发送图片等内容")?
             .to_string();
         match role {
             "system" | "developer" => instructions.push(content),
             "assistant" => input.push(serde_json::json!({"role": "assistant", "content": content})),
-            _ => input.push(serde_json::json!({"role": "user", "content": content})),
+            "user" => input.push(serde_json::json!({"role": "user", "content": content})),
+            _ => return Err("Chat 消息角色不受支持".into()),
         }
     }
     let mut request = serde_json::json!({"model": body.get("model").cloned().unwrap_or_default(), "input": input});
@@ -217,10 +246,12 @@ fn responses_to_chat(response: &serde_json::Value) -> serde_json::Value {
     let mut chat = serde_json::json!({
         "id": response.get("id").cloned().unwrap_or_default(),
         "object": "chat.completion",
+        "model": response.get("model").cloned().unwrap_or_default(),
+        "created": response.get("created_at").cloned().unwrap_or_else(|| serde_json::json!(chrono::Utc::now().timestamp())),
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
     });
     if let Some(usage) = response.get("usage") {
-        chat["usage"] = usage.clone();
+        chat["usage"] = chat_usage(usage);
     }
     chat
 }
@@ -244,18 +275,22 @@ pub(crate) async fn forward_at(
     backend_url: &str,
     auth_dir: Option<&Path>,
 ) -> Response {
-    let Some(auth) = load_auth_at(&deps.client, auth_dir, OAUTH_TOKEN_URL).await else {
-        return crate::gateway::wire::error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "本机没有可用的 Codex 登录：请先在 Codex CLI 完成 login，再回到网关重试",
-        );
+    let started = std::time::Instant::now();
+    let loaded = if cfg!(test) && auth_dir.is_some() {
+        load_auth_at(&deps.client, auth_dir, OAUTH_TOKEN_URL).await.ok_or_else(|| "测试授权不存在".to_string())
+    } else {
+        load_bound_auth_at(&deps, &entry.connection_id, &entry.platform, OAUTH_TOKEN_URL).await
+    };
+    let auth = match loaded {
+        Ok(auth) => auth,
+        Err(reason) => return crate::gateway::wire::error_response(StatusCode::UNAUTHORIZED, &reason),
     };
     let caller_wants_stream = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
-    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+    let mut parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
             return crate::gateway::wire::error_response(
@@ -264,6 +299,11 @@ pub(crate) async fn forward_at(
             );
         }
     };
+    if let Some(model) = parsed.get("model").and_then(|v| v.as_str()) {
+        if let Some((_, upstream)) = crate::gateway::route::split_model_id(model) {
+            parsed["model"] = serde_json::json!(upstream);
+        }
+    }
     let (request_body, dropped) = match caller {
         // Responses 入口：直接在原请求上剥参数并强制流式
         CallerProtocol::Responses => sanitize_request(&parsed),
@@ -331,42 +371,40 @@ pub(crate) async fn forward_at(
             builder = builder.header("x-jolu-dropped-params", dropped.join(","));
         }
         builder = builder.header("x-jolu-gateway", entry.slug.as_str());
+        let usage_deps = deps.clone();
+        let usage_entry = entry.clone();
+        let recorded = super::codex_stream::observe_completed(upstream.bytes_stream(), move |response| {
+            crate::gateway::subscription::record_usage(&usage_deps, &usage_entry, response, started.elapsed().as_millis() as i64);
+        });
+        let body = if caller == CallerProtocol::Chat {
+            let model = parsed.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            Body::from_stream(super::codex_stream::chat_stream(recorded, model))
+        } else { Body::from_stream(recorded) };
         return builder
-            .body(Body::from_stream(upstream.bytes_stream()))
+            .body(body)
             .unwrap_or_else(|error| {
                 crate::gateway::wire::error_response(StatusCode::BAD_GATEWAY, &format!("响应构造失败：{error}"))
             });
     }
 
     // 非流式：采集 SSE 到 response.completed，取事件携带的完整 response 对象
-    let mut collected: Vec<u8> = Vec::new();
+    let mut decoder = super::codex_stream::Decoder::default();
     let mut stream = upstream.bytes_stream();
     use futures_util::StreamExt;
     let mut completed: Option<serde_json::Value> = None;
     while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return crate::gateway::wire::error_response(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("Codex 订阅响应中断：{error}"),
-                );
-            }
+        let events = match chunk.map_err(|_| "上游响应中断".to_string()).and_then(|bytes| decoder.feed(&bytes)) {
+            Ok(events) => events,
+            Err(_) => return crate::gateway::wire::error_response(StatusCode::BAD_GATEWAY, "Codex 响应中断或格式无效"),
         };
-        collected.extend_from_slice(&chunk);
-        // SSE 事件以空行分隔；只在缓冲里找 completed 行，避免全量解析
-        let text = String::from_utf8_lossy(&collected);
-        for event in text.split("\n\n") {
-            let Some(data) = event.strip_prefix("data: ") else { continue };
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-                if value.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
-                    completed = value.get("response").cloned();
-                }
+        for value in events {
+            match value.get("type").and_then(|v| v.as_str()) {
+                Some("response.completed") => completed = value.get("response").cloned(),
+                Some("response.failed" | "response.incomplete" | "error") => return crate::gateway::wire::error_response(StatusCode::BAD_GATEWAY, "Codex 未能完成本次生成，请重试"),
+                _ => {},
             }
         }
-        if completed.is_some() {
-            break;
-        }
+        if completed.is_some() { break; }
     }
     let Some(response_value) = completed else {
         return crate::gateway::wire::error_response(
@@ -374,6 +412,7 @@ pub(crate) async fn forward_at(
             "Codex 订阅流式响应未包含完成事件；请重试或改用流式请求",
         );
     };
+    crate::gateway::subscription::record_usage(&deps, entry, &response_value, started.elapsed().as_millis() as i64);
     let out_body = match caller {
         CallerProtocol::Chat => responses_to_chat(&response_value),
         _ => response_value,
@@ -394,6 +433,79 @@ pub(crate) async fn forward_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn selected_codex_auth_refreshes_only_its_connection_once() {
+        let deps = crate::proxy::test_support::bare_deps();
+        {
+            let conn = deps.db.lock().unwrap();
+            let mut a = crate::gateway::subscription::tests::codex_bundle("a-old", "account-a");
+            a["last_refresh"] = serde_json::json!("2000-01-01T00:00:00Z");
+            crate::gateway::subscription::tests::insert(&conn, "a", "codex", "a-old", &a);
+            crate::gateway::subscription::tests::insert(&conn, "b", "codex", "b-old", &crate::gateway::subscription::tests::codex_bundle("b-old", "account-b"));
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            assert!(request.contains("refresh-account-a"));
+            assert!(!request.contains("refresh-account-b"));
+            write_response(&mut socket, "HTTP/1.1 200 OK", &[("Content-Type", "application/json")], r#"{"access_token":"a-new","refresh_token":"a-next"}"#).await;
+        });
+        let (first, second) = tokio::join!(load_bound_auth_at(&deps, "a", "codex", &url), load_bound_auth_at(&deps, "a", "codex", &url));
+        assert_eq!(first.unwrap().access_token, "a-new");
+        assert_eq!(second.unwrap().access_token, "a-new");
+        server.await.unwrap();
+        let conn = deps.db.lock().unwrap();
+        assert_eq!(crate::gateway::subscription::load(&conn, "b", "codex").unwrap().secret, "b-old");
+        assert_eq!(crate::gateway::subscription::load(&conn, "a", "codex").unwrap().secret, "a-new");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn selected_codex_http_request_uses_bound_account_and_unprefixed_model() {
+        let deps = crate::proxy::test_support::bare_deps();
+        {
+            let conn = deps.db.lock().unwrap();
+            for id in ["a", "b"] {
+                crate::gateway::subscription::tests::insert(&conn, id, "codex", id, &crate::gateway::subscription::tests::codex_bundle(id, &format!("account-{id}")));
+            }
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/responses", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            assert!(request.contains("Bearer a"));
+            assert!(request.contains("chatgpt-account-id: account-a"));
+            assert!(request.contains("\"model\":\"model-a\""));
+            assert!(!request.contains("source/model-a"));
+            write_response(&mut socket, "HTTP/1.1 200 OK", &[("Content-Type", "text/event-stream")], "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"model-a\",\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\r\n\r\n").await;
+        });
+        let selected = PoolEntry { connection_id:"a".into(),slug:"source".into(),name:"A".into(),platform:"codex".into(),kind:"auth".into(),protocol:"openai".into(),base_url:None,secret:None,account_fp:None,model:None,status:"connected".into() };
+        let body = axum::body::Bytes::from_static(br#"{"model":"source/model-a","messages":[{"role":"user","content":"hi"}]}"#);
+        let response = forward_at(deps.clone(), &selected, CallerProtocol::Chat, body, &url, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap()).unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"], "ok");
+        let conn = deps.db.lock().unwrap();
+        let (account, known): (String, i64) = conn.query_row("SELECT connection_id,total_known FROM requests WHERE source='gateway-subscription'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(account, "a");
+        assert_eq!(known, 0, "上游没给用量不能记为零用量");
+        drop(conn);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn chat_rejects_unsupported_content_instead_of_sending_empty_text() {
+        assert!(chat_to_responses(&serde_json::json!({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"test"}}]}]})).is_err());
+        let out = responses_to_chat(&serde_json::json!({"id":"r","model":"m","output":[],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}));
+        assert_eq!(out["usage"]["prompt_tokens"], 5);
+        assert_eq!(out["usage"]["completion_tokens"], 3);
+        assert_eq!(out["model"], "m");
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn temp_auth_dir(last_refresh: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -424,8 +536,8 @@ mod tests {
             let Some(split) = text.find("\r\n\r\n") else { continue };
             let length = text[..split]
                 .lines()
-                .find_map(|l| l.split_once(':'))
-                .filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
                 .and_then(|(_, v)| v.trim().parse::<usize>().ok())
                 .unwrap_or(0);
             if raw.len() >= split + 4 + length { break; }
@@ -497,7 +609,7 @@ mod tests {
         });
         let chat = responses_to_chat(&response);
         assert_eq!(chat["choices"][0]["message"]["content"], "你好");
-        assert_eq!(chat["usage"]["output_tokens"], 5);
+        assert_eq!(chat["usage"]["completion_tokens"], 5);
         assert_eq!(chat["object"], "chat.completion");
     }
 
@@ -607,7 +719,7 @@ mod tests {
         let text = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024).await.unwrap();
         let chat: serde_json::Value = serde_json::from_slice(&text).unwrap();
         assert_eq!(chat["choices"][0]["message"]["content"], "你好");
-        assert_eq!(chat["usage"]["output_tokens"], 2);
+        assert_eq!(chat["usage"]["completion_tokens"], 2);
         server.await.unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }

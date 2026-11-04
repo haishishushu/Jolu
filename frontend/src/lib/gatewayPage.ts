@@ -32,11 +32,11 @@ export function gatewayRunLine(status: GatewayStatusDto | null): StatusLine {
   if (!status) return { text: "读取中…", tone: "muted" }
   if (status.mode === "relay") {
     return status.enabled
-      ? { text: `网关运行中 · 127.0.0.1:${status.port}`, tone: "on" }
-      : { text: `网关模式已选，但监听未启动`, tone: "danger" }
+      ? { text: "模型转发已开启", tone: "on" }
+      : { text: "模型转发未启动，请重新开启", tone: "danger" }
   }
-  if (status.mode === "observe") return { text: "观测模式：只记录，不接管请求", tone: "muted" }
-  return { text: `未知模式「${status.mode}」，按观测处理`, tone: "danger" }
+  if (status.mode === "observe") return { text: "未开启模型转发", tone: "muted" }
+  return { text: "暂时无法确认运行状态，请刷新", tone: "danger" }
 }
 
 /** 某个工具的接线摘要：已接入 / 未接入 / 无法接入（附原因）。 */
@@ -73,8 +73,7 @@ export function circuitText(status: GatewayStatusDto | null): string {
   return status.auto_escape ? base : `${base}（当前已关闭自动逃生，只能手动切回）`
 }
 
-/** 连接是否可加入模型池：API 连接与 claude/codex 订阅可，其他订阅不可（与后端 set_serve 一致）。 */
-export function canServe(platform: string, kind: string): boolean {
-  if (kind === "api") return true
-  return kind === "auth" && (platform === "claude" || platform === "codex")
+/** 来源选择不等于调用就绪；授权与适配状态单独展示，不能把开关永久锁死。 */
+export function canToggleSource(_serving: boolean, busy: boolean, _capability?: { can_serve: boolean }): boolean {
+  return !busy
 }

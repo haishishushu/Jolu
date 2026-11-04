@@ -30,8 +30,11 @@ impl Credential {
             Self::Trae { session, .. } => Some((session.user_id.as_str(), None)),
             Self::Grok { session } => Some((session.user_id.as_str(), None)),
             Self::Zcode { session } => Some((session.user_id.as_str(), None)),
+            Self::Cli { session } if session.platform == "claude" => session.credentials.pointer("/oauthAccount/accountUuid").and_then(serde_json::Value::as_str)
+                .map(|id| (id, session.credentials.pointer("/oauthAccount/organizationUuid").and_then(serde_json::Value::as_str)))
+                .or_else(|| session.account.as_deref().map(|id| (id,None))),
             Self::Cli { session } => session.credentials.pointer("/tokens/account_id").and_then(serde_json::Value::as_str)
-                .or(session.account.as_deref()).map(|id| (id, None)),
+                .map(|id| (id, session.account.as_deref())).or_else(|| session.account.as_deref().map(|id| (id,None))),
         }.filter(|(id, _)| !id.trim().is_empty())
     }
     fn official_account(&self) -> Option<String> {
@@ -53,6 +56,12 @@ impl Credential {
             let digest = format!("{:x}", Sha256::digest(source));
             Some(format!("账号 · {}", &digest[..16]))
         })
+    }
+
+    pub(crate) fn fingerprint(&self) -> Option<String> {
+        let identity = self.identity()?;
+        let source = serde_json::to_vec(&("jolu-subscription-account-v1", self.platform(), self.edition(), identity)).ok()?;
+        Some(format!("{:x}", Sha256::digest(source)))
     }
     /// 身份必须由本次官方请求核实；额度能力、权限和临时失败不代表登录失效。
     fn authorize(&self) -> Result<QuotaState, String> {
@@ -114,6 +123,26 @@ pub(crate) fn load(id: &str, platform: &str, sealed: &str) -> Result<Credential,
     Ok(credential)
 }
 
+/// 每个密文绑定连接 ID；刷新不能跨平台、地区、企业或账号。
+pub(crate) fn seal(id: &str, credential: &Credential) -> Result<String, String> {
+    let plain = serde_json::to_vec(credential).map_err(|_| "无法保存浏览器授权")?;
+    let protected = crate::auth_snapshot::protect(&plain, id.as_bytes(), true)?;
+    Ok(format!("{PREFIX}{}", STANDARD.encode(protected)))
+}
+
+pub(crate) fn refresh_bound(conn: &Connection, id: &str, platform: &str, old: &str, next: &Credential) -> Result<(), String> {
+    let previous = load(id, platform, old)?;
+    if next.platform() != platform || previous.edition() != next.edition()
+        || previous.identity().is_none() || previous.identity() != next.identity() {
+        return Err("刷新后的账号或地区发生变化，已停止保存".into());
+    }
+    let sealed = seal(id, next)?;
+    let changed = conn.execute("UPDATE connections SET secret=?3,masked='已加密保存' WHERE id=?1 AND platform=?2 AND kind='auth' AND secret=?4",
+        params![id, platform, sealed, old]).map_err(|_| "无法保存刷新后的授权")?;
+    if changed != 1 { return Err("账号授权已被更新，旧请求不会覆盖新登录".into()); }
+    Ok(())
+}
+
 fn save(conn: &Connection, id: &str, _name: &str, credential: &Credential, detection: &LoginDetection) -> Result<String, String> {
     let account = credential.official_account().or_else(|| detection.account.as_deref().and_then(safe_account))
         .or_else(|| credential.account_label()).ok_or("官方未返回可识别账号，请重新授权")?;
@@ -141,7 +170,7 @@ fn save(conn: &Connection, id: &str, _name: &str, credential: &Credential, detec
             params![id,sealed,account]).map_err(|_| "更新浏览器账号失败")?;
         crate::connections::refresh_account_fp(conn, id).map_err(|_| "更新浏览器账号标识失败")?;
     } else {
-        let fp = crate::gateway::identity::account_fingerprint(platform, "auth", Some(&sealed));
+        let fp = credential.fingerprint();
         let slug = crate::gateway::identity::allocate_slug(conn, id, platform, &name, fp.as_deref())
             .map_err(|_| "分配浏览器账号标识失败")?;
         conn.execute("INSERT INTO connections(id,platform,kind,name,label,secret,masked,status,created_ms,account_email,slug,account_fp) VALUES(?1,?2,'auth',?3,'浏览器授权',?4,'已加密保存','connected',?5,?6,?7,?8)",
@@ -228,7 +257,7 @@ fn ready(attempt: &Shared, credential: Credential, state: QuotaState) {
 }
 
 enum PendingLogin {
-    Qoder{edition:String,nonce:String,verifier:String,login_url:String},
+    Qoder{edition:String,nonce:String,verifier:String,machine:String,login_url:String},
     Workbuddy{edition:String,pending:crate::workbuddy_browser_auth::PendingLogin},
     Trae{edition:String,pending:crate::trae_browser_auth::Pending},
     Grok(crate::grok_browser_auth::Pending),
@@ -242,7 +271,7 @@ impl PendingLogin {
                 let uuid=||->Result<String,String>{let mut value=random_hex(16)?;value.replace_range(12..13,"4");value.replace_range(16..17,"8");Ok(format!("{}-{}-{}-{}-{}",&value[..8],&value[8..12],&value[12..16],&value[16..20],&value[20..]))};
                 let (nonce,verifier,machine)=(uuid()?,random_hex(32)?,uuid()?);
                 let login_url=crate::qoder_desktop::login_url(edition,&nonce,&verifier,&machine)?;
-                Ok(Self::Qoder{edition:edition.into(),nonce,verifier,login_url})
+                Ok(Self::Qoder{edition:edition.into(),nonce,verifier,machine,login_url})
             }
             "workbuddy"=>Ok(Self::Workbuddy{edition:edition.into(),pending:crate::workbuddy_browser_auth::begin(edition)?}),
             "trae"=>Ok(Self::Trae{edition:edition.into(),pending:crate::trae_browser_auth::begin(edition)?}),
@@ -258,7 +287,7 @@ impl PendingLogin {
     }}
     fn user_code(&self)->Option<&str>{match self {Self::Grok(p)=>p.user_code.as_deref(),Self::Zcode(p)=>p.user_code.as_deref(),_=>None}}
     fn poll(&mut self)->Result<Option<Credential>,String>{match self {
-        Self::Qoder{edition,nonce,verifier,..}=>Ok(crate::qoder_desktop::poll_login(edition,nonce,verifier)?.map(|session|Credential::Qoder{edition:edition.clone(),session})),
+        Self::Qoder{edition,nonce,verifier,machine,..}=>Ok(crate::qoder_desktop::poll_login(edition,nonce,verifier,machine)?.map(|session|Credential::Qoder{edition:edition.clone(),session})),
         Self::Workbuddy{edition,pending}=>Ok(crate::workbuddy_browser_auth::poll(pending)?.map(|session|Credential::Workbuddy{edition:edition.clone(),session})),
         Self::Trae{edition,pending}=>Ok(crate::trae_browser_auth::poll(pending)?.map(|session|Credential::Trae{edition:edition.clone(),session})),
         Self::Grok(p)=>Ok(crate::grok_browser_auth::poll(p)?.map(|session|Credential::Grok{session})),
@@ -368,6 +397,43 @@ mod tests {
             token:"synthetic-private-token".into(),domain:"www.workbuddy.cn".into(),user_id:"synthetic-user".into(),enterprise_id:None,email:None,expires_at:None,
         }}
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn all_subscription_credentials_reject_cross_account_region_and_stale_refresh() {
+        let deps = crate::proxy::test_support::bare_deps();
+        let conn = deps.db.lock().unwrap();
+        let fixtures = [
+            serde_json::json!({"provider":"workbuddy","edition":"cn","session":{"token":"fixture","domain":"www.workbuddy.cn","user_id":"a"}}),
+            serde_json::json!({"provider":"workbuddy","edition":"ai","session":{"token":"fixture","domain":"www.workbuddy.ai","user_id":"a"}}),
+            serde_json::json!({"provider":"qoder","edition":"cn","session":{"token":"fixture","user_id":"a"}}),
+            serde_json::json!({"provider":"qoder","edition":"global","session":{"token":"fixture","user_id":"a"}}),
+            serde_json::json!({"provider":"trae","edition":"cn","session":{"token":"fixture","host":"https://api.trae.cn","expires_at":"2100-01-01T00:00:00Z","user_id":"a"}}),
+            serde_json::json!({"provider":"trae","edition":"global","session":{"token":"fixture","host":"https://growsg-normal.trae.ai","expires_at":"2100-01-01T00:00:00Z","user_id":"a"}}),
+            serde_json::json!({"provider":"grok","session":{"access_token":"fixture","user_id":"a"}}),
+            serde_json::json!({"provider":"zcode","session":{"access_token":"fixture","zcode_token":"fixture-session","user_id":"a"}}),
+            serde_json::json!({"provider":"cli","session":{"platform":"gemini","credentials":{"access_token":"fixture"},"account":"a@example.invalid"}}),
+        ];
+        for (index, value) in fixtures.iter().enumerate() {
+            let original: Credential = serde_json::from_value(value.clone()).unwrap();
+            let id = format!("fixture-{index}");
+            let sealed = seal(&id, &original).unwrap();
+            conn.execute("INSERT INTO connections(id,platform,kind,name,secret,created_ms,slug) VALUES(?1,?2,'auth',?1,?3,1,?1)",params![id,original.platform(),sealed]).unwrap();
+            assert!(load("other",original.platform(),&sealed).is_err());
+            assert!(load(&id,"other-platform",&sealed).is_err());
+            let mut wrong = value.clone();
+            if wrong["provider"] == "cli" { wrong["session"]["account"] = serde_json::json!("b@example.invalid"); }
+            else { wrong["session"]["user_id"] = serde_json::json!("b"); }
+            let wrong: Credential = serde_json::from_value(wrong).unwrap();
+            assert!(refresh_bound(&conn,&id,original.platform(),&sealed,&wrong).is_err());
+            if value.get("edition").is_some() {
+                let mut wrong = value.clone(); wrong["edition"] = serde_json::json!("other-region");
+                assert!(refresh_bound(&conn,&id,original.platform(),&sealed,&serde_json::from_value(wrong).unwrap()).is_err());
+            }
+            refresh_bound(&conn,&id,original.platform(),&sealed,&original).unwrap();
+            assert!(refresh_bound(&conn,&id,original.platform(),&sealed,&original).is_err());
+        }
+    }
     fn synthetic_attempt() -> Shared {
         Arc::new(Mutex::new(Attempt { started: Instant::now(), cancelled: Arc::new(AtomicBool::new(false)),
             status: Status { state: "waiting", detection: None, message: None }, credential: None }))
@@ -453,7 +519,7 @@ mod tests {
         for original in [
             Credential::Qoder { edition: "cn".into(), session: crate::qoder_desktop::Session {
                 token: "synthetic-token".into(), refresh_token: None, expires_at: None,
-                account: None, user_id: Some("synthetic-user".into()) } },
+                account: None, user_id: Some("synthetic-user".into()), machine_id: None } },
             Credential::Trae { edition: "cn".into(), session: crate::trae_browser_auth::Session {
                 token: "synthetic-token".into(), host: "https://cloudide.bytedance.net".into(), expires_at: "2099-01-01T00:00:00Z".into(),
                 account: None, user_id: "synthetic-user".into() } },

@@ -1,6 +1,7 @@
-//! 价目数据表（**由脚本生成，不要手改**）。
+//! 已纳入产品的价目数据表；变更须核对官方来源与计价规则。
 //!
-//! 生成方式：`node scripts/pricing/sync-price.mjs`（从 sub2api 维护的 LiteLLM 镜像同步）。
+//! 候选同步：`node scripts/pricing/sync-price.mjs --models <精确模型名列表>`。
+//! 脚本从第三方镜像生成 output/pricing 下的候选与复核记录，不自动覆盖本表。
 //! 每条记录带 `source` 指向官方定价页，便于人工复核与追溯。
 //!
 //! 核验日期：2026-11-03。

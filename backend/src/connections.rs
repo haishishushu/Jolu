@@ -1278,7 +1278,7 @@ pub fn set_paused(conn: &Sql, id: &str, paused: bool) -> Result<(), String> {
 
 /// 账号汇聚网关：把连接加入 / 移出模型池。
 /// 只有具备网关服务能力的平台可开启：API Key 平台按 protocol 直通，
-/// claude / codex 的官方订阅走订阅适配器；其余平台的订阅暂无适配器（执行文档 §3.2）。
+/// 来源选择独立于调用就绪；授权及协议由对应适配器在请求时校验。
 /// Tauri 命令 `gateway_set_serve` 在第 11 步接线，先保留公共 API。
 #[allow(dead_code)]
 pub fn set_serve(conn: &Sql, id: &str, enabled: bool) -> Result<(), String> {
@@ -1290,7 +1290,7 @@ pub fn set_serve(conn: &Sql, id: &str, enabled: bool) -> Result<(), String> {
         .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e.to_string()) })
         .map_err(|e: String| e)?;
     let Some((platform, kind, protocol, account_fp)) = row else { return Err("连接不存在".into()); };
-    let capable = kind == "api" || matches!((platform.as_str(), kind.as_str()), ("claude", "auth") | ("codex", "auth"));
+    let capable = kind == "api" || (kind == "auth" && matches!(platform.as_str(), "claude" | "codex" | "gemini" | "grok" | "opencode" | "workbuddy" | "qoder" | "trae" | "zcode"));
     if enabled && !capable {
         return Err(format!("{platform} 的订阅连接暂不支持对外服务"));
     }
@@ -1304,29 +1304,30 @@ pub fn set_serve(conn: &Sql, id: &str, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// 开启服务前的唯一性检查：同一账号同一协议、同平台订阅都只能有一条参与服务。
+/// 开启服务前的唯一性检查：同一账号不能重复接入，不限制同平台的不同账号。
 /// 与数据库部分唯一索引同口径；这里先给出可读的名字，避免用户只看到一个约束错误。
 fn conflict_of_serving(
     conn: &Sql,
     id: &str,
-    platform: &str,
+    _platform: &str,
     kind: &str,
     protocol: Option<&str>,
     account_fp: Option<&str>,
 ) -> Result<(), String> {
     if kind == "auth" {
+        let Some(fp) = account_fp else { return Ok(()); };
         let conflict: Option<String> = conn
             .query_row(
                 "SELECT name FROM connections
-                 WHERE serve_enabled = 1 AND kind = 'auth' AND platform = ?1 AND id != ?2
+                 WHERE serve_enabled = 1 AND kind = 'auth' AND account_fp = ?1 AND id != ?2
                  LIMIT 1",
-                params![platform, id],
+                params![fp, id],
                 |r| r.get(0),
             )
             .optional()
             .map_err(|e| e.to_string())?;
         if let Some(name) = conflict {
-            return Err(format!("同平台只能有一个订阅参与服务：「{name}」已在服务中，请先关闭它"));
+            return Err(format!("此订阅账号已通过「{name}」接入，请使用已有来源或先关闭它"));
         }
         return Ok(());
     }
@@ -1359,7 +1360,9 @@ pub(crate) fn refresh_account_fp(conn: &Sql, id: &str) -> rusqlite::Result<()> {
         })
         .optional()?;
     let Some((platform, kind, secret)) = row else { return Ok(()); };
-    let fp = crate::gateway::identity::account_fingerprint(&platform, &kind, secret.as_deref());
+    let fp = if kind == "auth" && crate::provider_browser_auth::is_browser(secret.as_deref()) {
+        secret.as_deref().and_then(|secret| crate::provider_browser_auth::load(id,&platform,secret).ok()).and_then(|credential| credential.fingerprint())
+    } else { crate::gateway::identity::account_fingerprint(&platform, &kind, secret.as_deref()) };
     if let Err(error) = conn.execute("UPDATE connections SET account_fp = ?2 WHERE id = ?1", params![id, fp]) {
         let unique = error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation);
         if !unique { return Err(error); }
@@ -1835,10 +1838,16 @@ mod account_email_tests {
         // claude / codex 订阅可开
         let claude_id = add(&db, NewConnection { service: None, platform:"claude".into(), kind:"auth".into(), name:"Claude 官方".into(), secret:Some("synthetic-auth".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
         set_serve(&db, &claude_id, true).unwrap();
-        // 无适配器的平台订阅必须被拒绝
+        // 所有官方订阅都可选择；未就绪状态另行展示，不锁死来源开关。
         let gemini_id = add(&db, NewConnection { service: None, platform:"gemini".into(), kind:"auth".into(), name:"Gemini 订阅".into(), secret:Some("synthetic-auth".into()), base_url:None, model:None, effort:None, context_1m:None, protocol:None }).unwrap();
-        let err = set_serve(&db, &gemini_id, true).unwrap_err();
-        assert!(err.contains("暂不支持"), "{err}");
+        set_serve(&db, &gemini_id, true).unwrap();
+        for platform in ["grok", "opencode", "workbuddy", "qoder", "trae", "zcode"] {
+            db.execute("INSERT INTO connections(id,platform,kind,name,secret,created_ms,slug) VALUES(?1,?1,'auth',?1,'synthetic-only',1,?1)", [platform]).unwrap();
+            set_serve(&db, platform, true).unwrap();
+            let enabled: bool = db.query_row("SELECT serve_enabled FROM connections WHERE id=?1", [platform], |r| r.get(0)).unwrap();
+            assert!(enabled);
+            set_serve(&db, platform, false).unwrap();
+        }
         // 关闭不受能力限制（幂等清理路径）
         set_serve(&db, &gemini_id, false).unwrap();
         // 不存在的连接

@@ -49,8 +49,17 @@ pub(crate) async fn handle(
         deps.db.try_lock().ok().and_then(|conn| route::historical_slug_message(&conn, slug))
     };
     let decision = route::decide(&pool, model_id, None, &history);
+    if let RouteDecision::Direct(entry, _) | RouteDecision::Subscription(entry) = &decision {
+        if !route::source_is_current(&deps, entry) {
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "来源已关闭或配置已变化，请刷新后重试");
+        }
+    }
     let (entry, upstream_model) = match decision {
         RouteDecision::Direct(entry, model) => (entry, model),
+        RouteDecision::Subscription(entry) if entry.platform == "gemini" => {
+            let upstream_model = model_id.split_once('/').map(|(_, model)| model).unwrap_or(model_id);
+            return super::gemini_subscription::forward(deps.clone(), entry, upstream_model, method, body).await;
+        }
         RouteDecision::Subscription(_) => {
             return error_response(StatusCode::BAD_REQUEST, "Gemini 请求只支持 API Key 来源，订阅适配器暂不支持");
         }

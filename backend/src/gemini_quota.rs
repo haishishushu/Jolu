@@ -100,7 +100,7 @@ fn client_from_bundle(dir: &Path) -> Option<(String, String)> {
     })
 }
 
-fn installed_client() -> Option<(String, String)> {
+pub(crate) fn installed_client() -> Option<(String, String)> {
     let prefix = crate::cli_browser_auth::npm_prefix("gemini")?;
     client_from_bundle(&prefix.join("node_modules/@google/gemini-cli/bundle"))
 }

@@ -181,4 +181,7 @@ test("未计价说明区分「全部已计价」与三种未计价原因", async
   })
   assert.match(both, /未收录价目/)
   assert.match(both, /5 次无用量/)
+  const partial = unpricedNote({ requests: 3, priced_requests: 0, unpriced_no_usage: 1, unpriced_partial: 2 })
+  assert.match(partial, /1 次无用量/)
+  assert.match(partial, /2 次分项不完整/)
 })

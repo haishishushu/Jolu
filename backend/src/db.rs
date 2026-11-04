@@ -1063,6 +1063,15 @@ pub fn insert_records(conn: &mut Connection, recs: &[RequestRecord]) -> rusqlite
     Ok(inserted)
 }
 
+/// 网关订阅没有原工具日志可扫描，直接保存无正文的请求统计并绑定所选账号。
+pub(crate) fn insert_gateway_record(conn: &mut Connection, record: &RequestRecord, connection_id: &str, duration_ms: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    insert_records_into(&tx, std::slice::from_ref(record))?;
+    tx.execute("UPDATE requests SET connection_id=?3,duration_ms=?4,status_code=200 WHERE source=?1 AND dedup_key=?2",
+        params![record.source,record.dedup_key,connection_id,duration_ms])?;
+    tx.commit()
+}
+
 /// 单个日志文件的一次扫描提交。请求、标题、生命周期与字节偏移必须同事务成功，
 /// 否则回滚全部内容，下次从原偏移重读，避免“偏移已前进但记录未入库”。
 #[cfg(test)]

@@ -23,7 +23,7 @@ pub(crate) struct PoolEntry {
     pub protocol: String,
     /// 上游 base（无尾斜杠）；auth 连接为 None（订阅适配器自定端点）。
     pub base_url: Option<String>,
-    /// 凭证原值；auth 连接为 None（订阅适配器现场读本机登录）。
+    /// 凭证原值；订阅适配器只按 connection_id 读取所选连接的完整授权。
     pub secret: Option<String>,
     /// 账号指纹；没有凭证的行为 None。
     pub account_fp: Option<String>,
@@ -39,6 +39,40 @@ impl PoolEntry {
             .clone()
             .unwrap_or_else(|| format!("id:{}", self.connection_id))
     }
+}
+
+/// 菜单快照不能授权调用：发出请求前复查来源，关闭、切号或换地址立即生效。
+pub(crate) fn source_is_current(deps: &crate::proxy::ProxyDeps, entry: &PoolEntry) -> bool {
+    let current = deps.db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT serve_enabled, platform, kind, slug, status, account_fp, secret, base_url, protocol
+             FROM connections WHERE id=?1",
+            [&entry.connection_id],
+            |r| {
+                let enabled: bool = r.get(0)?;
+                let platform: String = r.get(1)?;
+                let kind: String = r.get(2)?;
+                let slug: Option<String> = r.get(3)?;
+                let status: String = r.get(4)?;
+                let fingerprint: Option<String> = r.get(5)?;
+                let secret: Option<String> = r.get(6)?;
+                let base: Option<String> = r.get(7)?;
+                let protocol: Option<String> = r.get(8)?;
+                Ok(enabled && platform == entry.platform && kind == entry.kind
+                    && slug.as_deref() == Some(entry.slug.as_str()) && status == entry.status
+                    && fingerprint == entry.account_fp
+                    && (kind != "api" || (secret == entry.secret
+                        && base.map(|s| s.trim().trim_end_matches('/').to_owned()) == entry.base_url
+                        && connections::auth_protocol(&platform, protocol.as_deref()) == entry.protocol)))
+            },
+        ).ok()
+    }).unwrap_or(false);
+    if !current {
+        if let Ok(index) = deps.pool_index() {
+            if let Ok(mut index) = index.lock() { index.refreshed_ms = 0; }
+        }
+    }
+    current
 }
 
 /// slug 索引缓存。

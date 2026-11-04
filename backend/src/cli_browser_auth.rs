@@ -16,13 +16,13 @@ pub(crate) struct Session {
     pub account: Option<String>,
 }
 
-struct Profile {
+pub(crate) struct Profile {
     parent: PathBuf,
     temp: PathBuf,
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 impl Profile {
-    fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         let temp = fs::canonicalize(std::env::temp_dir()).map_err(|_| "无法定位授权临时目录")?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| "无法创建授权临时目录")?.as_nanos();
         let parent = temp.join(format!("jolu-cli-auth-{}-{stamp}", std::process::id()));
@@ -128,7 +128,7 @@ fn command(platform: &str, profile: &Profile) -> Result<Command, String> {
     }
 }
 
-fn configure_environment(command: &mut Command, profile: &Profile) {
+pub(crate) fn configure_environment(command: &mut Command, profile: &Profile) {
     // Only OS/runtime/proxy configuration is inherited. API keys, OAuth overrides and BROWSER
     // cannot silently select another account, endpoint or browser in the isolated login process.
     command.env_clear();
@@ -185,7 +185,9 @@ fn session_from_profile(profile: &Profile, platform: &str) -> Result<Session, St
         "claude" => {
             let credentials = bounded_json(profile, &profile.path.join(".credentials.json"))?;
             if text(&credentials["claudeAiOauth"], "accessToken").is_none() { return Err("Claude 授权未返回订阅访问凭证".into()); }
-            let account = bounded_json(profile, &profile.path.join(".claude.json")).ok().and_then(|value| email(text(&value["oauthAccount"], "emailAddress")));
+            let config = bounded_json(profile, &profile.path.join(".claude.json"))?;
+            let account = email(text(&config["oauthAccount"], "emailAddress"));
+            let credentials = crate::claude_auth::prepare_browser(&credentials, &config)?;
             (credentials, account)
         }
         "codex" | "opencode" => {
@@ -322,7 +324,8 @@ mod tests {
         let profile = Profile::new().unwrap();
         fs::write(profile.path.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"synthetic"}}"#).unwrap();
         fs::write(profile.path.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"synthetic@example.invalid"}}"#).unwrap();
-        assert_eq!(session_from_profile(&profile, "claude").unwrap().account.as_deref(), Some("synthetic@example.invalid"));
+        // 不完整授权必须在联网前拒绝；此处不调用真实身份端点。
+        assert!(session_from_profile(&profile, "claude").is_err());
         fs::write(profile.path.join("jolu-session.json"), r#"{"credentials":{"refresh_token":"synthetic"},"account":"synthetic@example.invalid"}"#).unwrap();
         assert_eq!(session_from_profile(&profile, "gemini").unwrap().account.as_deref(), Some("synthetic@example.invalid"));
         assert!(session_from_profile(&profile, "unsupported").is_err());

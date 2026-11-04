@@ -370,6 +370,7 @@ export function unpricedNote(cost: {
   priced_requests: number
   unpriced_no_price?: string[]
   unpriced_no_usage?: number
+  unpriced_partial?: number
 }): string {
   const total = cost.requests
   const priced = cost.priced_requests
@@ -382,5 +383,6 @@ export function unpricedNote(cost: {
     parts.push(missingModels.length === 1 ? `未收录价目：${missingModels[0]}` : `${missingModels.length} 个模型未收录价目`)
   }
   if (noUsage > 0) parts.push(`${noUsage} 次无用量`)
+  if ((cost.unpriced_partial ?? 0) > 0) parts.push(`${cost.unpriced_partial} 次分项不完整`)
   return `${parts.join(" · ")} · 不含月费`
 }

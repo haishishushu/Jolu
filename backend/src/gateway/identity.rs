@@ -213,17 +213,30 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         tx.commit()?;
     }
 
+    // 订阅已经按连接隔离，撤销旧的“同平台只能启用一个”限制。
+    // 密文会随机变化，去重必须使用解封后的账号/地区身份；不删除账号或历史。
+    conn.execute_batch("DROP INDEX IF EXISTS idx_connections_serve_auth_platform; DROP INDEX IF EXISTS idx_connections_serve_account; DROP INDEX IF EXISTS idx_connections_serve_auth_account;")?;
+    let browser_rows: Vec<(String,String,String)> = {
+        let mut stmt=conn.prepare("SELECT id,platform,secret FROM connections WHERE kind='auth' AND secret LIKE 'jolu-browser:v1:%'")?;
+        let rows=stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (id,platform,secret) in browser_rows {
+        if let Some(fp)=crate::provider_browser_auth::load(&id,&platform,&secret).ok().and_then(|credential|credential.fingerprint()) {
+            conn.execute("UPDATE connections SET account_fp=?2 WHERE id=?1",rusqlite::params![id,fp])?;
+        }
+    }
     dedupe_serving(conn)?;
 
-    // 部分唯一索引：同一账号同一协议只服务一次；同平台订阅只服务一次。
+    // 部分唯一索引：API 按账号和协议去重；订阅按账号去重。
     let indexes = [
         ("idx_connections_serve_account",
          "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_serve_account
           ON connections(account_fp, IFNULL(protocol, ''))
-          WHERE serve_enabled = 1 AND account_fp IS NOT NULL"),
-        ("idx_connections_serve_auth_platform",
-         "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_serve_auth_platform
-          ON connections(platform) WHERE serve_enabled = 1 AND kind = 'auth'"),
+          WHERE serve_enabled = 1 AND kind='api' AND account_fp IS NOT NULL"),
+        ("idx_connections_serve_auth_account",
+         "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_serve_auth_account
+          ON connections(account_fp) WHERE serve_enabled = 1 AND kind = 'auth' AND account_fp IS NOT NULL"),
         // 菜单 id 的前缀必须唯一：重复的 slug 会让两个来源抢同一个 `<slug>/<model>`
         ("idx_connections_slug",
          "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_slug
@@ -303,9 +316,9 @@ fn dedupe_serving(conn: &Connection) -> rusqlite::Result<()> {
     }
     {
         let mut stmt = conn.prepare(
-            "SELECT platform FROM connections
-             WHERE serve_enabled = 1 AND kind = 'auth'
-             GROUP BY platform HAVING COUNT(*) > 1",
+            "SELECT account_fp FROM connections
+             WHERE serve_enabled = 1 AND kind = 'auth' AND account_fp IS NOT NULL
+             GROUP BY account_fp HAVING COUNT(*) > 1",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         for platform in rows {
@@ -332,7 +345,7 @@ fn dedupe_serving(conn: &Connection) -> rusqlite::Result<()> {
             let platform = key.strip_prefix("auth|").unwrap_or(&key);
             let mut stmt = tx.prepare(
                 "SELECT id FROM connections
-                 WHERE serve_enabled = 1 AND kind = 'auth' AND platform = ?1
+                 WHERE serve_enabled = 1 AND kind = 'auth' AND account_fp = ?1
                  ORDER BY created_ms, id",
             )?;
             let collected = stmt.query_map([platform], |r| r.get(0))?
@@ -348,7 +361,7 @@ fn dedupe_serving(conn: &Connection) -> rusqlite::Result<()> {
                 "INSERT INTO migration_log(at_ms, kind, detail) VALUES(?1, 'duplicate_serve', ?2)",
                 rusqlite::params![
                     now_ms(),
-                    format!("kept {}, disabled {loser}（同一账号或同一平台只服务一次，可手动恢复）", ids[0])
+                    format!("kept {}, disabled {loser}（同一账号只服务一次，可手动恢复）", ids[0])
                 ],
             )?;
         }
@@ -485,6 +498,30 @@ mod tests {
         assert_eq!(logged, 1);
         // 部分唯一索引兜底：再开启会失败，除非先关掉另一条
         assert!(conn.execute("UPDATE connections SET serve_enabled = 1 WHERE id = 'c2'", []).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn subscription_migration_keeps_distinct_accounts_and_dedupes_reencrypted_identity() {
+        use crate::provider_browser_auth::{self,Credential};
+        let conn=crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        for (id,user) in [("a","user-a"),("b","user-b"),("c","user-a")] {
+            let credential=Credential::Workbuddy{edition:"cn".into(),session:crate::workbuddy_browser_auth::Session{
+                token:format!("fixture-{id}"),domain:"www.workbuddy.cn".into(),user_id:user.into(),enterprise_id:None,email:None,expires_at:None,
+            }};
+            let sealed=provider_browser_auth::seal(id,&credential).unwrap();
+            conn.execute("INSERT INTO connections(id,platform,kind,name,secret,created_ms,slug,account_fp,serve_enabled) VALUES(?1,'workbuddy','auth',?1,?2,1,?1,?1,1)",rusqlite::params![id,sealed]).unwrap();
+        }
+        migrate(&conn).unwrap();
+        for (id,expected) in [("a",true),("b",true),("c",false)] {
+            let enabled:bool=conn.query_row("SELECT serve_enabled FROM connections WHERE id=?1",[id],|r|r.get(0)).unwrap();
+            assert_eq!(enabled,expected);
+        }
+        assert!(crate::connections::set_serve(&conn,"c",true).unwrap_err().contains("此订阅账号"));
+        migrate(&conn).unwrap();
+        let enabled:i64=conn.query_row("SELECT COUNT(*) FROM connections WHERE serve_enabled=1",[],|r|r.get(0)).unwrap();
+        assert_eq!(enabled,2);
+        let total:i64=conn.query_row("SELECT COUNT(*) FROM connections",[],|r|r.get(0)).unwrap();assert_eq!(total,3);
     }
 
     #[test]

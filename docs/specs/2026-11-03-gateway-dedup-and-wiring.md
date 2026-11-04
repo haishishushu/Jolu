@@ -32,7 +32,7 @@
 | 3 | 存量重复凭据 | 每个 (account_fp, protocol) 只保留一条参与服务，优先最早创建；其余只关闭服务、写 `migration_log`、可一键恢复 | 不删数据，失败可回退 |
 | 4 | 连接名撞保留字 | slug 分配时保留 `route / auto / jolu / group / default`，撞上时改名为 `<slug>-src` | 持久化 slug 上线前没有存量 id 要保护；`~` 等字符在 agent 模型字段里的行为未核对 |
 | 5 | 路由组在菜单里 | 单独成段放在所有来源之后；成员默认不隐藏 | `route/x` 是主动入口，隐藏成员等于变相改 id |
-| 6 | 回环地址上的未知 token | 放行并记 unknown；同时校验 Host、拒绝带 Origin 的浏览器请求 | 本机进程本就能读 `~/.claude`；要防的是浏览器 CSRF / DNS rebinding |
+| 6 | 回环地址上的未知 token | 2026-11-04 调整：开通手动 Key 后拒绝未知 token，保留已登记的一键接线与 Codex 原生 OAuth；Host / Origin 防护保留 | 详见 `docs/verification/2026-11-04-gateway-manual-access.md` |
 | 7 | 接线记录 | 迁到 `agent_wiring` 表，`settings.gateway_wiring` 双写保留一个版本 | pending 日志与 instance 标记在 settings 上做不了 |
 | 8 | 整组接线 | 先不做；以后只做前端批量，逐个调用单个接线接口 | 分组一旦能触发接线，就违反「分组不碰接线」 |
 
@@ -202,7 +202,7 @@ migration_log(id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, kind TEXT NOT NULL
 
 - 只监听 `127.0.0.1`。
 - 网关拒绝带 `Origin` / `Referer` 的请求（浏览器跨站），并校验 `Host` 必须是 `127.0.0.1` / `localhost` / `[::1]`（可带端口），防 DNS rebinding。
-- 未知 token 在回环地址上放行；以后开局域网共享时默认关闭，开启后每台设备一个 token、可吊销，监听地址单独配置。
+- 2026-11-04 更新：开通手动 Key 后，未知 token 不再放行；未开通过的旧安装保留原行为。刷新仅撤销手动 Key，一键接线不受影响。局域网共享仍未实现。
 - 中转模式下端口被占直接报错，不再悄悄改用随机端口（随机端口会让已接线的 agent 全部连不上）。
 - 观测模式保留原来的随机端口回退：它不依赖固定端口，CLI 配置按实际端口写入。
 
@@ -224,7 +224,7 @@ migration_log(id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, kind TEXT NOT NULL
 
 - E4–E10 的**深色版**（目前全部是浅色稿）。
 - 订阅「同平台只能有一个订阅参与服务」的专用文案（目前沿用 E4 的重复提示）。
-- 分组管理页（重命名、删除成员、拖拽排序）本身，以及来源 / Agent 分组的后端命令。
+- 来源 / Agent 分组后端命令及三栏分组、排序交互已实现（见阶段 3）；不再列为后端待办，视觉对照仍单列验收。
 - 路由组（以后）：成环路径、重复成员、跳过原因、全部不可用。
 
 ## 10. 实施顺序与状态
@@ -258,3 +258,9 @@ migration_log(id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, kind TEXT NOT NULL
   Gemini CLI 的流式与工具调用；断开后 `selectedType` 改回原值是否免重登。
 - 中转模式端口占用拒绝启动没有单测（依赖真实监听端口），由 `proxy::start` 的分支校验。
 - 改界面时再按 `AGENTS.md` 用 Pencil 截图对照。
+
+## 2026-11-04 现状补记
+
+- 路由流水已有 `gateway/route_log.rs` 记录与查询、`wire.rs` 写入及 `GatewayView.tsx` 展示；不是只有空态。它不同于阶段 4 尚未实现的多次故障转移尝试记录 `gateway_attempts`。
+- 网关真机预检仅确认 Claude、Codex、Gemini 命令及相关配置路径存在，未验证授权是否有效；没有修改真实工具配置或发送模型请求。§11 的真机缺口仍保留。
+- 暂停来源菜单测试与模型枚举测试复用连接 ID 导致进程缓存串扰；本轮给暂停测试独立 ID，保留原断言和产品行为。

@@ -1719,6 +1719,20 @@ fn gateway_status(app: tauri::AppHandle) -> GatewayStatus {
     }
 }
 
+#[tauri::command]
+fn gateway_access_key(app: tauri::AppHandle, refresh: bool) -> Result<String, String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().map_err(|_| "无法读取网关状态")?;
+    crate::gateway::access::masked(&conn, refresh)
+}
+
+#[tauri::command]
+fn gateway_copy_key(app: tauri::AppHandle) -> Result<(), String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().map_err(|_| "无法读取网关状态")?;
+    crate::gateway::access::copy(&conn)
+}
+
 /// 切换网关模式（observe / relay）。切到 relay 时按当前设置启动监听；
 /// 切回 observe 前先还原全部接线，保证两套模式不交叉占用同一批配置文件。
 #[tauri::command]
@@ -1780,7 +1794,15 @@ fn gateway_set_mode(
 fn gateway_set_serve(app: tauri::AppHandle, connection_id: String, enabled: bool) -> Result<(), String> {
     let state = app.state::<Db>();
     let db = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    // 选择来源和调用就绪分开：允许预先选择订阅，实际请求仍由对应适配器核实授权。
     connections::set_serve(&db, &connection_id, enabled)
+}
+
+#[tauri::command]
+fn gateway_source_capabilities(app: tauri::AppHandle) -> Result<Vec<crate::gateway::subscription::Capability>, String> {
+    let state = app.state::<Db>();
+    let db = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::subscription::capabilities(&db)
 }
 
 /// 接入 / 断开单个工具。
@@ -3210,10 +3232,13 @@ pub fn run() {
             set_proxy,
             proxy_status,
             gateway_status,
+            gateway_access_key,
+            gateway_copy_key,
             fx_rate,
             set_cost_currency,
             gateway_set_mode,
             gateway_set_serve,
+            gateway_source_capabilities,
             gateway_wiring_set,
             gateway_escape,
             gateway_groups,

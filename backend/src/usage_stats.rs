@@ -137,6 +137,8 @@ struct Req {
     cache_read: Option<i64>,
     cache_write: Option<i64>,
     total: Option<i64>,
+    /// 是否存在任一原始用量字段；归一化失败不等于上游未返回用量。
+    has_usage: bool,
     hit_denominator: Option<i64>,
     cost: Option<f64>,
     /// 该次请求命中的单价（每百万 token，USD），用于界面的费用拆解；无价目时为 None
@@ -221,6 +223,7 @@ fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec
             cache_read,
             cache_write,
             total: value(10, 15)?,
+            has_usage: [input, output, cache_read, cache_write, value(10, 15)?, reasoning, tool].iter().any(Option::is_some),
             hit_denominator,
             cost,
             price,
@@ -323,6 +326,7 @@ pub struct CostSummary {
     /// 未计价原因细分：让用户知道是「模型没收录」还是「上游没给用量」
     pub unpriced_no_price: Vec<String>,
     pub unpriced_no_usage: i64,
+    pub unpriced_partial: i64,
 }
 
 fn cost<'a>(reqs: impl IntoIterator<Item = &'a Req>) -> CostSummary {
@@ -332,6 +336,7 @@ fn cost<'a>(reqs: impl IntoIterator<Item = &'a Req>) -> CostSummary {
         requests: 0,
         unpriced_no_price: Vec::new(),
         unpriced_no_usage: 0,
+        unpriced_partial: 0,
     };
     for r in reqs {
         out.requests += 1;
@@ -348,8 +353,8 @@ fn cost<'a>(reqs: impl IntoIterator<Item = &'a Req>) -> CostSummary {
                     out.unpriced_no_price.push(key);
                 }
             }
-            (_, None) => out.unpriced_no_usage += 1,
-            _ => out.unpriced_no_usage += 1,
+            _ if !r.has_usage => out.unpriced_no_usage += 1,
+            _ => out.unpriced_partial += 1,
         }
     }
     out.unpriced_no_price.sort();
@@ -842,6 +847,25 @@ mod tests {
 
     fn filter(start: i64, end: i64) -> StatsFilter {
         StatsFilter { start, end, ..Default::default() }
+    }
+
+    #[test]
+    fn unpriced_reasons_separate_absent_usage_from_partial_fields() {
+        let base = local_ms(NaiveDate::from_ymd_opt(2026, 10, 21).unwrap());
+        let (conn, path) = seeded(&[
+            rec("claude", "missing-price", base + 1, "unknown-model", [Some(1); 5], None),
+            rec("claude", "absent", base + 2, "claude-sonnet-4-5", [None; 5], None),
+            rec("codex", "partial", base + 3, "gpt-5", [Some(100), None, None, None, None], None),
+            rec("claude", "total-only", base + 4, "claude-sonnet-4-5", [None, None, None, None, Some(100)], None),
+            rec("claude", "zero", base + 5, "claude-sonnet-4-5", [Some(0); 5], None),
+        ]);
+        let summary = serde_json::to_value(overview(&conn, &filter(base, base + 100)).unwrap().cost).unwrap();
+        assert_eq!(summary["unpriced_no_usage"], 1);
+        assert_eq!(summary["unpriced_partial"], 2);
+        assert_eq!(summary["unpriced_no_price"], serde_json::json!(["claude:unknown-model"]));
+        assert_eq!(summary["priced_requests"], 1, "真实零仍应计价");
+        drop(conn);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

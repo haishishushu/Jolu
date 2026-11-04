@@ -1,16 +1,9 @@
 //! Claude 订阅适配器：驱动真实本机 `claude` 二进制（执行文档 §6）。
 //!
-//! 依据：Anthropic 把第三方系统提示词判为第三方流量，注入 OAuth 的转发有风控风险——
-//! 所以不经 HTTP 转发，而是 spawn 真实的 `claude -p --output-format stream-json`，
-//! 用它自己的登录完成生成；Jolu 不读取、不刷新、不持有订阅令牌。
-//!
-//! 范围：
-//! - 纯文本对话直通：messages 文本拼成 prompt，claude 输出转回 Anthropic 响应
-//! - 工具调用显式拒绝：MCP 桥（`gateway/bridge.rs`）已就绪，闭环交互待真机验证后开放
-//! - 凭证检查：只确认本机存在 Claude 登录（`creds::read_local_pair`），令牌内容不进本模块
-//! - **会话延续**：`claude -p` 是非交互一次性进程，无法常驻复用；延续靠 `--resume <session_id>`
-//!   ——首轮拿到 `system.init` 的 session_id 后按会话键记住，后续轮次带上它恢复同一场会话
-//!   （prompt cache 因此可命中）。会话表 LRU 上限 [`SESSION_CAP`]，空闲超 [`SESSION_IDLE`] 即丢弃。
+//! 使用选中连接的完整授权创建一次性配置，认证与 endpoint 覆盖环境不继承。
+//! 当前提供 Anthropic Messages 非流式文本桥接；流式、图片和工具调用明确拒绝。
+//! 每次提供完整对话；生产请求不恢复原工具会话、不改原工具登录。
+//! 测试可注入假程序，验证隔离身份、环境与兼容行为。
 
 use std::sync::Arc;
 
@@ -28,11 +21,21 @@ const TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 struct Turn {
     prompt: String,
     model: String,
+    system: Option<String>,
+    max_tokens: Option<u64>,
 }
 
 /// 从 Anthropic 请求体提取对话文本与模型名。
 /// 任何非文本内容（图片 / 工具块）都会导致显式拒绝——诚实的边界好过静默丢内容。
 fn parse_turn(body: &serde_json::Value) -> Result<Turn, String> {
+    for field in ["temperature", "top_p", "top_k", "stop_sequences", "thinking", "output_config", "tool_choice"] {
+        if body.get(field).is_some_and(|v| !v.is_null()) {
+            return Err(format!("Claude 订阅文本桥接暂不支持 {field}，请移除该选项"));
+        }
+    }
+    if body.get("stream").and_then(|v| v.as_bool()) == Some(true) {
+        return Err("Claude 订阅当前仅支持非流式文本，请设置 stream=false".into());
+    }
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string();
     if body.get("tools").and_then(|t| t.as_array()).is_some_and(|t| !t.is_empty()) {
         return Err("当前版本 Claude 订阅经网关仅支持纯文本对话；工具调用桥接已在网关就绪，待真机验证后开放".into());
@@ -42,8 +45,21 @@ fn parse_turn(body: &serde_json::Value) -> Result<Turn, String> {
         .and_then(|m| m.as_array())
         .ok_or("缺少 messages 字段")?;
     let mut lines: Vec<String> = Vec::new();
+    let mut system_prompt = None;
+    if let Some(system) = body.get("system") {
+        let text = match system {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Array(blocks) => blocks.iter().map(|b| {
+                if b.get("type").and_then(|v| v.as_str()) != Some("text") { return Err("system 仅支持文本".to_string()); }
+                b.get("text").and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| "system 文本无效".to_string())
+            }).collect::<Result<Vec<_>, _>>()?.join("\n"),
+            _ => return Err("system 仅支持文本".into()),
+        };
+        system_prompt = Some(text);
+    }
     for message in messages {
         let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+        if !matches!(role, "user" | "assistant") { return Err("Messages 只支持 user / assistant 角色，系统提示词请放入 system".into()); }
         match message.get("content") {
             Some(serde_json::Value::String(text)) => {
                 lines.push(format!("{role}: {text}"));
@@ -69,7 +85,11 @@ fn parse_turn(body: &serde_json::Value) -> Result<Turn, String> {
     if lines.is_empty() {
         return Err("对话内容为空".into());
     }
-    Ok(Turn { prompt: lines.join("\n\n"), model })
+    let max_tokens = match body.get("max_tokens") {
+        None => None,
+        Some(value) => Some(value.as_u64().filter(|n| *n > 0 && *n <= u32::MAX as u64).ok_or("max_tokens 必须是正整数")?),
+    };
+    Ok(Turn { prompt: lines.join("\n\n"), model, system: system_prompt, max_tokens })
 }
 
 /// stream-json 事件流聚合出的结果。
@@ -78,6 +98,8 @@ struct TurnOutput {
     session_id: Option<String>,
     texts: Vec<String>,
     final_text: Option<String>,
+    failed: bool,
+    usage: Option<serde_json::Value>,
 }
 
 /// 网关会话键 → claude 的 session_id（用于 `--resume`）。
@@ -157,7 +179,10 @@ fn fold_event(output: &mut TurnOutput, line: &str) {
             }
         }
         Some("result") => {
+            output.failed = value.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+                || value.get("subtype").and_then(|v| v.as_str()).is_some_and(|v| v.starts_with("error"));
             output.final_text = value.get("result").and_then(|r| r.as_str()).map(str::to_string);
+            output.usage = value.get("usage").filter(|v| v.is_object()).cloned();
         }
         _ => {}
     }
@@ -195,21 +220,23 @@ pub(crate) async fn forward_at(
     command: Option<Vec<String>>,
     skip_auth_check: bool,
 ) -> Response {
-    if !skip_auth_check {
-        if crate::validation::isolated() {
-            return crate::gateway::wire::error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "隔离环境不读取本机 Claude 登录",
-            );
+    // 生产请求绝不读取当前 CLI 登录，测试只有显式注入假程序才能跳过授权。
+    let isolated = !(cfg!(test) && skip_auth_check && command.is_some());
+    let _account_guard = if isolated { Some(crate::gateway::subscription::lock(&entry.connection_id).await) } else { None };
+    let bound = if isolated {
+        let loaded = deps.db.lock().map_err(|_| "网关状态暂不可用".to_string())
+            .and_then(|conn| crate::gateway::subscription::load(&conn, &entry.connection_id, "claude"));
+        match loaded {
+            Ok(value) => Some(value),
+            Err(reason) => return crate::gateway::wire::error_response(StatusCode::UNAUTHORIZED, &reason),
         }
-        if crate::creds::read_local_pair("claude", "auth").is_none() {
-            return crate::gateway::wire::error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "本机没有可用的 Claude 登录：请先在 Claude Code 完成 login，再回到网关重试",
-            );
-        }
-    }
-
+    } else { None };
+    let profile = match bound.as_ref().map(prepare_profile).transpose() {
+        Ok(profile) => profile,
+        Err(reason) => return crate::gateway::wire::error_response(StatusCode::SERVICE_UNAVAILABLE, &reason),
+    };
+    let scoped_session = format!("{}:{}:{session}", entry.connection_id.len(), entry.connection_id);
+    let session = scoped_session.as_str();
     let started = std::time::Instant::now();
     let parsed: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
@@ -225,36 +252,37 @@ pub(crate) async fn forward_at(
     let model = crate::gateway::route::split_model_id(&turn.model).map(|(_, rest)| rest.to_string()).unwrap_or(turn.model);
 
     // 会话延续：本轮若能 resume 上一轮的 session_id，就复用同一场对话（prompt cache 可命中）
-    let resume = deps
+    let resume = (!isolated).then_some(()).and_then(|_| deps
         .claude_sessions
         .as_ref()
-        .and_then(|table| table.lock().ok().and_then(|mut guard| guard.resume_for(session)));
+        .and_then(|table| table.lock().ok().and_then(|mut guard| guard.resume_for(session))));
 
-    let args = program_args(command.clone(), &model);
-    let raw = match run_turn(&deps, &args, &turn.prompt, resume.as_deref()).await {
-        Ok(raw) => raw,
+    let mut args = program_args(command.clone(), &model);
+    if let Some(system) = &turn.system { args.extend(["--system-prompt".into(), system.clone()]); }
+    let raw_result = match run_turn(&deps, &args, &turn.prompt, resume.as_deref(), profile.as_ref(), turn.max_tokens).await {
+        Ok(raw) => Ok(raw),
         Err(failure) => {
-            // resume 失败（会话过期 / daemon 侧丢失）：丢弃记忆，本轮当新会话重来一次
             if resume.is_some() {
                 if let Some(table) = deps.claude_sessions.as_ref() {
-                    if let Ok(mut guard) = table.lock() {
-                        guard.forget(session);
-                    }
+                    if let Ok(mut guard) = table.lock() { guard.forget(session); }
                 }
-                match run_turn(&deps, &args, &turn.prompt, None).await {
-                    Ok(raw) => raw,
-                    Err(failure) => return failure.into_response(),
-                }
-            } else {
-                return failure.into_response();
-            }
+                run_turn(&deps, &args, &turn.prompt, None, profile.as_ref(), turn.max_tokens).await
+            } else { Err(failure) }
         }
     };
+    // CLI 可能先刷新授权再生成失败；失败路径也必须保全该账号的新授权。
 
+    if let (Some(bound), Some(profile)) = (&bound, &profile) {
+        if let Err(reason) = save_profile_refresh(&deps, entry, bound, profile) {
+            return crate::gateway::wire::error_response(StatusCode::CONFLICT, &reason);
+        }
+    }
+    let raw = match raw_result { Ok(raw) => raw, Err(failure) => return failure.into_response() };
     let mut output = TurnOutput::default();
     for line in raw.lines() {
         fold_event(&mut output, line);
     }
+    if output.failed { return crate::gateway::wire::error_response(StatusCode::BAD_GATEWAY, "Claude 未能完成本次生成，请检查所选账号授权与额度"); }
     let text = output
         .final_text
         .clone()
@@ -265,7 +293,7 @@ pub(crate) async fn forward_at(
     if text.trim().is_empty() {
         return crate::gateway::wire::error_response(
             StatusCode::BAD_GATEWAY,
-            "Claude 订阅未产生文本输出；请确认本机登录有效后重试",
+            "Claude 订阅未产生文本输出；请检查所选账号授权后重试",
         );
     }
     // 记住本轮的 claude session_id，下一轮同一会话键就能 resume
@@ -277,7 +305,7 @@ pub(crate) async fn forward_at(
     let elapsed_ms = started.elapsed().as_millis() as i64;
     // 归账（执行文档 §9）：订阅路径没有 HTTP 响应流，用 claude 的 session_id 作去重键。
     // 首字时刻对"一次性进程返回"没有意义——传 0 表示未测到，不编造数值。
-    if let Some(dedup_key) = output.session_id.as_deref() {
+    if let Some(dedup_key) = output.session_id.as_deref().filter(|_| !isolated) {
         crate::gateway::adapter::settle_subscription_timing(
             &deps,
             &entry.connection_id,
@@ -287,7 +315,9 @@ pub(crate) async fn forward_at(
             200,
         );
     }
-    let response = anthropic_response(&model, &text, "end_turn");
+    let mut response = anthropic_response(&model, &text, "end_turn");
+    if let Some(usage) = output.usage { response["usage"] = usage; }
+    if isolated { crate::gateway::subscription::record_usage(&deps, entry, &response, elapsed_ms); }
     let json = serde_json::to_string(&response).unwrap_or_default();
     Response::builder()
         .status(StatusCode::OK)
@@ -297,12 +327,41 @@ pub(crate) async fn forward_at(
         .unwrap_or_else(|error| crate::gateway::wire::error_response(StatusCode::BAD_GATEWAY, &format!("响应构造失败：{error}")))
 }
 
-/// 组装 claude 参数；本轮若可 resume，追加 `--resume <id>` 恢复同一场会话。
+/// 为所选账号准备一次性配置，生命周期结束后清理。
+fn prepare_profile(bound: &crate::gateway::subscription::BoundAuth) -> Result<crate::cli_browser_auth::Profile, String> {
+    let profile = crate::cli_browser_auth::Profile::new()?;
+    let credentials = serde_json::json!({"claudeAiOauth": bound.bundle["claudeAiOauth"]});
+    let settings = serde_json::json!({"oauthAccount": bound.bundle["oauthAccount"], "hasCompletedOnboarding": true});
+    std::fs::write(profile.path.join(".credentials.json"), credentials.to_string()).map_err(|_| "无法准备隔离授权")?;
+    std::fs::write(profile.path.join(".claude.json"), settings.to_string()).map_err(|_| "无法准备隔离账号")?;
+    Ok(profile)
+}
+
+fn save_profile_refresh(deps: &Arc<ProxyDeps>, entry: &PoolEntry, bound: &crate::gateway::subscription::BoundAuth, profile: &crate::cli_browser_auth::Profile) -> Result<(), String> {
+    let credentials: serde_json::Value = serde_json::from_slice(&std::fs::read(profile.path.join(".credentials.json")).map_err(|_| "无法读取隔离授权结果")?).map_err(|_| "隔离授权结果无效")?;
+    let account: serde_json::Value = serde_json::from_slice(&std::fs::read(profile.path.join(".claude.json")).map_err(|_| "无法读取隔离账号结果")?).map_err(|_| "隔离账号结果无效")?;
+    let mut next = bound.bundle.clone();
+    next["claudeAiOauth"] = credentials["claudeAiOauth"].clone();
+    next["oauthAccount"] = account["oauthAccount"].clone();
+    if next == bound.bundle { return Ok(()); }
+    let conn = deps.db.lock().map_err(|_| "无法保存刷新后的订阅授权")?;
+    crate::gateway::subscription::save_refresh(&conn, &entry.connection_id, "claude", bound, &next)
+}
+
 fn program_args(command: Option<Vec<String>>, model: &str) -> Vec<String> {
     match command {
         Some(injected) if !injected.is_empty() => injected,
         _ => vec![
+            crate::session_threads::find_executable("claude")
+                .filter(|p| !cfg!(windows) || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")))
+                .or_else(|| crate::cli_browser_auth::npm_prefix("claude").map(|p| p.join("node_modules/@anthropic-ai/claude-code/bin/claude.exe")).filter(|p| p.is_file()))
+                .map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "claude".into()),
             "-p".into(),
+            "--verbose".into(),
+            "--tools".into(), "".into(),
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(), "{\"mcpServers\":{}}".into(),
+            "--setting-sources".into(), "user".into(),
             "--output-format".into(),
             "stream-json".into(),
             "--model".into(),
@@ -330,6 +389,8 @@ async fn run_turn(
     args: &[String],
     prompt: &str,
     resume: Option<&str>,
+    profile: Option<&crate::cli_browser_auth::Profile>,
+    max_tokens: Option<u64>,
 ) -> Result<String, TurnFailure> {
     let mut full_args: Vec<String> = args.to_vec();
     if let Some(session_id) = resume {
@@ -346,20 +407,20 @@ async fn run_turn(
         }
     };
 
-    let attempt = tokio::time::timeout(TURN_TIMEOUT, async {
-        let mut child = match tokio::process::Command::new(&program)
-            .args(&rest)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .current_dir(std::env::temp_dir())
-            .spawn()
+        let mut base = std::process::Command::new(&program);
+        if let Some(profile) = profile { crate::cli_browser_auth::configure_environment(&mut base, profile); }
+        else { base.current_dir(std::env::temp_dir()); }
+        if let Some(max_tokens) = max_tokens { base.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_tokens.to_string()); }
+        let mut command = tokio::process::Command::from(base);
+        let mut child = match command.args(&rest).kill_on_drop(true)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn()
         {
             Ok(child) => child,
             Err(error) => {
-                return Err(format!("无法启动 claude 二进制（{error}）：请确认 Claude Code 已安装并在 PATH"));
+                return Err(TurnFailure { status: StatusCode::SERVICE_UNAVAILABLE, message: format!("无法启动 Claude Code（{error}），请先安装官方客户端") });
             }
         };
+    let attempt = tokio::time::timeout(TURN_TIMEOUT, async {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         {
             let mut stdin = match child.stdin.take() {
@@ -370,17 +431,18 @@ async fn run_turn(
                 return Err("向 claude 写入输入失败".into());
             }
         }
-        let mut stdout = match child.stdout.take() {
+        let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => return Err("claude 进程未提供 stdout".into()),
         };
         let mut raw = String::new();
-        if stdout.read_to_string(&mut raw).await.is_err() {
+        if stdout.take(16 * 1024 * 1024 + 1).read_to_string(&mut raw).await.is_err() {
             return Err("读取 claude 输出失败".into());
         }
+        if raw.len() > 16 * 1024 * 1024 { return Err("Claude 响应超过大小限制".into()); }
         let status = child.wait().await;
         // 非零退出且无任何输出 = 明确失败（resume 失效时 claude 会这样报错）
-        if !raw.trim().is_empty() {
+        if status.as_ref().is_ok_and(|status| status.success()) && !raw.trim().is_empty() {
             return Ok(raw);
         }
         match status {
@@ -390,6 +452,7 @@ async fn run_turn(
     })
     .await;
 
+    if !matches!(&attempt, Ok(Ok(_))) { let _ = child.kill().await; let _ = child.wait().await; }
     match attempt {
         Ok(Ok(raw)) => Ok(raw),
         Ok(Err(reason)) => Err(TurnFailure {
@@ -405,6 +468,56 @@ async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn selected_claude_accounts_use_separate_profiles_and_clean_up() {
+        let deps = deps();
+        {
+            let conn = deps.db.lock().unwrap();
+            for id in ["a", "b"] {
+                crate::gateway::subscription::tests::insert(&conn, id, "claude", id, &crate::gateway::subscription::tests::claude_bundle(id, id));
+            }
+        }
+        let script = r#"const fs=require('fs'),p=require('path');const dir=process.env.CLAUDE_CONFIG_DIR;
+const v=JSON.parse(fs.readFileSync(p.join(dir,'.credentials.json')));
+for(const key of ['ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','CLAUDE_CODE_OAUTH_TOKEN'])if(process.env[key])process.exit(2);
+console.log(JSON.stringify({type:'result',result:JSON.stringify({account:v.claudeAiOauth.accessToken,dir}),usage:{input_tokens:3,output_tokens:2}}));"#;
+        for id in ["a", "b"] {
+            let mut selected = entry(); selected.connection_id = id.into();
+            let response = forward_at(deps.clone(), &selected, "same-session", axum::body::Bytes::from_static(br#"{"model":"source/model","messages":[{"role":"user","content":"hi"}]}"#), Some(vec!["node".into(), "-e".into(), script.into()]), false).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap()).unwrap();
+            let result: serde_json::Value = serde_json::from_str(body["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(result["account"], id);
+            assert!(!std::path::Path::new(result["dir"].as_str().unwrap()).exists());
+            assert_eq!(body["usage"]["input_tokens"], 3);
+        }
+        {
+            let conn = deps.db.lock().unwrap();
+            let count: i64 = conn.query_row("SELECT COUNT(*) FROM requests WHERE source='gateway-subscription' AND connection_id IN ('a','b') AND input_tokens=3 AND input_known=1 AND total_known=0", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 2, "真实提供的输入要归账，缺失总量不能冒充零");
+        }
+        let rotate_then_fail = r#"const fs=require('fs'),p=require('path').join(process.env.CLAUDE_CONFIG_DIR,'.credentials.json');const v=JSON.parse(fs.readFileSync(p));v.claudeAiOauth.accessToken='a-new';fs.writeFileSync(p,JSON.stringify(v));process.exit(1);"#;
+        let mut selected = entry(); selected.connection_id = "a".into();
+        let failure = forward_at(deps.clone(), &selected, "same-session", axum::body::Bytes::from_static(br#"{"model":"source/model","messages":[{"role":"user","content":"hi"}]}"#), Some(vec!["node".into(), "-e".into(), rotate_then_fail.into()]), false).await;
+        assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(crate::gateway::subscription::load(&deps.db.lock().unwrap(), "a", "claude").unwrap().secret, "a-new", "生成失败也不能丢失已轮换的授权");
+        let mut missing = entry(); missing.connection_id = "missing".into();
+        let response = forward_at(deps, &missing, "same-session", axum::body::Bytes::new(), Some(vec!["must-not-run".into()]), false).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn production_command_and_protocol_are_explicit() {
+        let args = program_args(None, "claude-model");
+        assert_ne!(args[0], "-p", "可执行文件不能是参数");
+        assert!(args.iter().any(|a| a == "--verbose"));
+        assert!(args.windows(2).any(|a| a[0] == "--tools" && a[1].is_empty()));
+        assert!(parse_turn(&serde_json::json!({"stream":true,"messages":[{"role":"user","content":"hi"}]})).is_err(), "不能把非流式响应冒充流式");
+        let turn = parse_turn(&serde_json::json!({"system":"answer briefly", "messages":[{"role":"user","content":"hi"}]})).unwrap();
+        assert_eq!(turn.system.as_deref(), Some("answer briefly"), "system 必须传给系统提示词参数");
+    }
 
     fn entry() -> PoolEntry {
         PoolEntry {
@@ -589,7 +702,7 @@ process.stdout.write(chunks.join("\n") + "\n");
 
         let deps = deps();
         if let Some(table) = deps.claude_sessions.as_ref() {
-            table.lock().unwrap().bind("user:stale", "ses-gone");
+            table.lock().unwrap().bind(&format!("{}:{}:user:stale", entry().connection_id.len(), entry().connection_id), "ses-gone");
         }
         let body = axum::body::Bytes::from(r#"{"model":"claude/claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}"#);
         let response = forward_at(deps.clone(), &entry(), "user:stale", body, Some(command), true).await;

@@ -541,10 +541,13 @@ async fn forward(State(deps): State<Arc<ProxyDeps>>, request: Request) -> Respon
         head_full: false,
         settled: false,
     };
-    // http::response::Builder 没有批量 headers 方法，先建 body 再整体替换头表
-    let mut builder = Response::builder().status(status).header("x-jolu-proxy", "1");
+    // 先保留上游头，再写本地标记，避免整体赋值覆盖标记头。
+    let mut builder = Response::builder().status(status);
     match builder.headers_mut() {
-        Some(slot) => *slot = headers,
+        Some(slot) => {
+            *slot = headers;
+            slot.insert("x-jolu-proxy", axum::http::HeaderValue::from_static("1"));
+        }
         None => return error_response(StatusCode::BAD_GATEWAY, "本地代理：构造响应失败"),
     }
     builder
@@ -1423,6 +1426,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+
+        assert_eq!(response.headers().get("x-jolu-proxy").and_then(|v| v.to_str().ok()), Some("1"));
+        assert_eq!(response.headers().get("content-type").and_then(|v| v.to_str().ok()), Some("text/event-stream"));
 
         // 零缓冲断言：首块到达时上游第二块（500ms 后）尚未发出
         let mut stream = response.bytes_stream();

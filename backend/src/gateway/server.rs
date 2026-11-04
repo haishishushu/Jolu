@@ -32,15 +32,14 @@ pub(crate) fn router(deps: Arc<ProxyDeps>) -> Router {
         .route("/v1beta/models", get(gemini_models))
         .route("/v1beta/models/{*call}", post(gemini_generate))
         .route("/__jolu/bridge/callback", post(bridge_callback))
-        .layer(axum::middleware::from_fn(local_only))
+        .layer(axum::middleware::from_fn_with_state(deps.clone(), local_only))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(deps)
 }
 
 /// 只接受本机工具的请求：拒绝浏览器跨站（Origin/Referer）与 DNS rebinding（Host 不是回环）。
-/// 本机进程本来就能读 `~/.claude` 里的凭据，未知 token 不算新风险；
-/// 浏览器网页能向 127.0.0.1 发请求才是真正会花掉用户额度的入口。
-async fn local_only(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+/// 开通过手动 Key 后同时校验凭据；原生 OAuth 与一键接线沿用各自凭据。
+async fn local_only(State(deps): State<Arc<ProxyDeps>>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     if request.headers().contains_key(axum::http::header::ORIGIN)
         || request.headers().contains_key(axum::http::header::REFERER)
     {
@@ -57,7 +56,19 @@ async fn local_only(request: axum::extract::Request, next: axum::middleware::Nex
     if !host_ok {
         return error_json(StatusCode::FORBIDDEN, "Host 不是本机回环地址，已拒绝");
     }
-    next.run(request).await
+    let token = request.headers().get("authorization").and_then(|h| h.to_str().ok())
+        .and_then(|h| h.split_once(' ')).filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer")).map(|(_, token)| token)
+        .or_else(|| request.headers().get("x-api-key").and_then(|h| h.to_str().ok()))
+        .or_else(|| request.headers().get("x-goog-api-key").and_then(|h| h.to_str().ok()));
+    let allowed = match deps.db.lock() {
+        Ok(conn) => super::access::authorize(&conn, token, request.uri().path()),
+        Err(_) => Err("网关状态暂不可用".into()),
+    };
+    match allowed {
+        Ok(true) => next.run(request).await,
+        Ok(false) => error_json(StatusCode::UNAUTHORIZED, "API Key 无效或已刷新，请从 Jolu 复制最新的 API Key"),
+        Err(_) => error_json(StatusCode::SERVICE_UNAVAILABLE, "无法读取网关密钥，请在 Jolu 中重试"),
+    }
 }
 
 /// Host 头必须是 127.0.0.1 / localhost / [::1]（可带端口）。
@@ -108,7 +119,7 @@ fn json_response(status: StatusCode, body: impl Into<String>) -> Response {
 fn error_json(status: StatusCode, message: &str) -> Response {
     json_response(
         status,
-        format!("{{\"error\":{{\"type\":\"jolu_gateway\",\"message\":\"{message}\"}}}}"),
+        serde_json::json!({"error": {"type": "jolu_gateway", "message": message}}).to_string(),
     )
 }
 
@@ -117,7 +128,7 @@ fn error_json(status: StatusCode, message: &str) -> Response {
 pub(crate) fn builtin_subscription_models(platform: &str) -> &'static [&'static str] {
     match platform {
         "claude" => &["claude-sonnet-5", "claude-opus-5"],
-        "codex" => &["gpt-5.5", "gpt-5-codex"],
+        "codex" | "opencode" => &["gpt-5.5", "gpt-5-codex"],
         _ => &[],
     }
 }
@@ -155,6 +166,7 @@ async fn models(State(deps): State<Arc<ProxyDeps>>) -> Response {
     let now = now_ms();
     let mut data: Vec<serde_json::Value> = Vec::new();
     let mut unavailable: Vec<String> = Vec::new();
+    let mut unavailable_reasons = std::collections::BTreeMap::<String, String>::new();
     // 来源名重复时在 display_name 里补 slug，避免模型选择器里出现两个一模一样的名字
     let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for entry in &pool {
@@ -206,6 +218,49 @@ async fn models(State(deps): State<Arc<ProxyDeps>>) -> Response {
                     }
                 }
             }
+        } else if entry.platform == "qoder" {
+            match crate::gateway::adapter::qoder::models(&deps, entry).await {
+                Ok(list) => list,
+                Err(reason) => {
+                    unavailable_reasons.insert(entry.slug.clone(), reason);
+                    Vec::new()
+                }
+            }
+        } else if entry.platform == "trae" {
+            match crate::gateway::adapter::trae_models::models(&deps, entry).await {
+                Ok(list) => list,
+                Err(reason) => {
+                    unavailable_reasons.insert(entry.slug.clone(), reason);
+                    Vec::new()
+                }
+            }
+        } else if entry.platform == "workbuddy" {
+            // 默认路由名不是模型目录。只展示当前账号向官方查询成功的模型。
+            if connected(&entry.status) && super::route::source_is_current(&deps, entry) {
+                match crate::gateway::adapter::workbuddy::models(&deps, &entry.connection_id).await {
+                    Ok(list) if list.is_empty() => {
+                        unavailable_reasons.insert(entry.slug.clone(), "WorkBuddy 未返回可通过此账号直接调用的具体模型".into());
+                        list
+                    }
+                    Ok(list) => list,
+                    Err(reason) => {
+                        unavailable_reasons.insert(entry.slug.clone(), reason);
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            }
+        } else if matches!(entry.platform.as_str(), "grok" | "gemini" | "zcode") && connected(&entry.status) {
+            let fetched = match entry.platform.as_str() {
+                "grok" => crate::gateway::adapter::grok::models(&deps, &entry.connection_id).await,
+                "zcode" => crate::gateway::adapter::zcode::models(&deps, &entry.connection_id).await,
+                _ => crate::gateway::adapter::gemini_subscription::models(&deps, &entry.connection_id).await,
+            };
+            match fetched {
+                Ok(list) => { save_models_json(&deps.db, &entry.connection_id, &list); list }
+                Err(_) => load_models_json(&deps.db, &entry.connection_id).unwrap_or_default(),
+            }
         } else {
             builtin_subscription_models(&entry.platform)
                 .iter()
@@ -235,7 +290,12 @@ async fn models(State(deps): State<Arc<ProxyDeps>>) -> Response {
             }));
         }
     }
-    let body = serde_json::json!({"object": "list", "data": data, "unavailable": unavailable});
+    if data.is_empty() {
+        if let Some(reason) = unavailable_reasons.values().next() {
+            return error_json(StatusCode::BAD_GATEWAY, reason);
+        }
+    }
+    let body = serde_json::json!({"object": "list", "data": data, "unavailable": unavailable, "unavailable_reasons": unavailable_reasons});
     json_response(StatusCode::OK, body.to_string())
 }
 
@@ -422,6 +482,65 @@ mod tests {
         assert_eq!(value["data"].as_array().map(Vec::len), Some(0));
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn workbuddy_menu_does_not_fabricate_default_for_an_unavailable_source() {
+        let deps = crate::proxy::test_support::bare_deps();
+        let sealed = crate::provider_browser_auth::seal("wb-menu", &crate::provider_browser_auth::Credential::Workbuddy {
+            edition: "cn".into(), session: crate::workbuddy_browser_auth::Session {
+                token: "fixture-token".into(), domain: "www.workbuddy.cn".into(), user_id: "fixture-user".into(),
+                enterprise_id: None, email: None, expires_at: None,
+            },
+        }).unwrap();
+        deps.db.lock().unwrap().execute("INSERT INTO connections(id,platform,kind,name,secret,status,serve_enabled,created_ms,slug,models_json) VALUES('wb-menu','workbuddy','auth','WorkBuddy',?1,'invalid',1,1,'wb-menu','[\"default\"]')", [sealed]).unwrap();
+        let response = models(State(deps)).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["data"].as_array().unwrap().is_empty(), "默认别名不能当作已查询的账号模型");
+        assert_eq!(value["unavailable"][0], "wb-menu");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn trae_menu_uses_bound_catalog_and_reports_invalid_auth_instead_of_handwritten_model() {
+        use sha2::{Digest, Sha256};
+        let deps = crate::proxy::test_support::bare_deps();
+        let secret = crate::provider_browser_auth::seal("trae-menu", &crate::provider_browser_auth::Credential::Trae {
+            edition: "cn".into(), session: crate::trae_browser_auth::Session {
+                token: "fixture-menu".into(), host: "https://api.trae.cn".into(),
+                expires_at: "2099-01-01T00:00:00Z".into(), account: None, user_id: "menu-user".into(),
+            },
+        }).unwrap();
+        let cached = serde_json::json!({"credential_hash":format!("{:x}", Sha256::digest(secret.as_bytes())),"edition":"cn",
+            "fetched_ms":chrono::Utc::now().timestamp_millis(),"models":["live-model"]}).to_string();
+        deps.db.lock().unwrap().execute("INSERT INTO connections(id,platform,kind,name,secret,status,serve_enabled,created_ms,slug,model,models_json) VALUES('trae-menu','trae','auth','Trae',?1,'connected',1,1,'trae-menu','handwritten',?2)", rusqlite::params![secret,cached]).unwrap();
+        let response = models(State(deps.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["data"][0]["id"], "trae-menu/live-model");
+        deps.db.lock().unwrap().execute("UPDATE connections SET secret='invalid-fixture' WHERE id='trae-menu'", []).unwrap();
+        let response = models(State(deps)).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("fixture-menu"));
+    }
+
+    #[tokio::test]
+    async fn models_endpoint_reports_workbuddy_authorization_error() {
+        let deps = crate::proxy::test_support::bare_deps();
+        deps.db.lock().unwrap().execute(
+            "INSERT INTO connections(id,platform,kind,name,secret,status,serve_enabled,created_ms,slug)
+             VALUES('wb-auth','workbuddy','auth','WorkBuddy','invalid-fixture','connected',1,1,'wb-auth')",
+            [],
+        ).unwrap();
+        let response = models(State(deps)).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["message"], "浏览器授权无法解锁，请使用原 Windows 用户重新授权");
+    }
+
     /// models 端点真实清单：API 连接调上游 /v1/models（mock），订阅连接用内置清单。
     #[tokio::test]
     async fn models_endpoint_lists_pool_with_prefix_and_reports_unavailable() {
@@ -498,7 +617,7 @@ mod tests {
             let conn = deps.db.lock().unwrap();
             conn.execute(
                 "INSERT INTO connections(id,platform,kind,name,secret,masked,base_url,protocol,serve_enabled,status,created_ms,slug,models_json)
-                 VALUES('c-kimi','custom','api','Kimi','sk-test','****','http://127.0.0.1:1','anthropic',1,'paused',1,'kimi','[\"kimi-k2\"]')",
+                 VALUES('c-paused-menu','custom','api','Kimi','sk-test','****','http://127.0.0.1:1','anthropic',1,'paused',1,'kimi','[\"kimi-k2\"]')",
                 [],
             )
             .unwrap();

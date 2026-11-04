@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 
 import {
-  agentLabel, canEscape, canServe, circuitText, gatewayRunLine, nextMode, wiredCount, wiringLine,
+  agentLabel, canEscape, canToggleSource, circuitText, gatewayRunLine, nextMode, wiredCount, wiringLine,
 } from "./gatewayPage.ts"
 
 const baseStatus = {
@@ -22,19 +22,19 @@ const baseStatus = {
 
 test("运行状态行区分启用、未启动与未知模式", () => {
   assert.equal(gatewayRunLine(null).text, "读取中…")
-  assert.equal(gatewayRunLine(baseStatus).text, "网关运行中 · 127.0.0.1:12731")
+  assert.equal(gatewayRunLine(baseStatus).text, "模型转发已开启")
   assert.equal(gatewayRunLine(baseStatus).tone, "on")
 
   const stopped = { ...baseStatus, enabled: false }
   assert.equal(gatewayRunLine(stopped).tone, "danger")
-  assert.match(gatewayRunLine(stopped).text, /监听未启动/)
+  assert.match(gatewayRunLine(stopped).text, /请重新开启/)
 
   const observe = { ...baseStatus, mode: "observe" }
-  assert.match(gatewayRunLine(observe).text, /只记录/)
+  assert.match(gatewayRunLine(observe).text, /未开启模型转发/)
 
   const unknown = { ...baseStatus, mode: "weird" }
   assert.equal(gatewayRunLine(unknown).tone, "danger")
-  assert.match(gatewayRunLine(unknown).text, /未知模式/)
+  assert.match(gatewayRunLine(unknown).text, /无法确认/)
 })
 
 test("接线行把原因当作独立状态而不是笼统未接入", () => {
@@ -67,14 +67,12 @@ test("关闭自动逃生时文案必须说明只能手动切回", () => {
   assert.match(manual, /只能手动切回/)
 })
 
-test("模型池准入与后端 set_serve 保持一致", () => {
-  assert.equal(canServe("custom", "api"), true)
-  assert.equal(canServe("claude", "api"), true)
-  assert.equal(canServe("claude", "auth"), true)
-  assert.equal(canServe("codex", "auth"), true)
-  // 无适配器的平台订阅不能开启
-  assert.equal(canServe("gemini", "auth"), false)
-  assert.equal(canServe("qoder", "auth"), false)
+test("订阅来源均可选择，调用就绪状态不锁死开关", () => {
+  assert.equal(canToggleSource(false, false), true)
+  assert.equal(canToggleSource(false, false, { can_serve: false }), true)
+  assert.equal(canToggleSource(false, false, { can_serve: true }), true)
+  assert.equal(canToggleSource(true, false, { can_serve: false }), true)
+  assert.equal(canToggleSource(true, true, { can_serve: true }), false)
 })
 
 test("工具展示名回退到原始 id 而不是空", () => {
