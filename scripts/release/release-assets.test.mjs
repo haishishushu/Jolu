@@ -12,11 +12,12 @@ const SIGNATURE = Buffer.from([
 
 const dirs = (tree) => (dir) => tree[dir] ?? []
 
-test("planAssets：Windows 安装包与签名按约定重命名", () => {
-  const plan = planAssets({ version: "0.1.0", platform: "windows-x86_64", listDir: dirs({ nsis: ["Jolu_0.1.0_x64-setup.exe", "Jolu_0.1.0_x64-setup.exe.sig"] }) })
+test("planAssets：Windows 安装包、签名和免安装包按约定重命名", () => {
+  const plan = planAssets({ version: "0.1.0", platform: "windows-x86_64", listDir: dirs({ nsis: ["Jolu_0.1.0_x64-setup.exe", "Jolu_0.1.0_x64-setup.exe.sig"], portable: ["Jolu-Portable.zip"] }) })
   assert.deepEqual(plan, [
     { from: "nsis/Jolu_0.1.0_x64-setup.exe", to: "Jolu-v0.1.0-Windows-x86_64-Setup.exe" },
     { from: "nsis/Jolu_0.1.0_x64-setup.exe.sig", to: "Jolu-v0.1.0-Windows-x86_64-Setup.exe.sig" },
+    { from: "portable/Jolu-Portable.zip", to: "Jolu-v0.1.0-Windows-x86_64-Portable.zip" },
   ])
 })
 
@@ -39,7 +40,7 @@ test("buildManifest：四个更新平台指向本次发行资源，且能通过�
   assert.deepEqual(Object.keys(manifest.platforms).sort(), ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"])
   assert.equal(manifest.platforms["windows-x86_64"].url, "https://github.com/haishishushu/Jolu/releases/download/v0.1.0/Jolu-v0.1.0-Windows-x86_64-Setup.exe")
   const files = [
-    "Windows-x86_64-Setup.exe", "macOS-arm64.dmg", "macOS-x86_64.dmg", "Linux-x86_64.AppImage", "Linux-x86_64.deb",
+    "Windows-x86_64-Setup.exe", "Windows-x86_64-Portable.zip", "macOS-arm64.dmg", "macOS-x86_64.dmg", "Linux-x86_64.AppImage", "Linux-x86_64.deb",
     "macOS-arm64.app.tar.gz", "macOS-x86_64.app.tar.gz",
   ].map((suffix) => `Jolu-v0.1.0-${suffix}`)
   const sigs = ["Windows-x86_64-Setup.exe", "macOS-arm64.app.tar.gz", "macOS-x86_64.app.tar.gz", "Linux-x86_64.AppImage"].map((suffix) => `Jolu-v0.1.0-${suffix}.sig`)
@@ -49,4 +50,8 @@ test("buildManifest：四个更新平台指向本次发行资源，且能通过�
 
 test("buildManifest：任一平台缺签名不生成清单", () => {
   assert.throws(() => buildManifest({ version: "0.1.0", tag: "v0.1.0", notes: "n", pubDate: "x", readSignature: (name) => (name.includes("Linux") ? null : SIGNATURE) }), /Linux-x86_64\.AppImage\.sig/)
+})
+
+test("planAssets：缺少 Portable 时拒绝收集 Windows 产物", () => {
+  assert.throws(() => planAssets({ version: "0.1.0", platform: "windows-x86_64", listDir: dirs({ nsis: ["a-setup.exe", "a-setup.exe.sig"] }) }), /portable.*实际 0 个/)
 })

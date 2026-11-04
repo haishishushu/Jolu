@@ -1,5 +1,5 @@
 import { useRef, type ReactNode } from "react"
-import { CircleFadingArrowUp, Github, LoaderCircle, Moon, PanelLeft, PictureInPicture2, Sun } from "lucide-react"
+import { CircleFadingArrowUp, Github, Moon, PanelLeft, PictureInPicture2, Sun } from "lucide-react"
 import { isTauri, openUrl } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { resolveDarkTheme } from "@/lib/displayPreferences"
@@ -108,7 +108,7 @@ function UpdateVersionButton() {
       : phase === "downloading" ? `正在下载 ${version}${percent === null ? "" : `（${percent}%）`}`
         : phase === "downloadError" ? `${version} 下载失败，点击重试`
           : `下载 ${version}`
-  const spinning = phase === "downloading" || phase === "installing"
+  const busy = phase === "downloading" || phase === "installing"
   return (
     <Tip label={label}>
       <span className="inline-flex">
@@ -116,13 +116,12 @@ function UpdateVersionButton() {
           type="button"
           aria-label={label}
           data-icon-motion="update"
+          aria-busy={busy || undefined}
           disabled={phase === "installing"}
           onClick={openUpdate}
           className="motion-button inline-flex h-9 items-center gap-1.5 rounded-lg bg-jolu-accent px-3 text-[13px] font-semibold text-[#071B10] outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-70"
         >
-          {spinning
-            ? <LoaderCircle aria-hidden className="size-4 animate-spin" />
-            : <CircleFadingArrowUp aria-hidden className="size-4" />}
+          <CircleFadingArrowUp aria-hidden className="size-4" />
           <span className="tnum">{version}</span>
         </button>
       </span>
@@ -134,7 +133,7 @@ function HeaderButton({ motion, label, pressed, busy, disabled, onClick, childre
   motion: "github" | "island" | "sun" | "moon" | "update"
   label: string
   pressed?: boolean
-  /** 进行中：保持可见可悬浮，图标转圈，忽略重复点击 */
+  /** 进行中：保持可见可悬浮，更新箭头向上浮动，忽略重复点击 */
   busy?: boolean
   disabled?: boolean
   onClick: () => void

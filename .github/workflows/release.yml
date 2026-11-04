@@ -130,6 +130,20 @@ jobs:
           if [[ -n "$TARGET" ]]; then args+=(--target "$TARGET"); fi
           # 直接调用包装脚本，避免 pnpm 在 Windows 经 cmd 转发时破坏 JSON 引号
           node scripts/dev/tauri.mjs build "${args[@]}"
+      - name: 构建 Windows 免安装版
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          JOLU_UPDATES_ENABLED: '0'
+          VITE_JOLU_UPDATES_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          # 安装包已生成；单独重编译免安装版，避免应用内更新启动 NSIS 安装器。
+          node scripts/dev/tauri.mjs build --no-bundle --config "{\"version\":\"$VERSION\"}"
+      - name: 打包 Windows Portable ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/release/package-portable.ps1
       - name: 重命名并上传到草稿发行版
         shell: bash
         run: |

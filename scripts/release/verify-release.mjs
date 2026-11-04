@@ -3,7 +3,7 @@ import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
 const INSTALLERS = [
-  "Windows-x86_64-Setup.exe", "macOS-arm64.dmg", "macOS-x86_64.dmg",
+  "Windows-x86_64-Setup.exe", "Windows-x86_64-Portable.zip", "macOS-arm64.dmg", "macOS-x86_64.dmg",
   "Linux-x86_64.AppImage", "Linux-x86_64.deb",
 ]
 

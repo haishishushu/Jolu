@@ -6,7 +6,10 @@ const REPO_DOWNLOAD = "https://github.com/haishishushu/Jolu/releases/download"
 
 /** 各构建平台在 bundle 目录下的产物：子目录、匹配规则、发行资源后缀、是否带更新签名 */
 export const PLATFORM_ASSETS = {
-  "windows-x86_64": [{ dir: "nsis", match: /-setup\.exe$/, suffix: "Windows-x86_64-Setup.exe", signed: true }],
+  "windows-x86_64": [
+    { dir: "nsis", match: /-setup\.exe$/, suffix: "Windows-x86_64-Setup.exe", signed: true },
+    { dir: "portable", match: /-Portable\.zip$/, suffix: "Windows-x86_64-Portable.zip" },
+  ],
   "macos-arm64": [
     { dir: "dmg", match: /\.dmg$/, suffix: "macOS-arm64.dmg" },
     { dir: "macos", match: /\.app\.tar\.gz$/, suffix: "macOS-arm64.app.tar.gz", signed: true },

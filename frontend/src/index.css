@@ -731,10 +731,13 @@ fieldset[data-saving="true"] :disabled:not([disabled]) {
 [data-icon-motion="sun"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(30deg); }
 [data-icon-motion="moon"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: rotate(-15deg); }
 [data-icon-motion="update"]:not(:disabled):is(:hover, :focus-visible) > svg { transform: translateY(-2px); }
-/* 检查更新：按下时图标短暂收缩；检查期间图标转圈，按钮不置灰。 */
+/* 检查、下载和安装更新共用向上浮动反馈，保持箭头方向，不切换为转圈图标。 */
 [data-icon-motion="update"]:not(:disabled):active > svg { transform: translateY(-1px) scale(0.86); transition-duration: 80ms; }
-@keyframes update-check-spin { to { transform: rotate(360deg); } }
-[data-icon-motion="update"][aria-busy="true"] > svg { animation: update-check-spin 900ms linear infinite; }
+@keyframes update-arrow-rise {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+[data-icon-motion="update"][aria-busy="true"] > svg { animation: update-arrow-rise 900ms ease-in-out infinite; }
 /* 系统与应用内的减少动效设置都保留颜色反馈，取消位移、缩放和旋转。 */
 @media (prefers-reduced-motion: reduce) {
   [data-icon-motion]:is(:hover, :focus-visible, :active) > svg { transform: none !important; }

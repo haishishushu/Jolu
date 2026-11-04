@@ -6,6 +6,7 @@ const version = "0.1.14"
 const tag = `v${version}`
 const prefix = `Jolu-v${version}-`
 const assets = [
+  `${prefix}Windows-x86_64-Portable.zip`,
   `${prefix}Windows-x86_64-Setup.exe`, `${prefix}Windows-x86_64-Setup.exe.sig`,
   `${prefix}macOS-arm64.dmg`, `${prefix}macOS-x86_64.dmg`,
   `${prefix}Linux-x86_64.AppImage`, `${prefix}Linux-x86_64.AppImage.sig`,
@@ -66,4 +67,8 @@ test("Windows 更新条目不能指向同版 Linux 安装包", () => {
   const mismatch = structuredClone(manifest)
   mismatch.platforms["windows-x86_64"] = mismatch.platforms["linux-x86_64"]
   assert.throws(() => verifyRelease({ version, tag, manifest: mismatch, assets }), /Windows 安装包/)
+})
+
+test("缺少 Windows Portable 时拒绝公开发行版", () => {
+  assert.throws(() => verifyRelease({ version, tag, manifest, assets: assets.filter((asset) => !asset.name.endsWith("Portable.zip")) }), /缺少安装包.*Portable/)
 })
