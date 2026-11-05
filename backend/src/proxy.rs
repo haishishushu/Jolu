@@ -155,6 +155,8 @@ pub(crate) struct ProxyDeps {
     /// 网关模式：连续失败阈值与熔断动作（与观测模式的回退计数相互独立）。
     pub(crate) circuit_threshold: u32,
     pub(crate) on_circuit: Arc<dyn Fn(&str) + Send + Sync>,
+    /// 网关模式：请求开始 / 结束的实时事件（灵动岛转发动效用，只带元数据）。
+    pub(crate) on_activity: crate::gateway::activity::Emit,
 }
 
 impl ProxyDeps {
@@ -810,6 +812,14 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
                 crate::gateway::escape::circuit_break(&app, reason);
             })
         },
+        on_activity: {
+            let app = app.clone();
+            Arc::new(move |name: &'static str, payload: serde_json::Value| {
+                // 只有灵动岛窗口订阅这两个事件；Tauri 对默认目标的前端监听不做窗口过滤，
+                // 所以这里不用 emit_filter，订阅范围由前端控制。
+                let _ = app.emit(name, payload);
+            })
+        },
     });
 
     let router = build_router(mode, deps.clone());
@@ -1135,6 +1145,7 @@ pub(crate) mod test_support {
             claude_sessions: Some(Mutex::new(crate::gateway::adapter::claude::ClaudeSessions::new())),
             circuit_threshold: 5,
             on_circuit: Arc::new(|_| {}),
+            on_activity: Arc::new(|_, _| {}),
         })
     }
 }
@@ -1195,6 +1206,7 @@ mod tests {
             claude_sessions: Some(Mutex::new(crate::gateway::adapter::claude::ClaudeSessions::new())),
             circuit_threshold: 5,
             on_circuit: Arc::new(|_| {}),
+            on_activity: Arc::new(|_, _| {}),
         });
         (deps, shutdown_rx)
     }

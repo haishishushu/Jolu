@@ -100,4 +100,6 @@ export const gatewayApi = {
   catalog: () => invoke<CatalogModelDto[]>("gateway_catalog"),
   /** 最近 20 条路由流水 */
   routeLog: () => invoke<RouteLogDto[]>("gateway_route_log"),
+  /** 今日（本地零点起）经网关的请求数 */
+  todayCounts: () => invoke<{ since: number; at: number; ok: number; rejected: number; failed: number }>("gateway_today_counts"),
 }

@@ -67,6 +67,11 @@ export interface IslandData {
   sessionStatusUnknown?: boolean
   /** 未连接 / 连接过期时的说明，设置后不画进度条 */
   unavailable?: { title: string; hint: string; tone: "warn" | "danger" }
+  /** 胶囊样式用：有可用连接 / 额度查询失败。经典样式不读这两个字段 */
+  connected?: boolean
+  queryFailed?: boolean
+  /** 胶囊样式用：生效连接的 id，切换连接时据此重置额度基线 */
+  connectionId?: string | null
 }
 
 function Shell({
@@ -354,7 +359,7 @@ export function IslandExpanded({
   )
 }
 
-function SourceFooter({ text }: { text: string }) {
+export function SourceFooter({ text }: { text: string }) {
   const id = useId()
   const [open, setOpen] = useState(false)
   return (

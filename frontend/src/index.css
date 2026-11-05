@@ -408,6 +408,15 @@
     background: transparent;
     overflow: hidden;
   }
+  /* 岛是整窗拖动的：里面的图标/图片/画布不能被浏览器当成可拖拽素材，
+     否则按住岛拖动时会变成拖出一张图，而不是移动窗口 */
+  html.island-window img,
+  html.island-window svg,
+  html.island-window canvas {
+    -webkit-user-drag: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
   /* 附录 A.5-2：所有数字使用等宽数字，避免刷新时抖动 */
   .tnum {
     font-variant-numeric: tabular-nums;

@@ -46,6 +46,10 @@ pub struct Settings {
     /// 停靠条缩放百分比。仅作用于停靠条；探出/展开仍用 island_scale。
     #[serde(default = "default_shrink_scale")]
     pub island_shrink_scale: u16,
+    /// 浮动灵动岛样式：`classic` 经典卡片（模块 A2）或 `capsule` 胶囊（模块 A3）。
+    /// 本体与全部分身共用；缺省保持经典，升级后不改变既有外观。
+    #[serde(default = "default_island_style")]
+    pub island_style: String,
     #[serde(default = "default_refresh")]
     pub refresh_minutes: u32,
     #[serde(default)]
@@ -144,6 +148,7 @@ fn default_theme() -> String { "light".into() }
 fn default_opacity() -> u8 { 100 }
 fn default_scale() -> u16 { 100 }
 fn default_shrink_scale() -> u16 { 100 }
+fn default_island_style() -> String { "classic".into() }
 fn default_refresh() -> u32 { 5 }
 fn default_currency() -> String { "USD".into() }
 fn default_dock_enabled() -> bool { true }
@@ -193,6 +198,10 @@ pub fn validate_last_page(page: &str) -> Result<(), String> {
     if MAIN_PAGES.contains(&page) { Ok(()) } else { Err(format!("未知的主窗口页面：{page}")) }
 }
 
+pub fn validate_island_style(style: &str) -> Result<(), String> {
+    if matches!(style, "classic" | "capsule") { Ok(()) } else { Err(format!("未知的灵动岛样式：{style}")) }
+}
+
 pub fn validate_display_preferences(opacity: u8, scale: u16, shrink_scale: u16, refresh_minutes: u32) -> Result<(), String> {
     if !(60..=100).contains(&opacity) || !matches!(scale, 85 | 100 | 115)
         || !matches!(shrink_scale, 75 | 100 | 125)
@@ -219,6 +228,7 @@ impl Default for Settings {
             island_opacity: default_opacity(),
             island_scale: default_scale(),
             island_shrink_scale: default_shrink_scale(),
+            island_style: default_island_style(),
             refresh_minutes: default_refresh(),
             balance_alert_threshold: None,
             balance_alert_currency: default_currency(),
@@ -432,6 +442,22 @@ mod tests {
         let settings: Settings = serde_json::from_str(old).unwrap();
         assert!(settings.silent_startup);
         assert_eq!((settings.island_opacity, settings.island_scale, settings.island_shrink_scale, settings.refresh_minutes), (100, 100, 100, 5));
+    }
+
+    #[test]
+    fn island_style_defaults_to_classic_and_only_accepts_known_values() {
+        let old: Settings = serde_json::from_str(r#"{"island_platform":"claude","dnd":false,"island_visible":true}"#).unwrap();
+        assert_eq!(old.island_style, "classic", "旧设置升级后外观不变");
+        assert!(super::validate_island_style("classic").is_ok());
+        assert!(super::validate_island_style("capsule").is_ok());
+        for bad in ["", "Capsule", "mini", "classic "] {
+            assert!(super::validate_island_style(bad).is_err(), "{bad:?}");
+        }
+        let dir = std::env::temp_dir().join(format!("island-style-roundtrip-{}", std::process::id()));
+        let store = super::Store::load(&dir);
+        store.try_update(|s| s.island_style = "capsule".into()).unwrap();
+        assert_eq!(super::Store::load(&dir).get().island_style, "capsule");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

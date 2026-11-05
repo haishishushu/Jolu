@@ -11,6 +11,7 @@
 //! - **同协议直通优先**：`connections.protocol` 已声明每个连接的协议；跨协议组合
 //!   返回明确的 400 引导换端点，不做静默翻译（协议转换是后续扩展位）。
 
+pub mod activity;
 pub mod adapter;
 pub mod access;
 pub mod bridge;

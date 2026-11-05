@@ -5,7 +5,7 @@ Windows 桌面 AI 工具管理器。前端 `frontend/`：React 19 + TypeScript +
 ## 1. UI 设计依据（最高优先级）
 
 - **唯一设计依据是 `docs/ui/Jolu.pen`。**
-- **主窗口全部界面和对应的前后端功能都严格按 `Jolu.pen` 重做，旧界面不是参考。** 唯一例外是浮动灵动岛窗口本身的展示（`components/island/`、`views/IslandWindow.tsx`），保持现状。旧组件只能复用其中的数据逻辑；页面按新稿重做完成后，删除被取代的旧组件。
+- **主窗口全部界面和对应的前后端功能都严格按 `Jolu.pen` 重做，旧界面不是参考。** 唯一例外是浮动灵动岛窗口本身的展示（`components/island/`、`views/IslandWindow.tsx`）：经典样式保持现状，胶囊样式按 A3 实现，二者并存。旧组件只能复用其中的数据逻辑；页面按新稿重做完成后，删除被取代的旧组件。
 - `.pen` 是加密文件，只能通过 Pencil MCP 读取（`get_app_state`，`execute` 里的 `Get` / `GetVariables` / `TakeScreenshot`）；禁止用 Read、Grep 或文本编辑器打开。未经鼠鼠明确要求，不修改 `Jolu.pen`。
 - 按模块找画板。画板按序号成对出现，奇数是浅色、偶数是深色；先看画板本身，再看旁边的「画板序号与标题」和行标题里的说明：
 
@@ -22,9 +22,10 @@ Windows 桌面 AI 工具管理器。前端 `frontend/`：React 19 + TypeScript +
   | 模块 G · 设置 | 86–103 | 常规、外观、网络与代理、数据与存储、通知、关于与更新、清理确认、状态与反馈、手动联网 | 已按新稿实现：`views/SettingsPage.tsx`、`components/settings/`（settingsUi、各分区与 DataDialogs）、`lib/settingsPage.ts`、`lib/settingsApi.ts`，后端 `storage_stats.rs`；默认页面、缩放、密度、减少动效、联网方式、诊断、任务提醒与导入预览已有实现；检查更新默认启用（启动及每 30 分钟检查、后台下载、页头绿色版本按钮、被动安装后自动重启，画板 100/101 的 06），首次安装与 0.1.0→0.1.1 更新已用改名测试包真机验证，见 `docs/verification/2026-10-27-update-install-e2e.md`；全局快捷键与套餐查询凭证已按鼠鼠要求删除，设计稿已同步 |
   | 模块 H · 全局规范与品牌 | 104–110 | 按钮与图标交互六态、Logo 与人物、桌面 / 任务栏 / 托盘图标、启动页 | `components/brand/`、`components/ui/`、`components/tray/`；启动页（109 / 110）已按新稿实现：`frontend/startup.html`、`src/startup.ts` / `startup.css`，窗口在 `lib.rs` 的 `show_startup` |
   | 模块 A2 · 浮动灵动岛 | 111–132 | 浮动灵动岛：Auth / API 收缩与展开、仅 Token、Token 动效、配置细节、平台选择、拖动贴边、右键菜单与分身 | `components/island/`、`views/IslandWindow.tsx`、`views/ContextMenuWindow.tsx` |
+  | 模块 A3 · 胶囊灵动岛（可选样式） | A3-1…A3-12（按名称搜索 `A3-`） | 胶囊收缩 / 展开卡片、bot 表情库、模型入口适配、Token 轮播与视线跟随；设置 · 灵动岛页新增样式切换 | `components/island/CapsuleIsland.tsx` / `Bot.tsx` / `capsule.css`、`hooks/useGaze.ts` / `useBotShots.ts`、`lib/botExpression.ts` / `botGaze.ts` / `tokenTicker.ts`；后端 `island_style` 与 `set_island_style`；Token 轮播、视线跟随（含窗口外，后端 `island_pointer.rs`）、额度环交互、贴边迷你胶囊（同一个 `CapsuleIsland` 外壳缩到 32px）、模型入口适配（后端 `gateway/activity.rs` 的请求开始 / 结束事件与 `gateway_today_counts`，前端 `useGatewayActivity` / `CapsuleGateway.tsx`）已接入；自动化「等额度」表情未接数据源；真机已验证双击、Esc、点卡片外、贴边探出、窗口外视线与连接下拉；贴边动效 2026-11-05 返工为「预留盒子先长、外壳按停靠边绝对锚定、气泡三栏居中」，且只有左右贴边缩成迷你胶囊（上下贴边保持完整胶囊）、贴边不投影、展开卡片可拖动；2026-11-05 追加：胶囊态窗口贴合胶囊（不再留 20px 内边距与点击死区，只有展开卡片留投影空间）、展开态可直接拖动（拖动期间的 dock-changed 不改变形态，松手按最新停靠边收尾，拖离边缘回到自由胶囊）、形变期间关闭 `backdrop-filter` 消除贴边弹出卡帧；A3-11 / A3-12 为展开态拖动的浅色 / 深色示意，见 `docs/plans/2026-11-04-capsule-island-implementation.md` |
   | 模块 J · 模型入口（原账号汇聚网关） | 161–166；重设计见 `s1Bm7` / `Lz482` / `eMBlV` / `g1Uhz` | 概览、模型池、按来源选路、接线状态；订阅 / 官方 Key / 第三方 Key 统一按 `<来源>/<模型>` 暴露；E4–E10 补重复凭据、菜单 id、接线漂移、移动反馈、Codex 两种接法与 Gemini 登录切换 | 已按 V3 重做：`views/GatewayView.tsx`（三栏来源→模型池→Agent、分组/平铺、分组拖拽排序 + Alt+↑/↓、保存视图、编辑态还原/完成、E1–E10 状态弹窗、OX4b7 动效）、`lib/gatewayPage.ts` / `gatewayApi.ts`，后端 `gateway/`（route、wiring、escape、server、adapter、groups、identity）；持久化 slug 与 `slug_history`、account_fp 去重、统一接线锁与 `agent_wiring`、Host/Origin 校验、Codex 保留 OAuth 的 `openai_base_url` / 未登录时的静态 token、Gemini `/v1beta` 原生端点与事务式登录切换、CLI 原生会话头、来源 / Agent 分组命令均已接入；Claude / Codex 订阅已改为按所选连接读取加密授权，Claude 隔离 CLI 文本桥接、Codex Chat / Responses 转发及账号用量归账已接入；全部官方订阅开关可选择，同平台不同账号可同时启用，按平台/地区/账号身份去重；OpenCode 的 OpenAI 订阅、Grok、Gemini 非流式原生请求、WorkBuddy 双版和 ZCode 个人套餐已有隔离适配，Qoder 已按 magpie 参考接入账号目录与直接转发，Trae 已接账号目录 function / __dev 路由、`llm_utils_chat`、Chat / Messages 流式与工具转换（Max 和完整文本工具模板尚未接入）（均未真实账号验收，分别见 `docs/verification/2026-11-04-qoder-subscription-adapter.md`、`docs/verification/2026-11-04-trae-subscription-adapter.md`）；路由流水已接入记录、查询与展示（不等于尚未实现的多次故障转移尝试记录），E4–E10 深色稿待补，见 `docs/specs/2026-11-03-gateway-dedup-and-wiring.md` |
 
-  - 浮动灵动岛窗口以 A2 为准。
+  - 浮动灵动岛窗口有两种样式，由设置 `island_style` 选择（默认 `classic`，在「灵动岛」页切换）：经典样式以 A2 为准，胶囊样式以 A3 为准。两种样式读同一份数据，经典样式的代码与行为保持现状。
   - 「现有实现」写的是代码当时的状态，不代表已经和画板一致。新建页面或模块时更新这一列。
   - 编号以画板名称为准。查找画板时用 Pencil 按名称前缀搜索（如 `"40 · "`），不要写死节点 id。
 - 颜色使用 `Jolu.pen` 的变量：主窗口 `jolu-*`，灵动岛 `pn-island-*`，浅深色由 `mode` 主题区分，不要凭感觉推导深色。

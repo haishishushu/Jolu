@@ -210,8 +210,11 @@ pub(crate) fn agent_from_headers(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+/// 写一条路由流水并发结束事件。事件先于写库发出：数据库忙、这一条没写进库时界面仍能收到。
+#[allow(clippy::too_many_arguments)]
 fn record_route(
     deps: &Arc<ProxyDeps>,
+    request_id: u64,
     agent: Option<&str>,
     requested: &str,
     source: Option<&str>,
@@ -220,6 +223,21 @@ fn record_route(
     result: &str,
     started: std::time::Instant,
 ) {
+    use crate::gateway::activity::{emit_end, RouteEnd};
+    emit_end(
+        &deps.on_activity,
+        &RouteEnd {
+            request_id,
+            ts: chrono::Local::now().timestamp_millis(),
+            agent,
+            requested_model: requested,
+            source,
+            upstream_model: upstream,
+            status_code: status,
+            result,
+            duration_ms: started.elapsed().as_millis() as i64,
+        },
+    );
     let Ok(conn) = deps.db.try_lock() else { return };
     crate::gateway::route_log::record(
         &conn,
@@ -250,6 +268,7 @@ pub(crate) async fn handle(
     path_and_query: &str,
 ) -> Response {
     let started = std::time::Instant::now();
+    let request_id = crate::gateway::activity::next_request_id();
     let agent = agent_from_headers(&headers);
     let Some(model) = extract_model(&body) else {
         return error_response(StatusCode::BAD_REQUEST, "请求体缺少 model 字段或不是有效 JSON");
@@ -303,6 +322,20 @@ pub(crate) async fn handle(
             return error_response(StatusCode::SERVICE_UNAVAILABLE, "来源已关闭或配置已变化，请刷新后重试");
         }
     }
+    // 选路成功：先发开始事件，再交给上游。guard 保证请求中途被取消时也有结束事件。
+    let begin = |source: &str| {
+        crate::gateway::activity::emit_start(
+            &deps.on_activity,
+            &crate::gateway::activity::RouteStart {
+                request_id,
+                ts: chrono::Local::now().timestamp_millis(),
+                agent: agent.as_deref(),
+                requested_model: &model,
+                source,
+            },
+        );
+        crate::gateway::activity::EndGuard::new(deps.on_activity.clone(), request_id, agent.as_deref(), &model, source, started)
+    };
     match decision {
         RouteDecision::Direct(entry, upstream_model) => {
             if entry.protocol != protocol.wire_name() {
@@ -316,9 +349,10 @@ pub(crate) async fn handle(
                         wire_label(protocol),
                     ),
                 );
-                record_route(&deps, agent.as_deref(), &model, Some(&entry.slug), None, Some(400), "failed", started);
+                record_route(&deps, request_id, agent.as_deref(), &model, Some(&entry.slug), None, Some(400), "failed", started);
                 return response;
             }
+            let guard = begin(&entry.slug);
             let upstream_for_log = upstream_model.clone();
             let response = crate::gateway::adapter::direct::forward(
                 deps.clone(),
@@ -330,8 +364,10 @@ pub(crate) async fn handle(
                 body,
             )
             .await;
+            guard.finish();
             record_route(
                 &deps,
+                request_id,
                 agent.as_deref(),
                 &model,
                 Some(&entry.slug),
@@ -354,13 +390,19 @@ pub(crate) async fn handle(
                 if protocol == CallerProtocol::Anthropic {
                     error_response(StatusCode::BAD_REQUEST, "Codex 订阅只服务 OpenAI 协议请求")
                 } else {
-                    crate::gateway::adapter::codex::forward(deps.clone(), entry, protocol, body).await
+                    let guard = begin(&entry.slug);
+                    let response = crate::gateway::adapter::codex::forward(deps.clone(), entry, protocol, body).await;
+                    guard.finish();
+                    response
                 }
             } else if entry.platform == "claude" {
                 if protocol != CallerProtocol::Anthropic {
                     error_response(StatusCode::BAD_REQUEST, "Claude 订阅当前只服务 Anthropic Messages 协议请求")
                 } else {
-                    crate::gateway::adapter::claude::forward(deps.clone(), entry, &session, body).await
+                    let guard = begin(&entry.slug);
+                    let response = crate::gateway::adapter::claude::forward(deps.clone(), entry, &session, body).await;
+                    guard.finish();
+                    response
                 }
             } else if entry.platform == "grok" {
                 crate::gateway::adapter::grok::forward(deps.clone(), entry, protocol, body).await
@@ -392,6 +434,7 @@ pub(crate) async fn handle(
             };
             record_route(
                 &deps,
+                request_id,
                 agent.as_deref(),
                 &model,
                 Some(&entry.slug),
@@ -411,7 +454,7 @@ pub(crate) async fn handle(
                 route::RejectKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
                 route::RejectKind::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             };
-            record_route(&deps, agent.as_deref(), &model, None, None, Some(status.as_u16()), "rejected", started);
+            record_route(&deps, request_id, agent.as_deref(), &model, None, None, Some(status.as_u16()), "rejected", started);
             match retry_after {
                 Some(seconds) => error_response_with_retry(status, &message, seconds),
                 None => error_response(status, &message),

@@ -278,6 +278,9 @@ export interface MenuSourceEvent {
   clone: string | null
 }
 
+/** 浮动灵动岛样式：经典卡片（模块 A2）/ 胶囊（模块 A3） */
+export type IslandStyle = "classic" | "capsule"
+
 /** 持久化设置（§2.6 / §7.3）。托盘与设置界面共享同一份值 */
 export interface AppSettings {
   silent_startup: boolean
@@ -296,6 +299,8 @@ export interface AppSettings {
   island_opacity: number
   island_scale: number
   island_shrink_scale: number
+  /** 浮动灵动岛样式：classic 经典卡片 / capsule 胶囊；旧版设置缺省为 classic */
+  island_style?: IslandStyle | string
   refresh_minutes: number
   balance_alert_threshold: number | null
   balance_alert_currency: string
@@ -431,6 +436,9 @@ export const api = {
   setTheme: (theme: "light" | "dark" | "system") => invoke<AppSettings>("set_theme", { theme }),
   setBalanceAlert: (threshold: number | null, currency: string) => invoke<AppSettings>("set_balance_alert", { threshold, currency }),
   setDisplayPreferences: (opacity: number, scale: number, shrinkScale: number, refreshMinutes: number) => invoke<AppSettings>("set_display_preferences", { opacity, scale, shrinkScale, refreshMinutes }),
+  setIslandStyle: (style: IslandStyle) => invoke<AppSettings>("set_island_style", { style }),
+  /** 从灵动岛打开主窗口的指定页面（模型入口 / 灵动岛 / 供应商） */
+  openMainSection: (section: "gateway" | "island" | "connections") => invoke<void>("open_main_section", { section }),
   setRetentionDays: (days: number | null) => invoke<AppSettings>("set_retention_days", { days }),
   cleanupPreview: (days: number) => invoke<CleanupPreviewDto>("cleanup_preview", { days }),
   cleanupHistory: (days: number) => invoke<CleanupPreviewDto>("cleanup_history", { days }),

@@ -74,6 +74,18 @@ pub fn recent(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<RouteLogE
     rows.collect()
 }
 
+/// 某时刻之后的请求数，按结果分组：(ok, rejected, failed)。供灵动岛「今日经网关」使用。
+/// 流水只保留最近 1000 行，当天超过 1000 次时这是下限，调用方据此标注。
+pub fn counts_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<(i64, i64, i64)> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(result = 'ok'), 0), COALESCE(SUM(result = 'rejected'), 0),
+                COALESCE(SUM(result NOT IN ('ok', 'rejected')), 0)
+         FROM gateway_route_log WHERE ts >= ?1",
+        [since_ms],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +100,15 @@ mod tests {
         assert_eq!(rows[0].result, "rejected");
         assert_eq!(rows[1].agent.as_deref(), Some("codex"));
         assert_eq!(rows[1].duration_ms, Some(42));
+    }
+
+    #[test]
+    fn counts_since_groups_by_result() {
+        let conn = crate::db::open(std::path::Path::new(":memory:")).unwrap();
+        for result in ["ok", "ok", "rejected", "failed"] {
+            record(&conn, NewEntry { agent: None, requested_model: "a/b", source: None, upstream_model: None, status_code: None, result, duration_ms: None });
+        }
+        assert_eq!(counts_since(&conn, 0).unwrap(), (2, 1, 1));
+        assert_eq!(counts_since(&conn, i64::MAX).unwrap(), (0, 0, 0));
     }
 }

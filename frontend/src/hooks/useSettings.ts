@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, useSyncExternalStore } from "react"
-import { api, isTauri, listenEvent, type AppSettings } from "@/lib/api"
+import { api, isTauri, listenEvent, type AppSettings, type IslandStyle } from "@/lib/api"
 import type { DefaultPage } from "@/lib/mainNavigation"
 import { settingsApi } from "@/lib/settingsApi"
 import { normalizeDensity } from "@/lib/appearance"
@@ -26,6 +26,7 @@ const DEFAULTS: AppSettings = {
   island_opacity: 100,
   island_scale: 100,
   island_shrink_scale: 100,
+  island_style: "classic",
   refresh_minutes: 5,
   balance_alert_threshold: null,
   balance_alert_currency: "USD",
@@ -166,6 +167,7 @@ export function useSettings() {
     const next = { ...await api.getSettings(), ...patch }
     return api.setDisplayPreferences(next.island_opacity, next.island_scale, next.island_shrink_scale, next.refresh_minutes)
   }), [save])
+  const setIslandStyle = useCallback((style: IslandStyle) => save("island_style", () => api.setIslandStyle(style)), [save])
   const setDefaultPage = useCallback((page: DefaultPage) => save("default_page", () => settingsApi.setDefaultPage(page)), [save])
   const setAppearance = useCallback((patch: Partial<Pick<AppSettings, "main_zoom" | "list_density" | "reduce_motion">>) => save(Object.keys(patch).sort().join(","), async () => {
     const next = { ...await api.getSettings(), ...patch }
@@ -183,6 +185,6 @@ export function useSettings() {
 
   const { settings, ready, loading } = state
   const error = saveError ?? state.error
-  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setAutoCheckUpdates, setUpdateInterval, setCostCurrency, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
+  return { settings, ready, loading, saving, isSaving, error, reload: reloadShared, setIslandPlatform, setIslandConnection, setIslandSource, setDnd, setDockEnabled, setTopmost, setIslandVisible, setAutoCheckUpdates, setUpdateInterval, setCostCurrency, setSilentStartup, setProxy, setTheme, setRetentionDays, setDisplayPreferences, setIslandStyle, setDefaultPage, setAppearance, setNetwork, setTaskNotify }
 }
 

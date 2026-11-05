@@ -28,6 +28,7 @@ mod db;
 mod data_files;
 mod dock;
 mod island_clones;
+mod island_pointer;
 mod main_window;
 mod pricing;
 mod proxy;
@@ -834,7 +835,12 @@ fn resize_island(app: tauri::AppHandle, window: WebviewWindow, width: f64, heigh
         // 把停靠窗口的实际工作区上限交给前端，避免动画等待不可达高度。
         return Ok(dock::work_area(&w).map(|area| area.3));
     } else {
-        dock::resize_free(&w, width, height)?;
+        // 胶囊自由态：围绕水平中心缩放，展开/收回时内容不会整块往右跳
+        if cfg.island_style == "capsule" {
+            dock::resize_free_centered(&w, width, height)?;
+        } else {
+            dock::resize_free(&w, width, height)?;
+        }
         if id.is_none() && FIRST_INSTALL_INTRO.load(Ordering::Acquire) {
             dock::place_free_top_center(&w)?;
         }
@@ -1128,6 +1134,24 @@ fn set_display_preferences(app: tauri::AppHandle, opacity: u8, scale: u16, shrin
         settings.island_shrink_scale = shrink_scale;
         settings.refresh_minutes = refresh_minutes;
     })?;
+    let _ = app.emit("settings-changed", next.clone());
+    Ok(next)
+}
+
+/// 灵动岛上的「打开模型入口」「修复」：打开主窗口并切到对应页面。只接受已知页面。
+#[tauri::command]
+fn open_main_section(app: tauri::AppHandle, section: String) -> Result<(), String> {
+    if !matches!(section.as_str(), "gateway" | "island" | "connections") {
+        return Err(format!("未知的主窗口页面：{section}"));
+    }
+    show_main_with_intent(&app, MainIntent::Settings { section });
+    Ok(())
+}
+
+#[tauri::command]
+fn set_island_style(app: tauri::AppHandle, style: String) -> Result<settings::Settings, String> {
+    settings::validate_island_style(&style)?;
+    let next = app.state::<Cfg>().0.try_update(|settings| settings.island_style = style)?;
     let _ = app.emit("settings-changed", next.clone());
     Ok(next)
 }
@@ -1808,6 +1832,13 @@ fn gateway_source_capabilities(app: tauri::AppHandle) -> Result<Vec<crate::gatew
 /// 接入 / 断开单个工具。
 #[tauri::command]
 fn gateway_wiring_set(app: tauri::AppHandle, agent: String, wired: bool) -> Result<String, String> {
+    let result = gateway_wiring_set_inner(&app, agent, wired);
+    let _ = app.emit("gateway-wiring-changed", ());
+    result
+}
+
+fn gateway_wiring_set_inner(app: &tauri::AppHandle, agent: String, wired: bool) -> Result<String, String> {
+    let app = app.clone();
     if wired {
         let wired_agents = crate::gateway::escape::wire_agents(&app, std::slice::from_ref(&agent))?;
         Ok(format!("已接入 {}", wired_agents.join("、")))
@@ -1839,7 +1870,9 @@ fn gateway_wiring_set(app: tauri::AppHandle, agent: String, wired: bool) -> Resu
 /// 逃生门：切回直连（还原全部接线 + 停网关）。
 #[tauri::command]
 fn gateway_escape(app: tauri::AppHandle) -> String {
-    crate::gateway::escape::manual(&app).summary()
+    let summary = crate::gateway::escape::manual(&app).summary();
+    let _ = app.emit("gateway-wiring-changed", ());
+    summary
 }
 
 #[tauri::command]
@@ -1917,15 +1950,37 @@ fn gateway_route_log(app: tauri::AppHandle) -> Result<Vec<crate::gateway::route_
     crate::gateway::route_log::recent(&conn, 20).map_err(|error| error.to_string())
 }
 
+/// 今日（本地零点起）经网关的请求数：(ok, rejected, failed)。
+#[derive(serde::Serialize)]
+struct GatewayTodayCounts { since: i64, at: i64, ok: i64, rejected: i64, failed: i64 }
+
+#[tauri::command]
+fn gateway_today_counts(app: tauri::AppHandle) -> Result<GatewayTodayCounts, String> {
+    let since = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|midnight| midnight.and_local_timezone(chrono::Local).earliest())
+        .map(|midnight| midnight.timestamp_millis())
+        .unwrap_or(0);
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    let (ok, rejected, failed) = crate::gateway::route_log::counts_since(&conn, since).map_err(|error| error.to_string())?;
+    // 计数时刻：前端据此只补加之后才结束的实时请求
+    let at = chrono::Local::now().timestamp_millis();
+    Ok(GatewayTodayCounts { since, at, ok, rejected, failed })
+}
+
 /// 接受接线漂移：只清接线记录，不改用户的配置文件。
 #[tauri::command]
 fn gateway_wiring_accept(app: tauri::AppHandle, agent: String) -> Result<(), String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
     crate::gateway::wiring_store::mark_idle(&conn, &agent).map_err(|error| error.to_string())?;
+    drop(conn);
     let _ = app.state::<Cfg>().0.try_update(|settings| {
         settings.gateway_wiring.remove(&agent);
     });
+    let _ = app.emit("gateway-wiring-changed", ());
     Ok(())
 }
 
@@ -2818,6 +2873,8 @@ fn initialize_app(app: &tauri::AppHandle, data_dir: &std::path::Path) -> Result<
     if !validation::isolated() { proxy::startup(app); }
     // 预建右键菜单窗口：把首次右键的 WebView 构建耗时挪到启动后的空闲期
     context_menu::prewarm(app);
+    // 胶囊灵动岛的眼睛跟随窗口外的鼠标；只在胶囊样式且灵动岛可见时采样
+    island_pointer::start(app.clone());
 
     if let Some(days) = app.state::<Cfg>().0.get().retention_days {
         if let Ok(cutoff) = retention_cutoff(days) {
@@ -3251,6 +3308,7 @@ pub fn run() {
             gateway_wiring_accept,
             gateway_catalog,
             gateway_route_log,
+            gateway_today_counts,
             dock_undock,
             cost_estimate,
             connection_quota,
@@ -3278,6 +3336,8 @@ pub fn run() {
             set_dock_enabled,
             set_theme,
             set_display_preferences,
+            set_island_style,
+            open_main_section,
             set_balance_alert,
             notify::take_app_notices,
             set_retention_days,
@@ -3394,6 +3454,12 @@ pub fn run() {
                 }
             }
             if island_clones::is_island_label(window.label()) {
+                // 点到别的窗口：WebView 不一定给页面派发 blur，由原生窗口失焦通知胶囊收起
+                if let WindowEvent::Focused(false) = event {
+                    // 按岛 id 广播：前端 listen 注册的是「任意来源」，emit_to(标签) 匹配不上
+                    let id = crate::island_clones::id_from_label(window.label()).flatten();
+                    let _ = window.app_handle().emit("island-blur", id);
+                }
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     // 无边框灵动岛没有用户可点的关闭入口；系统关闭请求多见于应用退出或开发热重载。

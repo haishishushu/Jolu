@@ -2,8 +2,8 @@ import { JoluSwitch as Switch } from "@/components/ui/JoluSwitch"
 import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
 import { useMemo, useState, type ReactNode } from "react"
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { CopyPlus, Ellipsis, Info, LoaderCircle, PictureInPicture2, RefreshCw, Scan } from "lucide-react"
-import { api, isTauri, type AppSettings, type DockEdgeDto } from "@/lib/api"
+import { Check, CopyPlus, Ellipsis, Info, LoaderCircle, PictureInPicture2, RefreshCw, Scan } from "lucide-react"
+import { api, isTauri, type AppSettings, type DockEdgeDto, type IslandStyle } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { PLATFORMS } from "@/lib/platforms"
 import { SelectField, type SelectOption } from "@/components/ui/SelectField"
@@ -54,6 +54,12 @@ export function IslandView() {
           control={<Switch on={s.island_visible} disabled={disabled || cfg.isSaving("island_visible") || !isTauri} label="显示灵动岛" onChange={(on) => void cfg.setIslandVisible(on)} />}
         />
 
+        <StyleSection
+          value={s.island_style === "capsule" ? "capsule" : "classic"}
+          disabled={disabled || cfg.isSaving("island_style")}
+          onChange={(style) => void cfg.setIslandStyle(style)}
+        />
+
         <div className="grid w-full grid-cols-2 gap-5">
           <Group title="窗口行为">
             <Row title="灵动岛置顶" desc="本体与全部分身保持在其他窗口之上" control={<Switch on={s.always_on_top} disabled={disabled || cfg.isSaving("always_on_top")} label="灵动岛置顶" onChange={(on) => void cfg.setTopmost(on)} />} />
@@ -73,7 +79,7 @@ export function IslandView() {
             />
             <Row
               title="缩小后大小"
-              desc="仅调整停靠条"
+              desc="仅调整经典样式的停靠条；胶囊样式贴边后固定为 32px 迷你胶囊"
               control={<SelectField className={cn(SELECT, "w-[142px]")} label="缩小后大小" disabled={disabled || cfg.isSaving("island_shrink_scale")} value={String(s.island_shrink_scale)} options={[{ value: "75", label: "迷你 · 75%" }, { value: "100", label: "标准 · 100%" }, { value: "125", label: "大号 · 125%" }]} onValueChange={(v) => void savePreferences({ island_shrink_scale: Number(v) })} />}
             />
           </Group>
@@ -109,6 +115,73 @@ export function IslandView() {
         设置即时生效；主面板与灵动岛同步切换主题。
       </p>
     </div>
+  )
+}
+
+const STYLE_OPTIONS: { value: IslandStyle; title: string; desc: string }[] = [
+  { value: "classic", title: "经典卡片", desc: "宽 400 的方角卡片，额度用进度条显示" },
+  { value: "capsule", title: "胶囊", desc: "高 40 的胶囊，bot 的眼睛表示状态，额度环套在 bot 外" },
+]
+
+/** 灵动岛样式：本体与全部分身共用，切换即时生效，两种样式读同一份数据 */
+function StyleSection({ value, disabled, onChange }: { value: IslandStyle; disabled: boolean; onChange: (style: IslandStyle) => void }) {
+  return (
+    <section className="flex w-full flex-col gap-2">
+      <div className="flex items-baseline justify-between gap-4">
+        <h2 className="text-sm font-semibold text-jolu-text">灵动岛样式</h2>
+        <span className="text-[11px] text-jolu-muted">本体与全部分身同时切换，随时可改回</span>
+      </div>
+      <div role="radiogroup" aria-label="灵动岛样式" className="grid grid-cols-2 gap-5">
+        {STYLE_OPTIONS.map((option) => {
+          const active = option.value === value
+          return (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              disabled={disabled}
+              onClick={() => { if (!active) onChange(option.value) }}
+              className={cn(
+                "flex items-center gap-4 rounded-[9px] border bg-jolu-bg p-3 text-left outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-60",
+                active ? "border-jolu-accent bg-jolu-selected" : "border-jolu-border hover:bg-jolu-stage",
+              )}
+            >
+              <StylePreview style={option.value} />
+              <span className="flex min-w-0 flex-1 flex-col gap-1">
+                <span className="flex items-center gap-1.5 text-[13px] font-medium text-jolu-text">
+                  {option.title}
+                  {active && <Check aria-hidden className="size-3.5 text-jolu-on" />}
+                </span>
+                <span className="text-[11px] leading-snug text-jolu-muted">{option.desc}</span>
+              </span>
+            </button>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+/** 样式缩略图：示意形状，不是真实数据 */
+function StylePreview({ style }: { style: IslandStyle }) {
+  return (
+    <span aria-hidden className="grid h-[58px] w-[104px] shrink-0 place-items-center rounded-lg bg-jolu-stage">
+      {style === "capsule" ? (
+        <span className="flex h-[26px] w-[84px] items-center gap-1.5 rounded-full border border-jolu-border bg-jolu-bg pl-[3px] pr-2 shadow-sm">
+          <span className="grid size-5 shrink-0 place-items-center rounded-full border-2 border-jolu-accent/70 bg-[#1d1d1f] dark:bg-[#2c2c2e]">
+            <span className="flex gap-[3px]"><i className="h-1.5 w-[2px] rounded-full bg-white" /><i className="h-1.5 w-[2px] rounded-full bg-white" /></span>
+          </span>
+          <span className="h-1 flex-1 rounded-full bg-jolu-track" />
+        </span>
+      ) : (
+        <span className="flex h-[40px] w-[84px] flex-col justify-center gap-1.5 rounded-[7px] border border-jolu-border bg-jolu-bg px-2 shadow-sm">
+          <i className="h-1 w-8 rounded-full bg-jolu-muted/60" />
+          <i className="h-1 w-full rounded-full bg-jolu-track"><b className="block h-full w-2/5 rounded-full bg-jolu-accent" /></i>
+          <i className="h-1 w-full rounded-full bg-jolu-track"><b className="block h-full w-3/5 rounded-full bg-jolu-accent" /></i>
+        </span>
+      )}
+    </span>
   )
 }
 

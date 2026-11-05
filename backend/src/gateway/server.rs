@@ -831,4 +831,94 @@ mod tests {
         assert!(!request.contains("jolu-claude-code"), "调用方令牌不能漏给上游：{request}");
         assert!(request.contains("\"model\":\"kimi-k2\""), "模型名必须已改写：{request}");
     }
+
+    /// 用收集器替换事件回调，返回 deps 与事件列表。
+    fn deps_with_events() -> (Arc<ProxyDeps>, Arc<std::sync::Mutex<Vec<(&'static str, serde_json::Value)>>>) {
+        let (emit, events) = crate::gateway::activity::test_support::collector();
+        let mut deps = Arc::try_unwrap(crate::proxy::test_support::bare_deps()).ok().expect("新建的 deps 只有一个引用");
+        deps.on_activity = emit;
+        (Arc::new(deps), events)
+    }
+
+    /// 被拒：只有结束事件，source 为空，没有开始事件。
+    #[tokio::test]
+    async fn rejected_request_emits_only_end_event() {
+        let (deps, events) = deps_with_events();
+        let base = spawn_router(deps).await;
+        let res = reqwest::Client::builder().no_proxy().build().unwrap()
+            .post(format!("{base}/v1/messages"))
+            .header("content-type", "application/json")
+            .header("x-api-key", "jolu-claude-code")
+            .body(r#"{"model":"kimi/kimi-k2"}"#)
+            .send().await.unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].0, "gateway-route");
+        assert_eq!(events[0].1["result"], "rejected");
+        assert!(events[0].1["source"].is_null());
+        assert_eq!(events[0].1["agent"], "claude-code");
+    }
+
+    /// 成功：先开始后结束，同一个 request_id；上游不可达也有结束事件（failed）。
+    #[tokio::test]
+    async fn served_request_emits_start_then_end_with_same_id() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut chunk = [0u8; 8192];
+                let _ = socket.read(&mut chunk).await;
+                let body = "{\"content\":[]}";
+                let head = format!("HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+            }
+        });
+        let (deps, events) = deps_with_events();
+        {
+            let conn = deps.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO connections(id,platform,kind,name,secret,masked,base_url,protocol,serve_enabled,created_ms,slug)
+                 VALUES('c-kimi','custom','api','Kimi','sk-upstream-key','****',?1,'anthropic',1,1,'kimi')",
+                [format!("http://{upstream_addr}")],
+            ).unwrap();
+            // 第二个来源指向一个没人监听的端口：上游不可达
+            conn.execute(
+                "INSERT INTO connections(id,platform,kind,name,secret,masked,base_url,protocol,serve_enabled,created_ms,slug)
+                 VALUES('c-dead','custom','api','Dead','sk-dead','****','http://127.0.0.1:9','anthropic',1,2,'dead')",
+                [],
+            ).unwrap();
+        }
+        let base = spawn_router(deps).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for model in ["kimi/kimi-k2", "dead/m"] {
+            let _ = client.post(format!("{base}/v1/messages"))
+                .header("content-type", "application/json")
+                .header("x-api-key", "jolu-codex")
+                .body(format!(r#"{{"model":"{model}","max_tokens":8,"messages":[]}}"#))
+                .send().await.unwrap();
+        }
+        let events = events.lock().unwrap();
+        let names: Vec<_> = events.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["gateway-route-start", "gateway-route", "gateway-route-start", "gateway-route"], "{events:?}");
+        let (ok_start, ok_end, dead_start, dead_end) = (&events[0].1, &events[1].1, &events[2].1, &events[3].1);
+        assert_eq!(ok_start["request_id"], ok_end["request_id"]);
+        assert_eq!(dead_start["request_id"], dead_end["request_id"]);
+        assert_ne!(ok_start["request_id"], dead_start["request_id"], "并发配对靠 id，不能重复");
+        assert_eq!(ok_start["source"], "kimi");
+        assert_eq!(ok_start["agent"], "codex");
+        assert_eq!(ok_end["result"], "ok");
+        assert_eq!(ok_end["upstream_model"], "kimi-k2");
+        assert_eq!(dead_end["result"], "failed");
+        let text = format!("{events:?}");
+        assert!(!text.contains("sk-upstream-key") && !text.contains("sk-dead") && !text.contains("messages"), "事件不能带凭证或请求体：{text}");
+    }
 }

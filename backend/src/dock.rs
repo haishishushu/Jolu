@@ -300,6 +300,33 @@ pub fn resize_free(win: &WebviewWindow, width: f64, height: f64) -> Result<(), S
     win.set_position(PhysicalPosition::new(x, y)).map_err(|error| error.to_string())
 }
 
+/// 以水平中心为基准的自由态缩放（胶囊样式）：上下边保持不动，左右各让一半。
+/// 胶囊展开/收回时内容围绕自己的中心长大，不会整块往右跑。
+pub fn resize_free_centered(win: &WebviewWindow, width: f64, height: f64) -> Result<(), String> {
+    let (wx, wy, ww, wh, scale, _) = work_area(win).ok_or("无法读取窗口工作区")?;
+    let position = win.outer_position().map_err(|error| error.to_string())?;
+    let old = win.outer_size().map_err(|error| error.to_string())?;
+    let (x, y, w, h) = free_rect_centered((wx, wy, ww, wh), scale,
+        (position.x, position.y), old.width as i32, (width, height));
+    win.set_size(PhysicalSize::new(w, h)).map_err(|error| error.to_string())?;
+    win.set_position(PhysicalPosition::new(x, y)).map_err(|error| error.to_string())
+}
+
+/// 中心缩放的位置计算：新左边界 = 旧左边界 − 宽度差的一半，再夹回工作区。
+fn free_rect_centered(area: (f64, f64, f64, f64), scale: f64,
+    position: (i32, i32), old_width: i32, size: (f64, f64)) -> (i32, i32, u32, u32) {
+    let (wx, wy, ww, wh) = area;
+    let left = (wx * scale).round() as i32;
+    let top = (wy * scale).round() as i32;
+    let right = ((wx + ww) * scale).round() as i32;
+    let bottom = ((wy + wh) * scale).round() as i32;
+    let width = ((size.0 * scale).round() as u32).max(1);
+    let height = ((size.1 * scale).round() as u32).max(1);
+    let x = position.0 + (old_width - width as i32) / 2;
+    (x.clamp(left, (right - width as i32).max(left)),
+     position.1.clamp(top, (bottom - height as i32).max(top)), width, height)
+}
+
 /// 解除停靠：恢复自由态尺寸，并从边缘挪开一点，避免立刻又被判定吸附
 pub fn undock(win: &WebviewWindow) {
     let _ = win.set_size(LogicalSize::new(FREE_W, FREE_H));
@@ -397,6 +424,23 @@ mod tests {
         assert!(!away.centered);
         assert_eq!(away.offset, 825.0);
         assert!(snap_hint(area, (600.0, 300.0, 400.0, 120.0)).is_none());
+    }
+
+    #[test]
+    fn centered_resize_keeps_horizontal_center() {
+        let area = (0.0, 0.0, 1920.0, 1080.0);
+        // 246 → 380 宽：左边界左移 67，中心不动
+        let (x, y, w, _h) = free_rect_centered(area, 1.0, (800, 100), 246, (380.0, 456.0));
+        assert_eq!((x, y, w), (800 - 67, 100, 380));
+        // 收回时反向
+        let (x, _, w, _) = free_rect_centered(area, 1.0, (733, 100), 380, (246.0, 40.0));
+        assert_eq!((x, w), (733 + 67, 246));
+        // 贴左边界时夹回工作区，不跑出屏幕
+        let (x, _, _, _) = free_rect_centered(area, 1.0, (0, 100), 246, (380.0, 456.0));
+        assert_eq!(x, 0);
+        // 高分屏按物理像素计算
+        let (x, _, w, _) = free_rect_centered(area, 1.25, (1000, 200), 308, (380.0, 456.0));
+        assert_eq!((x, w), (1000 - 83, 475));
     }
 
     #[test]
