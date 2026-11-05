@@ -251,11 +251,11 @@ export function ImportDialog({ platform, platforms, projects, onClose: onDismiss
                   {item.status === "invalid" && <Tag tone="danger">不可导入</Tag>}
                   {item.status === "conflict" && (
                     <Menu.Root modal={false}>
-                      <Menu.Trigger className="inline-flex h-7 items-center gap-1 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
+                      <Menu.Trigger className="jolu-control inline-flex h-7 items-center gap-1 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
                         {actions[item.name] === "overwrite" ? "覆盖" : "跳过"}<ChevronDown aria-hidden className="size-3.5" />
                       </Menu.Trigger>
                       <Menu.Portal>
-                        <Menu.Content align="end" sideOffset={6} className="motion-popover z-[130] w-[220px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
+                        <Menu.Content align="end" sideOffset={6} className="motion-popover z-[130] w-[220px] rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover">
                           <Menu.Item className="flex h-8 cursor-default items-center rounded-md px-2 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side" onSelect={() => setActions((a) => ({ ...a, [item.name]: "skip" }))}>跳过</Menu.Item>
                           <Menu.Item className="flex min-h-8 cursor-default flex-col items-start justify-center rounded-md px-2 py-1 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side" onSelect={() => setActions((a) => ({ ...a, [item.name]: "overwrite" }))}>
                             覆盖
@@ -392,8 +392,11 @@ export function RemoveDialog({ item, onClose: onDismiss, onDone }: { item: Skill
   const { open: dialogOpen, close: onClose, finish } = useDialogClose(onDismiss)
   const toast = useToast()
   const [removing, setRemoving] = useState(false)
+  const removeLock = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const submit = async () => {
+    if (removeLock.current) return
+    removeLock.current = true
     if (!isTauri) {
       toast.success("已移除（示例）")
       return finish(onDone)
@@ -405,6 +408,7 @@ export function RemoveDialog({ item, onClose: onDismiss, onDone }: { item: Skill
       finish(onDone)
     } catch (reason) {
       setError(errorText(reason))
+      removeLock.current = false
     } finally {
       setRemoving(false)
     }

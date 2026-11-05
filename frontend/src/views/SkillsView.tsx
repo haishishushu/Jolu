@@ -243,7 +243,7 @@ export function SkillsView({ active }: { active: boolean }) {
         <ProviderMenu value={platform} platforms={data?.platforms ?? []} onChange={changePlatform} />
         <MenuFilter trailingChevron label="作用范围筛选" value={filters.scope} options={scopeOptions(items, scanned)} onChange={(v) => setFilters((f) => ({ ...f, scope: v as ScopeFilter }))} />
         <MenuFilter trailingChevron label="状态筛选" value={filters.status} options={STATUS_OPTIONS} onChange={(v) => setFilters((f) => ({ ...f, status: v as StatusFilter }))} />
-        <label className="flex h-[38px] min-w-0 flex-1 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">
+        <label className="jolu-control flex h-[38px] min-w-0 flex-1 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">
           <Search aria-hidden className="size-4 shrink-0 text-jolu-muted" />
           <input
             value={searchDraft}
@@ -286,7 +286,7 @@ export function SkillsView({ active }: { active: boolean }) {
       )}
 
       {selectedItems.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-jolu-border bg-jolu-bg px-4 py-2.5">
+        <div className="jolu-card flex flex-wrap items-center gap-2 rounded-xl border border-jolu-border bg-jolu-cc-surface px-4 py-2.5">
           <span className="text-xs font-semibold text-jolu-text">已选择 {selectedItems.length} 个 Skill</span>
           <JoluButton variant="soft" size="sm" onClick={() => void batchToggle(true)}><Check aria-hidden />启用</JoluButton>
           <JoluButton variant="neutral" size="sm" onClick={() => void batchToggle(false)}><Pause aria-hidden />停用</JoluButton>
@@ -299,7 +299,7 @@ export function SkillsView({ active }: { active: boolean }) {
       {!data && loading ? (
         <LoadingSurface layout="table" label="正在扫描 Skills 目录" />
       ) : nothingDetected ? (
-        <section className="flex flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-5">
+        <section className="jolu-card flex flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5">
           <span className="text-[13px] font-semibold text-jolu-text">没有检测到 Skills 目录</span>
           <span className="text-[11px] text-jolu-muted">可以添加项目目录，或新建 / 导入一个 Skill；未检测到目录不代表工具不支持 Skills。</span>
           <div className="flex gap-2">
@@ -308,7 +308,7 @@ export function SkillsView({ active }: { active: boolean }) {
           </div>
         </section>
       ) : visible.length === 0 && data ? (
-        <section className="flex flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-5">
+        <section className="jolu-card flex flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5">
           <span className="text-[13px] font-semibold text-jolu-text">{filtered ? "没有匹配的 Skill" : "这个供应商还没有 Skill"}</span>
           <span className="text-[11px] text-jolu-muted">{filtered ? "调整范围、状态或搜索条件后再试。" : "新建或导入一个 Skill 开始使用。"}</span>
           {filtered && <JoluButton variant="neutral" size="sm" onClick={clearFilters}><RotateCcw aria-hidden />清空筛选</JoluButton>}

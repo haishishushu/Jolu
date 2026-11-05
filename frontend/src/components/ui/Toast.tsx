@@ -271,7 +271,7 @@ function ToastCard({ item, pause }: { item: ToastItem; pause: ToastState["pause"
       data-balance-notice={item.balance ? "true" : undefined}
       data-state={item.exiting ? "closed" : "open"}
       role={item.tone === "danger" ? "alert" : undefined}
-      className={cn("motion-toast pointer-events-auto relative flex shrink-0 items-start gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-3.5 text-jolu-text shadow-popover", item.balance && "flex-wrap p-5")}
+      className={cn("motion-toast pointer-events-auto relative flex shrink-0 items-start gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-3.5 text-jolu-text shadow-popover", item.balance && "flex-wrap p-5")}
       onPointerEnter={() => pause(item.id, "pointer", true)}
       onPointerLeave={() => pause(item.id, "pointer", false)}
       onFocusCapture={() => pause(item.id, "focus", true)}

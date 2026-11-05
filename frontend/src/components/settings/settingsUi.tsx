@@ -12,7 +12,7 @@ export function SettingsGroup({ icon: Icon, title, desc, children, className }: 
   className?: string
 }) {
   return (
-    <section className={cn("flex w-full flex-col rounded-xl border border-jolu-border bg-jolu-bg px-5", className)}>
+    <section className={cn("jolu-card flex w-full flex-col rounded-xl border border-jolu-border bg-jolu-cc-surface px-5", className)}>
       <header className={cn("flex items-center gap-2.5", Icon ? "h-[66px]" : "pb-3.5 pt-[18px]")}>
         {Icon && (
           <span className="grid size-[30px] shrink-0 place-items-center rounded-lg bg-jolu-selected">
@@ -68,7 +68,7 @@ export function SelectButton({ value, options, onChange, label, disabled, classN
       disabled={disabled}
       triggerLabel={triggerLabel}
       onValueChange={onChange}
-      className={cn("h-[34px] w-40 rounded-lg border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text hover:bg-jolu-stage", className)}
+      className={cn("jolu-control h-[34px] w-40 rounded-lg border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text hover:bg-jolu-stage", className)}
     />
   )
 }
@@ -77,7 +77,7 @@ type Tone = "secondary" | "soft" | "accent" | "danger"
 
 const TONES: Record<Tone, string> = {
   secondary: "border border-jolu-border bg-jolu-bg text-jolu-text hover:bg-jolu-stage",
-  soft: "bg-jolu-selected text-jolu-on hover:bg-jolu-pressed",
+  soft: "border border-jolu-border bg-jolu-cc-surface text-jolu-on hover:bg-jolu-stage",
   accent: "bg-jolu-accent text-[#071B10] hover:brightness-95",
   danger: "bg-jolu-danger-soft text-jolu-danger hover:bg-jolu-danger-pressed",
 }
@@ -95,7 +95,7 @@ export function ActionButton({ tone = "secondary", icon, busy, children, classNa
       disabled={props.disabled || busy}
       aria-busy={busy || undefined}
       className={cn(
-        "motion-button inline-flex h-[34px] shrink-0 items-center gap-[7px] rounded-lg px-3 text-xs font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
+        "jolu-control motion-button inline-flex h-[34px] shrink-0 items-center gap-[7px] rounded-lg px-3 text-xs font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
         TONES[tone],
         className,
       )}

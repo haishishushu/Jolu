@@ -149,7 +149,7 @@ function Pagination({ page, pageCount, pageSize, onPage }: { page: number; pageC
           onKeyDown={(event) => event.key === "Enter" && jump()}
           className={cn("h-8 w-[76px] rounded-lg border bg-jolu-bg px-3 text-xs text-jolu-text outline-none placeholder:text-jolu-muted focus-visible:border-jolu-accent", error ? "border-jolu-danger" : "border-jolu-border")}
         />
-      <button type="button" onClick={jump} className="h-8 w-[54px] rounded-lg border border-jolu-border bg-jolu-bg text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">跳转</button>
+      <button type="button" onClick={jump} className="jolu-control h-8 w-[54px] rounded-lg border border-jolu-border bg-jolu-bg text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">跳转</button>
     </div>
   )
 }

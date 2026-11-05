@@ -17,7 +17,7 @@ import { ActionButton, Segmented, SettingsGroup, SettingsRow, Switch } from "./s
 type Cfg = ReturnType<typeof useSettings>
 type SetDirty = (key: string, dirty: boolean) => void
 
-const INPUT = "h-[34px] rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none placeholder:text-jolu-muted focus-visible:border-jolu-accent disabled:opacity-45"
+const INPUT = "jolu-control h-[34px] rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none placeholder:text-jolu-muted focus-visible:border-jolu-accent disabled:opacity-45"
 
 const TONE_TEXT: Record<Tone, string> = { ok: "text-jolu-on", danger: "text-jolu-danger", muted: "text-jolu-muted" }
 

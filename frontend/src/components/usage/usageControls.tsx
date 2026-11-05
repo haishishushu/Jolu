@@ -10,7 +10,7 @@ import type { Connection, PlatformId } from "@/types"
 
 /** 统计卡片：12px 圆角、1px 描边（画板 30） */
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return <section className={cn("min-w-0 rounded-xl border border-jolu-border bg-jolu-bg", className)}>{children}</section>
+  return <section className={cn("jolu-card min-w-0 rounded-xl border border-jolu-border bg-jolu-cc-surface", className)}>{children}</section>
 }
 
 export function CardTitle({ title, note, children }: { title: string; note?: ReactNode; children?: ReactNode }) {
@@ -35,7 +35,7 @@ export function MetricCard({ icon, label, value, note, noteTitle }: { icon?: Rea
 }
 
 const FILTER_CLASS =
-  "inline-flex h-[34px] shrink-0 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none transition-colors hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage disabled:cursor-not-allowed disabled:opacity-45"
+  "jolu-control inline-flex h-[34px] shrink-0 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none transition-colors hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage disabled:cursor-not-allowed disabled:opacity-45"
 
 /** 筛选按钮：概览 / 分析页图标在前（画板 30），调用明细页箭头在后（画板 34） */
 export const FilterTrigger = forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement> & { leading?: ReactNode; trailingChevron?: boolean }>(
@@ -57,8 +57,8 @@ export function ToolButton({ icon, children, bordered, busy, className, ...props
       type="button"
       aria-busy={busy || undefined}
       className={cn(
-        "motion-button inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-jolu-text outline-none transition-colors focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
-        bordered ? "border border-jolu-border bg-jolu-bg hover:bg-jolu-stage" : "bg-jolu-side hover:bg-jolu-stage",
+        "jolu-control motion-button inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-jolu-text outline-none transition-colors focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:cursor-not-allowed disabled:opacity-45",
+        bordered ? "border border-jolu-border bg-jolu-bg hover:bg-jolu-stage" : "border border-jolu-border bg-jolu-cc-surface hover:bg-jolu-stage",
         className,
       )}
       {...props}
@@ -78,7 +78,7 @@ export function ResetButton({ onClick, disabled }: { onClick: () => void; disabl
   return <ToolButton bordered icon={<RotateCcw />} onClick={onClick} disabled={disabled}>重置</ToolButton>
 }
 
-const MENU_CLASS = "motion-popover z-[100] min-w-[var(--radix-dropdown-menu-trigger-width)] max-w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover"
+const MENU_CLASS = "motion-popover z-[100] min-w-[var(--radix-dropdown-menu-trigger-width)] max-w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover"
 const ITEM_CLASS = "relative flex h-8 cursor-default select-none items-center gap-2 rounded-md px-2 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side data-[disabled]:opacity-40"
 
 export interface MenuOption {

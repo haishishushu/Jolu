@@ -83,14 +83,14 @@ export function ProviderMenu({ value, platforms, onChange }: { value: string; pl
     <Menu.Root modal={false} onOpenChange={(open) => !open && setQuery("")}>
       <Menu.Trigger
         aria-label="选择供应商"
-        className="inline-flex h-[38px] w-[176px] shrink-0 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage"
+        className="jolu-control inline-flex h-[38px] w-[176px] shrink-0 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage"
       >
         <ProviderMark platform={value} />
         <span className="min-w-0 flex-1 truncate text-left">{value === "all" ? "全部供应商" : providerName(value)}</span>
         <ChevronDown aria-hidden className="size-4 text-jolu-muted" />
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="start" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] flex w-[336px] flex-col gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover" style={{ maxHeight: "min(520px, var(--radix-dropdown-menu-content-available-height))" }}>
+        <Menu.Content align="start" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] flex w-[336px] flex-col gap-2 rounded-xl border border-jolu-border bg-jolu-cc-surface p-3 shadow-popover" style={{ maxHeight: "min(520px, var(--radix-dropdown-menu-content-available-height))" }}>
           <label className="flex h-[34px] shrink-0 items-center gap-2 rounded-[7px] bg-jolu-side px-2.5">
             <Search aria-hidden className="size-4 text-jolu-muted" />
             <input
@@ -147,13 +147,13 @@ export function FieldSelect({ value, options, onChange, label, disabled, placeho
       <Menu.Trigger
         aria-label={label}
         disabled={disabled}
-        className="flex h-[38px] w-full min-w-0 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-left text-xs text-jolu-text outline-none hover:bg-jolu-stage focus-visible:border-jolu-accent data-[state=open]:border-jolu-accent disabled:cursor-not-allowed disabled:bg-jolu-side disabled:text-jolu-muted"
+        className="jolu-control flex h-[38px] w-full min-w-0 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-left text-xs text-jolu-text outline-none hover:bg-jolu-stage focus-visible:border-jolu-accent data-[state=open]:border-jolu-accent disabled:cursor-not-allowed disabled:bg-jolu-side disabled:text-jolu-muted"
       >
         <span className={cn("min-w-0 flex-1 truncate", !selected && "text-jolu-muted")}>{selected?.label ?? placeholder ?? "请选择"}</span>
         <ChevronDown aria-hidden className="size-4 shrink-0 text-jolu-muted" />
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="start" sideOffset={6} collisionPadding={12} className="motion-popover z-[130] min-w-[var(--radix-dropdown-menu-trigger-width)] overflow-y-auto rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover" style={{ maxHeight: "min(300px, var(--radix-dropdown-menu-content-available-height))" }}>
+        <Menu.Content align="start" sideOffset={6} collisionPadding={12} className="motion-popover z-[130] min-w-[var(--radix-dropdown-menu-trigger-width)] overflow-y-auto rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover" style={{ maxHeight: "min(300px, var(--radix-dropdown-menu-content-available-height))" }}>
           <Menu.RadioGroup value={value} onValueChange={onChange}>
             {options.map((o) => (
               <Menu.RadioItem key={o.value} value={o.value} disabled={o.disabled} className="relative flex h-8 cursor-default select-none items-center gap-2 rounded-md pl-2 pr-7 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side data-[state=checked]:text-jolu-on data-[disabled]:opacity-40">
@@ -178,7 +178,7 @@ export function Field({ label, children, className }: { label: string; children:
   )
 }
 
-export const INPUT_CLASS = "h-[38px] w-full min-w-0 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent disabled:bg-jolu-side disabled:text-jolu-muted"
+export const INPUT_CLASS = "jolu-control h-[38px] w-full min-w-0 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent disabled:bg-jolu-side disabled:text-jolu-muted"
 
 /* ───────────── 弹窗外壳 ───────────── */
 
@@ -197,12 +197,12 @@ export function DialogShell({ open = true, width, title, onClose, busy, children
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content
           aria-describedby={undefined}
-          className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-3.5 overflow-y-auto rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none"
+          className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-3.5 overflow-y-auto rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none"
           style={{ width, height }}
         >
           <div className="flex min-h-7 items-center gap-2.5">
             <Dialog.Title className="min-w-0 flex-1 truncate text-xl font-semibold text-jolu-text">{title}</Dialog.Title>
-            <Dialog.Close aria-label="关闭" disabled={busy} className="grid size-7 place-items-center rounded-lg border border-jolu-border bg-jolu-bg text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:opacity-45">
+            <Dialog.Close aria-label="关闭" disabled={busy} className="jolu-control grid size-7 place-items-center rounded-lg border border-jolu-border bg-jolu-bg text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:opacity-45">
               <X aria-hidden className="size-4" />
             </Dialog.Close>
           </div>

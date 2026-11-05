@@ -68,7 +68,7 @@ export function BatchAccountDeleteDialog({ targets, hidden = false, onClose, onC
   return <Dialog.Root open onOpenChange={open => { if (!open) close() }}>
     <Dialog.Portal>
       <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
-      <Dialog.Content aria-describedby={undefined} onEscapeKeyDown={event => { if (running.current) event.preventDefault() }} onPointerDownOutside={event => { if (running.current) event.preventDefault() }} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none">
+      <Dialog.Content aria-describedby={undefined} onEscapeKeyDown={event => { if (running.current) event.preventDefault() }} onPointerDownOutside={event => { if (running.current) event.preventDefault() }} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none">
         <div className="flex shrink-0 items-start justify-between gap-3">
           <div className="min-w-0">
             <Dialog.Title className="text-base font-semibold text-jolu-text">删除所选账号？</Dialog.Title>

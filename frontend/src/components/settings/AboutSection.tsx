@@ -179,7 +179,7 @@ function UpdateIntervalPicker({
           onChange={(event) => setDraft(event.target.value)}
           onBlur={commit}
           onKeyDown={(event) => { if (event.key === "Enter") commit() }}
-          className="h-8 w-24 rounded-lg border border-jolu-border bg-jolu-bg px-2 text-xs text-jolu-text outline-none disabled:opacity-45"
+          className="jolu-control h-8 w-24 rounded-lg border border-jolu-border bg-jolu-bg px-2 text-xs text-jolu-text outline-none disabled:opacity-45"
         />
         <span className="text-meta text-jolu-muted">分钟</span>
       </div>
@@ -198,7 +198,7 @@ function UpdateIntervalPicker({
         }
         onCommit(Number(event.target.value))
       }}
-      className="h-8 rounded-lg border border-jolu-border bg-jolu-bg px-2 text-xs text-jolu-text outline-none disabled:opacity-45"
+      className="jolu-control h-8 rounded-lg border border-jolu-border bg-jolu-bg px-2 text-xs text-jolu-text outline-none disabled:opacity-45"
     >
       {PRESET_INTERVALS.map((minutes) => (
         <option key={minutes} value={minutes}>{formatInterval(minutes)}</option>

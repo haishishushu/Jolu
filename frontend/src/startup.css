@@ -3,11 +3,11 @@
    颜色取自设计稿变量 jolu-text / jolu-accent 与画板底色；主题由后端经地址参数传入，
    设好之前页面保持透明，避免深色主题先闪浅色。 */
 :root {
-  --bg: #fafafa;
+  --bg: #ffffff;
   --text: #111111;
   --accent: #06c167;
   --muted: #8a8a8a;
-  --border: #e3e3e6;
+  --border: #e4e4e7;
   --hover: #f1f1f2;
   --danger: #d66455;
 }
@@ -17,7 +17,7 @@
   --text: #f4f4f5;
   --accent: #28d07e;
   --muted: #8e8e8e;
-  --border: #303030;
+  --border: #2a2a2d;
   --hover: #1c1e1d;
   --danger: #f26d6d;
 }
@@ -28,7 +28,7 @@
     --text: #f4f4f5;
     --accent: #28d07e;
     --muted: #8e8e8e;
-    --border: #303030;
+    --border: #2a2a2d;
     --hover: #1c1e1d;
     --danger: #f26d6d;
   }

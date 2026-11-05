@@ -34,7 +34,7 @@ export function SelectField({ value, options, onValueChange, label, disabled,
       <Menu.Trigger disabled={disabled}
         aria-label={label}
         type="button"
-        className={cn("jolu-select-trigger inline-flex h-8 min-w-0 shrink-0 items-center justify-between gap-2 rounded-[8px] border bg-surface px-2.5 text-left text-xs text-text-primary outline-none transition-colors hover:bg-hover focus-visible:border-accent-blue focus-visible:ring-2 focus-visible:ring-accent-blue-soft data-[state=open]:border-border-strong disabled:cursor-not-allowed disabled:opacity-45", className)}
+        className={cn("jolu-control jolu-select-trigger inline-flex h-8 min-w-0 shrink-0 items-center justify-between gap-2 rounded-[8px] border bg-surface px-2.5 text-left text-xs text-text-primary outline-none transition-colors hover:bg-hover focus-visible:border-accent-blue focus-visible:ring-2 focus-visible:ring-accent-blue-soft data-[state=open]:border-border-strong disabled:cursor-not-allowed disabled:opacity-45", className)}
       >
         <span className="min-w-0 truncate">{triggerLabel ?? selected?.label ?? "请选择"}</span>
         <ChevronDown aria-hidden className="motion-select-chevron size-3 shrink-0 text-text-secondary" />

@@ -64,7 +64,7 @@ export function Notice({ icon: Icon = Info, title, children, tone = "side", clas
 /** 页签：任务 / 运行记录（画板 58 / 64） */
 export function AutomationTabs({ value, onChange }: { value: "tasks" | "runs"; onChange: (v: "tasks" | "runs") => void }) {
   return (
-    <div role="tablist" aria-label="自动化页签" className="flex h-[38px] gap-6 border-b border-jolu-border">
+    <div role="tablist" aria-label="自动化页签" className="jolu-tablist h-[38px]">
       {([["tasks", "任务"], ["runs", "运行记录"]] as const).map(([key, label]) => (
         <button
           key={key}
@@ -73,8 +73,8 @@ export function AutomationTabs({ value, onChange }: { value: "tasks" | "runs"; o
           aria-selected={value === key}
           onClick={() => onChange(key)}
           className={cn(
-            "-mb-px h-[38px] border-b-2 text-[13px] font-semibold outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
-            value === key ? "border-jolu-accent text-jolu-on" : "border-transparent text-jolu-muted hover:text-jolu-text",
+            "jolu-tab h-[30px] text-[13px]",
+            value === key && "font-semibold",
           )}
         >
           {label}
@@ -100,7 +100,7 @@ export function QuotaBar({ label, value, note, percent, blocking }: { label: str
   )
 }
 
-const MENU_CLASS = "motion-popover z-[100] min-w-[168px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover"
+const MENU_CLASS = "motion-popover z-[100] min-w-[168px] rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover"
 const ITEM_CLASS = "flex h-8 cursor-default select-none items-center gap-2 rounded-md px-2 text-[11px] text-jolu-text outline-none data-[highlighted]:bg-jolu-side data-[disabled]:opacity-40 [&_svg]:size-3.5 [&_svg]:text-jolu-muted"
 /** 危险项（删除任务）：文字与图标都用危险色 */
 const DANGER_ITEM_CLASS = ITEM_CLASS.replace("text-jolu-text", "text-jolu-danger").replace("[&_svg]:text-jolu-muted", "[&_svg]:text-jolu-danger")

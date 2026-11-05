@@ -13,7 +13,7 @@ function CheckinDialog({ title, description, open, onClose, footer, children }: 
   return <Dialog.Root open={open} onOpenChange={value => !value && onClose()}>
     <Dialog.Portal>
       <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
-      <Dialog.Content className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[640px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none">
+      <Dialog.Content className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[640px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none">
         <div className="flex shrink-0 items-center justify-between gap-3">
           <Dialog.Title className="text-xl font-semibold text-jolu-text">{title}</Dialog.Title>
           <Dialog.Close aria-label="关闭弹窗" className="grid size-[30px] shrink-0 place-items-center rounded-lg text-jolu-muted outline-none hover:bg-jolu-side focus-visible:outline-2 focus-visible:outline-jolu-accent"><X aria-hidden className="size-4" /></Dialog.Close>
@@ -47,7 +47,7 @@ export function CheckinRemoveAccountDialog({ account, busy, error, onClose, onCo
   return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose() }}>
     <Dialog.Portal>
       <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
-      <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none">
+      <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0"><Dialog.Title className="text-base font-semibold text-jolu-text">删除账号？</Dialog.Title><p className="mt-1 break-all text-xs text-jolu-muted">{account}</p></div>
           <Dialog.Close aria-label="关闭删除确认" disabled={busy} className="grid size-7 shrink-0 place-items-center rounded-md text-jolu-muted outline-none hover:bg-jolu-side focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:opacity-40"><X aria-hidden className="size-4" /></Dialog.Close>

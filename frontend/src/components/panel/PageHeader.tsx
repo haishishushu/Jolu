@@ -27,7 +27,7 @@ export function PageHeader({ title, collapsed, onToggleSidebar }: { title: strin
             aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
             aria-expanded={!collapsed}
             onClick={onToggleSidebar}
-            className="grid size-8 shrink-0 place-items-center rounded-md text-jolu-text outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent"
+            className="jolu-control grid size-8 shrink-0 place-items-center rounded-lg border border-jolu-border bg-jolu-cc-surface text-jolu-text outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent"
           >
             <PanelLeft aria-hidden className="size-[18px]" />
           </button>
@@ -152,7 +152,7 @@ function HeaderButton({ motion, label, pressed, busy, disabled, onClick, childre
           disabled={disabled}
           onClick={busy ? undefined : onClick}
           className={cn(
-            "grid size-9 place-items-center rounded-lg text-jolu-muted outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent",
+            "jolu-control grid size-9 place-items-center rounded-lg border border-jolu-border bg-jolu-cc-surface text-jolu-muted outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent",
             "disabled:pointer-events-none disabled:opacity-45",
           )}
         >

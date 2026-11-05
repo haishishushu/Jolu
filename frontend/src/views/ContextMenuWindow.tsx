@@ -6,6 +6,7 @@ import { useSettings } from "@/hooks/useSettings"
 import { useConnections } from "@/hooks/useConnections"
 import { cn } from "@/lib/utils"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog"
 
 export function ContextMenuWindow() {
   const [islandMenu, setIslandMenu] = useState(() => new URLSearchParams(window.location.search).get("source") === "island")
@@ -18,6 +19,7 @@ export function ContextMenuWindow() {
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [destroying, setDestroying] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const subRef = useRef<HTMLDivElement>(null)
   const closeTimer = useRef<number | undefined>(undefined)
@@ -41,6 +43,7 @@ export function ContextMenuWindow() {
           setPage("root")
           setBusy(false)
           setError(null)
+          setDestroying(false)
           setReopenRequest((value) => value + 1)
         }
       })
@@ -174,7 +177,7 @@ export function ContextMenuWindow() {
           {islandMenu && <>
           {separator}
           {row("开启分身", command("clone_create"), { disabled: !canCreate })}
-          {row("销毁分身", command("clone_destroy"), { disabled: !canDestroy })}
+          {row("销毁分身", () => setDestroying(true), { disabled: !canDestroy })}
           {separator}
           {/* 灵动岛上的右键也应能隐藏本体：以前只有托盘菜单有这个入口 */}
           {row("隐藏灵动岛", command("toggle_island"), { checked: settings.island_visible })}
@@ -210,6 +213,7 @@ export function ContextMenuWindow() {
           {separator}{row("管理连接…", command("open_source_settings"))}
         </>}
       </div>}
+      {destroying && <ConfirmDialog compact width={320} title="销毁此灵动岛？" description="将关闭此窗口并移除它的窗口配置，保留账号连接和历史统计。" confirmLabel="销毁灵动岛" danger onClose={() => setDestroying(false)} onConfirm={() => api.menuAction("clone_destroy")} />}
     </div>
   )
 }

@@ -51,7 +51,7 @@ function NavItem({ entry, active, collapsed, onClick }: { entry: MainPageItem; a
       onClick={onClick}
       className={cn(
         collapsed ? "px-3" : "px-3.5",
-        "flex h-11 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap rounded-lg text-left text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-jolu-accent",
+        "flex h-11 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap rounded-[9px] text-left text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-jolu-accent",
         active
           ? "bg-jolu-selected font-semibold text-jolu-on active:bg-jolu-pressed"
           : "text-jolu-text hover:bg-jolu-stage active:bg-jolu-track",

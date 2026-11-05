@@ -32,8 +32,8 @@ export interface TaskDialogRequest {
 }
 
 const PLATFORMS: AutomationPlatform[] = ["claude", "codex"]
-const INPUT = "flex h-[38px] w-full items-center gap-2.5 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none focus-within:border-jolu-accent focus-visible:border-jolu-accent"
-const MENU_CLASS = "motion-popover z-[120] min-w-[var(--radix-dropdown-menu-trigger-width)] max-w-[360px] overflow-y-auto rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover"
+const INPUT = "jolu-control flex h-[38px] w-full items-center gap-2.5 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs text-jolu-text outline-none focus-within:border-jolu-accent focus-visible:border-jolu-accent"
+const MENU_CLASS = "motion-popover z-[120] min-w-[var(--radix-dropdown-menu-trigger-width)] max-w-[360px] overflow-y-auto rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover"
 const ITEM_CLASS = "relative flex min-h-8 cursor-default select-none items-center gap-2 rounded-md py-1.5 pl-2 pr-7 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side data-[disabled]:opacity-40 data-[state=checked]:text-jolu-on"
 
 function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -263,7 +263,7 @@ export function TaskDialog({ request, onClose: onDismiss, onSaved, onBackToSessi
           aria-describedby={undefined}
           ref={setRoot}
           onInteractOutside={(e) => { if (saving) e.preventDefault() }}
-          className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[620px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none"
+          className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[620px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none"
         >
           <div className="flex h-[34px] items-center gap-2.5">
             <Dialog.Title className="flex-1 truncate text-xl font-semibold text-jolu-text">{title}</Dialog.Title>
@@ -335,7 +335,7 @@ export function TaskDialog({ request, onClose: onDismiss, onSaved, onBackToSessi
                 value={form.prompt}
                 onChange={(e) => set("prompt", e.target.value)}
                 placeholder={form.sessionId ? "描述希望 AI 在这个会话中继续完成的任务……" : "描述希望 AI 完成的任务……"}
-                className={cn("h-24 w-full resize-none rounded-lg border border-jolu-border bg-jolu-bg p-3 text-xs leading-[1.6] text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent", errors.prompt && "border-jolu-danger")}
+                className={cn("jolu-control h-24 w-full resize-none rounded-lg border border-jolu-border bg-jolu-bg p-3 text-xs leading-[1.6] text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent", errors.prompt && "border-jolu-danger")}
               />
             </Field>
 
@@ -579,7 +579,7 @@ function SessionPicker({ form, open, onOpenChange, accountName, fromSession, onP
         <div
           ref={panelRef}
           style={{ top: place.top, left: place.left, width: place.width, maxHeight: place.maxHeight }}
-          className="absolute z-10 flex flex-col gap-1.5 overflow-hidden rounded-xl border border-jolu-border bg-jolu-bg p-2 shadow-popover"
+          className="absolute z-10 flex flex-col gap-1.5 overflow-hidden rounded-xl border border-jolu-border bg-jolu-cc-surface p-2 shadow-popover"
         >
           <label className="flex h-[38px] items-center gap-2 rounded-lg border border-jolu-accent px-2.5">
             <Search aria-hidden className="size-4 text-jolu-muted" />

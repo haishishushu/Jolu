@@ -70,7 +70,7 @@
   /* 表面 */
   --bg: #ffffff;
   --surface: #ffffff;
-  --surface-2: #f7f7f8;
+  --surface-2: #f4f4f5;
   --surface-3: #f2f2f3;
   --hover: #fafafa;
   /* 文字 */
@@ -78,7 +78,7 @@
   --text-secondary: #8a8a8a;
   --text-tertiary: #ababab;
   /* 边框与轨道 */
-  --border: #e8e8e8;
+  --border: #e4e4e7;
   --border-strong: #d6d6d6;
   --track: #e9ebef;
   --shadow-color: #0000000f;
@@ -125,11 +125,11 @@
    已按 Jolu.pen 重做的界面用这一组；旧变量留给尚未重做的页面和灵动岛。 */
 :root {
   --jolu-bg: #ffffff;
-  --jolu-side: #f7f7f8;
-  --jolu-stage: #f2f2f3;
+  --jolu-side: #ffffff;
+  --jolu-stage: #f4f4f5;
   --jolu-text: #111111;
   --jolu-muted: #727277;
-  --jolu-border: #e8e8e8;
+  --jolu-border: #e4e4e7;
   --jolu-accent: #06c167;
   --jolu-on: #087a45;
   --jolu-selected: #e7f7ee;
@@ -143,6 +143,15 @@
   --jolu-status-error-bg: #c43c351a;
   --jolu-table-divider: #1111110a;
   --jolu-table-active: #06c1670b;
+  /* CC Switch 风格：逐项同步 Jolu.pen 的 jolu-cc-*，不推导深色。 */
+  --jolu-cc-surface: #ffffff;
+  --jolu-cc-border: #e4e4e7;
+  --jolu-cc-shadow: #00000018;
+  --jolu-cc-control-shadow: #0000000d;
+  --jolu-cc-popup-shadow: #00000026;
+  --jolu-cc-track: #f4f4f5;
+  --jolu-cc-pressed: #eaeaec;
+  --jolu-cc-inset: #00000012;
 }
 .dark {
   --jolu-bg: #0d0d0d;
@@ -164,6 +173,14 @@
   --jolu-status-error-bg: #ff8b8324;
   --jolu-table-divider: #ffffff0d;
   --jolu-table-active: #28d07e12;
+  --jolu-cc-surface: #181818;
+  --jolu-cc-border: #2a2a2d;
+  --jolu-cc-shadow: #00000059;
+  --jolu-cc-control-shadow: #00000033;
+  --jolu-cc-popup-shadow: #00000080;
+  --jolu-cc-track: #242424;
+  --jolu-cc-pressed: #323235;
+  --jolu-cc-inset: #00000040;
 }
 
 @keyframes dock-token-pulse {
@@ -347,6 +364,9 @@
   --color-logo-gemini: var(--logo-gemini);
   --color-logo-grok: var(--logo-grok);
 
+  --color-jolu-cc-surface: var(--jolu-cc-surface);
+  --color-jolu-cc-track: var(--jolu-cc-track);
+  --color-jolu-cc-pressed: var(--jolu-cc-pressed);
   --color-jolu-bg: var(--jolu-bg);
   --color-jolu-side: var(--jolu-side);
   --color-jolu-stage: var(--jolu-stage);
@@ -426,16 +446,16 @@
 @layer utilities {
   /* 灵动岛 / 卡片 / 弹层三档阴影，对应 .pen 中的 effect 设置 */
   .shadow-island {
-    box-shadow: 0 2px 10px 0 var(--shadow-color);
+    box-shadow: 0 4px 5px var(--jolu-cc-shadow);
   }
   .shadow-window {
     box-shadow: 0 6px 24px 0 var(--shadow-color);
   }
   .shadow-popover {
-    box-shadow: 0 6px 22px 0 var(--shadow-color);
+    box-shadow: 0 10px 24px var(--jolu-cc-popup-shadow);
   }
   .shadow-dialog {
-    box-shadow: 0 10px 32px 0 var(--shadow-color);
+    box-shadow: 0 10px 24px var(--jolu-cc-popup-shadow);
   }
 }
 
@@ -685,7 +705,7 @@ html.reduce-motion .gw-card-lifting { transform: none; }
   overflow: hidden;
   border-radius: 18px;
   background: var(--surface);
-  box-shadow: 0 2px 10px var(--shadow-color);
+  box-shadow: 0 4px 5px var(--jolu-cc-shadow);
 }
 .island-morph::after {
   content: "";
@@ -828,7 +848,7 @@ html:not(.island-window), html:not(.island-window) * {
 /* 共享选择器在主窗口跟随 Jolu 主题，浮动灵动岛继续使用独立主题。 */
 html:not(.island-window) .jolu-select-trigger {
   border-color: var(--jolu-border);
-  background: var(--jolu-bg);
+  background: var(--jolu-cc-surface);
   color: var(--jolu-text);
 }
 html:not(.island-window) .jolu-select-trigger:not(:disabled):hover { background: var(--jolu-side); }
@@ -839,7 +859,7 @@ html:not(.island-window) .jolu-select-trigger:is(:focus-visible, [data-state="op
 html:not(.island-window) .jolu-select-trigger svg { color: var(--jolu-muted); }
 html:not(.island-window) .jolu-select-menu {
   border-color: var(--jolu-border);
-  background: var(--jolu-bg);
+  background: var(--jolu-cc-surface);
   color: var(--jolu-text);
   padding: 2px;
 }
@@ -848,9 +868,9 @@ html:not(.island-window) .jolu-select-menu [title] { color: var(--jolu-muted); }
 html:not(.island-window) [role="menu"] {
   border-radius: 12px;
   overscroll-behavior: contain;
-  box-shadow: 0 8px 24px #00000012, 0 2px 6px #00000008;
+  box-shadow: 0 10px 24px var(--jolu-cc-popup-shadow);
 }
-html.dark:not(.island-window) [role="menu"] { box-shadow: 0 8px 24px #00000045, 0 2px 6px #00000026; }
+html.dark:not(.island-window) [role="menu"] { box-shadow: 0 10px 24px var(--jolu-cc-popup-shadow); }
 html:not(.island-window) :is([role="menuitemradio"], [role="menuitemcheckbox"]) {
   min-height: 34px;
   border-radius: 7px;
@@ -925,3 +945,43 @@ html.reduce-motion :is([role="menuitemradio"], [role="menuitemcheckbox"]) { tran
 }
 html.reduce-motion .jolu-switch-track, html.reduce-motion .jolu-switch-thumb { transition: none; }
 html.reduce-motion .jolu-switch:not(:disabled):active .jolu-switch-thumb { transform: translateX(var(--switch-offset)); }
+
+/* 明确由组件选择材质；不推测所有 div/button 的用途。 */
+@layer components {
+  .jolu-card { box-shadow: 0 4px 5px var(--jolu-cc-shadow); }
+  .jolu-control { box-shadow: 0 1px 2px var(--jolu-cc-control-shadow); }
+  .jolu-control:disabled { box-shadow: none; }
+  .jolu-control:not(:disabled):active { box-shadow: inset 0 1px 2px var(--jolu-cc-inset); }
+  .jolu-tablist {
+    display: flex;
+    width: fit-content;
+    max-width: 100%;
+    flex-shrink: 0;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 12px;
+    background: var(--jolu-cc-track);
+  }
+  .jolu-tab {
+    display: inline-flex;
+    min-width: 0;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--jolu-muted);
+    outline: none;
+    transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  }
+  .jolu-tab:is([aria-selected="true"], [aria-checked="true"]) {
+    background: var(--jolu-cc-surface);
+    color: var(--jolu-text);
+    font-weight: 600;
+    box-shadow: 0 2px 4px var(--jolu-cc-control-shadow);
+  }
+  .jolu-tab:not([aria-selected="true"]):not([aria-checked="true"]):hover { color: var(--jolu-text); }
+  .jolu-tab:focus-visible { outline: 2px solid var(--jolu-accent); outline-offset: -2px; }
+}

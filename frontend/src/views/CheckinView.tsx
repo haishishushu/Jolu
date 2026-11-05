@@ -290,7 +290,7 @@ export function CheckinView({ active = true }: { active?: boolean }) {
         })}
       </div>
       <p className="flex items-start gap-2.5 rounded-[10px] bg-jolu-side px-4 py-3 text-xs leading-relaxed text-jolu-muted"><Info aria-hidden className="mt-0.5 size-[17px] shrink-0" />账号沿用供应商连接；相同账号只领取一次。奖励和开放状态以平台实时返回为准。</p>
-      <div className="overflow-hidden rounded-xl border border-jolu-border bg-jolu-bg p-4">
+      <div className="jolu-card overflow-hidden rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
         <h2 className="mb-3 text-sm font-semibold text-jolu-text">最近签到记录</h2>
         {!records.length ? <p className="py-2 text-xs text-jolu-muted">暂无签到记录，完成首次签到后显示结果。</p> : <ol className="flex max-h-64 flex-col divide-y divide-jolu-border overflow-auto">
           {records.map(record => {
@@ -324,7 +324,7 @@ function CheckinCard({ entry, accounts, paused, busy, hidden, active, onConnect,
   useEffect(() => {
     if (detailsAccountId && (!active || !accounts.some(account => account.id === detailsAccountId))) setDetailsAccountId(null)
   }, [active, accounts, detailsAccountId])
-  return <article aria-label={`${entry.name} ${entry.region}`} data-checkin-edition={entry.id} className="flex min-h-[210px] min-w-0 flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-4">
+  return <article aria-label={`${entry.name} ${entry.region}`} data-checkin-edition={entry.id} className="jolu-card flex min-h-[210px] min-w-0 flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
     <header className="flex items-center justify-between gap-2"><h2 className="flex min-w-0 items-center gap-2.5 text-base font-semibold text-jolu-text"><PlatformLogo platform={entry.platform} size={22} /><span className="truncate">{entry.name}</span></h2><span className="shrink-0 rounded-[5px] bg-jolu-side px-2 py-1 text-[11px] text-jolu-muted">{entry.region}</span></header>
     {!entry.manual && !accounts.length ? <><p className="text-xs text-jolu-muted">{entry.platform === "workbuddy" ? "自动活跃奖励" : "暂未开放"}</p><p className="text-2xl font-medium text-jolu-text">{entry.platform === "workbuddy" ? "无需签到" : "—"}</p><p className="text-[11px] leading-relaxed text-jolu-muted">{entry.description}</p><JoluButton className="mt-auto w-full" disabled>{entry.platform === "workbuddy" ? "无需手动领取" : "暂未开放"}</JoluButton></>
     : !accounts.length ? <><p className="text-xs text-jolu-muted">{paused ? `${paused} 个账号已暂停连接` : "尚未连接账号"}</p><p className="text-2xl font-medium text-jolu-text">{entry.platform === "qoder" ? "每日 Credits" : "每日积分"}</p><p className="text-[11px] leading-relaxed text-jolu-muted">{entry.description}</p><JoluButton className="mt-auto w-full" variant="soft" disabled={busy} onClick={() => onConnect()}>{paused ? "管理连接" : "去连接"}</JoluButton></>

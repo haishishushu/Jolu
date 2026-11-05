@@ -8,7 +8,7 @@ export const handoffInput = 'w-full rounded-lg border border-jolu-border bg-jolu
 export function HandoffShell({ title, children, onClose, chat = false }: {title:string; children:ReactNode; onClose:()=>void; chat?:boolean}) {
   return <Dialog.Root open onOpenChange={open => !open && onClose()}><Dialog.Portal>
     <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
-    <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none" style={{width:chat?780:740,height:chat?840:undefined}}>
+    <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none" style={{width:chat?780:740,height:chat?840:undefined}}>
       <div className="flex items-center gap-3"><Dialog.Title className="min-w-0 flex-1 truncate text-[19px] font-semibold text-jolu-text">{title}</Dialog.Title><button aria-label="关闭" onClick={onClose} className={handoffButton}><X className="size-4" /></button></div>{children}
     </Dialog.Content>
   </Dialog.Portal></Dialog.Root>

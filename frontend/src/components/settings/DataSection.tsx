@@ -174,7 +174,7 @@ function ImportPreviewCard({ preview, onImported, onExpired, onClose }: {
   }
 
   return (
-    <section aria-label="导入预览" className="mb-4 flex flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-4">
+    <section aria-label="导入预览" className="jolu-card mb-4 flex flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
       <h4 className="text-sm font-semibold text-jolu-text">导入预览</h4>
       <p className="break-all text-[11px] leading-normal text-jolu-muted">{preview.file_name || "备份文件"} · 校验完成后才能确认。</p>
       <p className="tnum text-xs text-jolu-text">{importCountsText(preview)}</p>

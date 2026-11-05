@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu"
-import { useMemo, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import { Check, ChevronDown, CircleAlert, CircleCheck, FileText, GitCompare, LoaderCircle, Square, SquareCheck } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { lineDiff } from "@/lib/textDiff"
@@ -9,6 +9,7 @@ import {
   SKILL_PLATFORMS, frontField, hasNameConflict, projectLabel, setFrontField, skillTemplate, targetDirHint, validSkillName,
 } from "@/lib/skillsManager"
 import { JoluButton } from "@/components/ui/JoluButton"
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog"
 import { useToast } from "@/components/ui/Toast"
 import { providerName } from "@/components/usage/usageControls"
 import { DialogShell, Field, FieldSelect, INPUT_CLASS, MarkdownPreview, Tag } from "./skillParts"
@@ -83,6 +84,8 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
   const [external, setExternal] = useState(false)
   const [expected, setExpected] = useState<number | null>(editing ? target.item.modified_ms : null)
   const [leaving, setLeaving] = useState(false)
+  const [replacingTemplate, setReplacingTemplate] = useState(false)
+  const templateTrigger = useRef<HTMLButtonElement>(null)
   const [diff, setDiff] = useState<DiskVersion | null>(null)
   const [loadingDiff, setLoadingDiff] = useState(false)
 
@@ -198,7 +201,7 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
         </div>
       </div>
 
-      <section className="flex flex-col gap-4 rounded-xl border border-jolu-border bg-jolu-bg p-5">
+      <section className="jolu-card flex flex-col gap-4 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5">
         <div className="flex gap-4">
           <Field label="名称 *">
             <input value={name} disabled={editing || saving} onChange={(e) => updateName(e.target.value.trim())} placeholder="例如 api-review" aria-label="名称" className={INPUT_CLASS} />
@@ -222,19 +225,19 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
       </section>
 
       <div className="flex h-[490px] gap-4">
-        <section className="flex min-w-0 flex-1 flex-col gap-3.5 rounded-xl border border-jolu-border bg-jolu-side p-5">
+        <section className="jolu-card flex min-w-0 flex-1 flex-col gap-3.5 rounded-xl border border-jolu-border bg-jolu-side p-5">
           <div className="flex h-7 items-center justify-between">
             <span className="font-mono text-[13px] font-semibold text-jolu-text">SKILL.md</span>
             <Menu.Root modal={false}>
-              <Menu.Trigger disabled={saving} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
+              <Menu.Trigger ref={templateTrigger} disabled={saving} className="jolu-control inline-flex h-7 items-center gap-1.5 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent">
                 插入模板<ChevronDown aria-hidden className="size-4" />
               </Menu.Trigger>
               <Menu.Portal>
-                <Menu.Content align="end" sideOffset={6} className="motion-popover z-[100] w-[220px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
+                <Menu.Content align="end" sideOffset={6} className="motion-popover z-[100] w-[220px] rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover">
                   <Menu.Item
                     disabled={saving}
                     className="flex h-8 cursor-default select-none items-center gap-2 rounded-md px-2 text-xs text-jolu-text outline-none data-[highlighted]:bg-jolu-side"
-                    onSelect={() => setContent(skillTemplate(name, description))}
+                    onSelect={() => { if (content !== skillTemplate(name, description)) setReplacingTemplate(true) }}
                   >
                     <FileText aria-hidden className="size-4 text-jolu-muted" />基础模板（替换当前内容）
                   </Menu.Item>
@@ -252,14 +255,14 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
             className="min-h-0 flex-1 resize-none bg-transparent font-mono text-[11px] leading-5 text-jolu-text outline-none"
           />
         </section>
-        <section className="flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto rounded-xl border border-jolu-border bg-jolu-bg p-6">
+        <section className="jolu-card flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto rounded-xl border border-jolu-border bg-jolu-cc-surface p-6">
           <span className="text-xs font-semibold text-jolu-on">实时预览</span>
           <MarkdownPreview source={content} />
         </section>
       </div>
 
       {external ? (
-        <section role="alert" className="flex flex-col gap-2.5 rounded-xl border border-jolu-border bg-jolu-bg p-4">
+        <section role="alert" className="jolu-card flex flex-col gap-2.5 rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
           <Tag tone="danger">检测到外部修改</Tag>
           <p className="text-xs text-jolu-muted">文件已被其他程序修改。当前草稿已保留，查看差异后再决定如何合并。</p>
           <div className="flex gap-2">
@@ -288,6 +291,16 @@ export function SkillEditor({ target, items, platforms, projects, onCancel, onSa
       )}
 
       {diff && <DiffDialog disk={diff} draft={content} onUseDisk={() => applyDisk(diff)} onKeepDraft={() => void keepDraft(diff.modified)} onClose={() => setDiff(null)} />}
+
+      {replacingTemplate && <ConfirmDialog
+        title="替换当前内容？"
+        description="基础模板会替换编辑器中的全部内容。尚未保存的修改将丢失，磁盘文件不会改变。"
+        confirmLabel="替换模板"
+        returnFocusTo={templateTrigger.current}
+        danger
+        onClose={() => setReplacingTemplate(false)}
+        onConfirm={() => setContent(skillTemplate(name, description))}
+      />}
 
       {leaving && (
         <DialogShell width={420} title="离开编辑器？" onClose={() => setLeaving(false)}>

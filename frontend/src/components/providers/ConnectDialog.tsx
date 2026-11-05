@@ -265,7 +265,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
         <Dialog.Content
           aria-describedby={undefined}
-          className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[720px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-7 shadow-dialog outline-none"
+          className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[720px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-cc-surface p-7 shadow-dialog outline-none"
         >
           <div className="flex items-center justify-between">
             <Dialog.Title className="text-xl font-semibold text-jolu-text">
@@ -303,7 +303,7 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
             )}
 
             {tabs ? (
-              <div role="tablist" aria-label="连接方式" className="flex h-[38px] gap-1 rounded-lg bg-jolu-side p-[3px]">
+              <div role="tablist" aria-label="连接方式" className="jolu-tablist h-[38px] w-full">
                 {(["subscription", "apiKey"] as const).map((value) => (
                   <button
                     key={value}
@@ -312,8 +312,8 @@ export function ConnectDialog({ platform: initialPlatform, actions, onClose: onD
                     aria-selected={mode === value}
                     onClick={() => { if (!savingRef.current && value !== mode) { invalidateModels(); setMode(value); setError(null) } }}
                     className={cn(
-                      "flex-1 rounded-md text-[13px] outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
-                      mode === value ? "bg-jolu-bg font-semibold text-jolu-on" : "text-jolu-muted hover:text-jolu-text",
+                      "jolu-tab h-[30px] flex-1 text-[13px]",
+                      mode === value && "font-semibold",
                     )}
                   >
                     {value === "subscription" ? "订阅" : "API Key"}
@@ -581,7 +581,7 @@ function ProtocolPicker({ value, onChange }: { value: ApiProtocol; onChange: (pr
   return (
     <div className="flex flex-col gap-[7px]">
       <span id={labelId} className="text-xs font-medium text-jolu-text">协议 *</span>
-      <div role="radiogroup" aria-labelledby={labelId} className="flex h-[38px] gap-1 rounded-lg bg-jolu-side p-[3px]">
+      <div role="radiogroup" aria-labelledby={labelId} className="jolu-tablist h-[38px] w-full">
         {API_PROTOCOLS.map((item) => (
           <button
             key={item}
@@ -590,8 +590,8 @@ function ProtocolPicker({ value, onChange }: { value: ApiProtocol; onChange: (pr
             aria-checked={value === item}
             onClick={() => onChange(item)}
             className={cn(
-              "flex-1 rounded-md text-[13px] outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
-              value === item ? "bg-jolu-bg font-semibold text-jolu-on" : "text-jolu-muted hover:text-jolu-text",
+              "jolu-tab h-[30px] flex-1 text-[13px]",
+              value === item && "font-semibold",
             )}
           >
             {protocolLabel(item)}
@@ -620,7 +620,7 @@ function PlatformSwitcher({ current, onPick }: { current: ProviderId; onPick: (p
         <JoluButton variant="neutral">更换平台</JoluButton>
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="end" sideOffset={6} collisionPadding={12} style={{maxHeight:"var(--radix-dropdown-menu-content-available-height)"}} className="motion-popover z-[100] w-[220px] overflow-y-auto rounded-lg border border-jolu-border bg-jolu-bg p-[5px] shadow-popover">
+        <Menu.Content align="end" sideOffset={6} collisionPadding={12} style={{maxHeight:"var(--radix-dropdown-menu-content-available-height)"}} className="motion-popover z-[100] w-[220px] overflow-y-auto rounded-lg border border-jolu-border bg-jolu-cc-surface p-[5px] shadow-popover">
           {PROVIDERS.map((item) => {
             const pending = item.subscription !== "ready" && item.apiKey !== "ready"
             return (
@@ -689,7 +689,7 @@ export function ModelPicker({ models, value, onChange }: { models: string[]; val
         <ChevronDown aria-hidden className={cn("size-4 shrink-0 text-jolu-muted transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="motion-popover absolute inset-x-0 top-full z-10 mt-1.5 flex flex-col gap-1.5 rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
+        <div className="motion-popover absolute inset-x-0 top-full z-10 mt-1.5 flex flex-col gap-1.5 rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover">
           <label className="flex h-8 items-center gap-2 rounded-md bg-jolu-side px-2">
             <Search aria-hidden className="size-3.5 shrink-0 text-jolu-muted" />
             <input

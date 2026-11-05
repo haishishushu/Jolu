@@ -1,6 +1,6 @@
 import { JoluSwitch as Switch } from "@/components/ui/JoluSwitch"
 import { ContentTransition, LoadingSurface } from "@/components/ui/LoadingSurface"
-import { useMemo, useState, type ReactNode } from "react"
+import { useMemo, useRef, useState, type ReactNode } from "react"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { Check, CopyPlus, Ellipsis, Info, LoaderCircle, PictureInPicture2, RefreshCw, Scan } from "lucide-react"
 import { api, isTauri, type AppSettings, type DockEdgeDto, type IslandStyle } from "@/lib/api"
@@ -10,6 +10,7 @@ import { SelectField, type SelectOption } from "@/components/ui/SelectField"
 import { useToast } from "@/components/ui/Toast"
 import { useSettings } from "@/hooks/useSettings"
 import { useConnections } from "@/hooks/useConnections"
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog"
 
 /** 本体 + 分身最多 8 个（后端 island_clones 同一上限） */
 const MAX_ISLANDS = 8
@@ -22,7 +23,7 @@ const POSITION_OPTIONS: SelectOption[] = [
   { value: "right", label: "右侧停靠" },
 ]
 
-const SELECT = "h-8 rounded-[8px] border-jolu-border bg-jolu-bg px-2.5 text-jolu-text hover:bg-jolu-stage"
+const SELECT = "jolu-control h-8 rounded-[8px] border-jolu-border bg-jolu-bg px-2.5 text-jolu-text hover:bg-jolu-stage"
 
 /**
  * 灵动岛页（Jolu.pen 模块 A 画板 01 / 02「完整灵动岛设置」）。
@@ -192,6 +193,7 @@ function ClonesSection({ settings, ready }: { settings: AppSettings; ready: bool
   const cfg = useSettings()
   const [source, setSource] = useState("")
   const [creating, setCreating] = useState(false)
+  const [destroying, setDestroying] = useState<{ id: string | null; name: string; trigger: HTMLButtonElement | null } | null>(null)
   const count = 1 + settings.island_clones.length
   const hidden = !settings.island_visible
 
@@ -237,7 +239,7 @@ function ClonesSection({ settings, ready }: { settings: AppSettings; ready: bool
             type="button"
             disabled={!ready || !isTauri || creating || count >= MAX_ISLANDS}
             onClick={create}
-            className="flex h-8 items-center gap-1.5 rounded-lg bg-jolu-selected px-2.5 text-xs font-medium text-jolu-on outline-none hover:brightness-[0.97] active:bg-jolu-pressed focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-45"
+            className="jolu-control flex h-8 items-center gap-1.5 rounded-lg border border-jolu-border bg-jolu-cc-surface px-2.5 text-xs font-medium text-jolu-on outline-none hover:brightness-[0.97] active:bg-jolu-pressed focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-45"
           >
             {creating ? <LoaderCircle aria-hidden className="size-4 animate-spin" /> : <CopyPlus aria-hidden className="size-4" />}
             开启分身
@@ -245,7 +247,7 @@ function ClonesSection({ settings, ready }: { settings: AppSettings; ready: bool
         </div>
       </div>
 
-      <div role="table" aria-label="灵动岛窗口" className="overflow-hidden rounded-[9px] border border-jolu-border">
+      <div role="table" aria-label="灵动岛窗口" className="jolu-card overflow-hidden rounded-xl border border-jolu-border bg-jolu-cc-surface">
         <div role="row" className="grid h-7 grid-cols-[110px_minmax(0,1fr)_160px_32px] items-center gap-4 bg-jolu-side px-4 text-[11px] text-jolu-muted">
           <span role="columnheader">目标窗口</span>
           <span role="columnheader">显示连接</span>
@@ -283,36 +285,35 @@ function ClonesSection({ settings, ready }: { settings: AppSettings; ready: bool
               />
             </span>
             <span role="cell">
-              <RowMenu name={row.name} canDestroy={count > 1 && isTauri} onDestroy={() => {
-                void api.islandAction("clone_destroy", row.id)
-                  .then(() => toast.success(`已销毁${row.name}`))
-                  .catch((reason) => toast.danger("销毁失败", String(reason)))
-              }} />
+              <RowMenu name={row.name} canDestroy={count > 1 && isTauri} onDestroy={trigger => setDestroying({ id: row.id, name: row.name, trigger })} />
             </span>
           </div>
         ))}
       </div>
       {conn.error && <p role="status" className="text-[11px] text-jolu-danger">连接列表读取失败：{conn.error}</p>}
       <p className="text-[11px] text-jolu-muted">新分身沿用来源窗口的连接；最多 8 个，最后一个不可销毁。关闭显示时，连接与位置操作禁用。</p>
+      {destroying && <ConfirmDialog returnFocusTo={destroying.trigger} title={`销毁「${destroying.name}」？`} description="将关闭这个灵动岛并移除它的窗口配置。账号连接和历史统计会保留。" confirmLabel="销毁灵动岛" danger onClose={() => setDestroying(null)} onConfirm={async () => { await api.islandAction("clone_destroy", destroying.id); toast.success(`已销毁${destroying.name}`) }} />}
     </section>
   )
 }
 
 /** 分身「更多」菜单：危险操作收起在这里（Jolu.pen 画板 104「分身操作 · 收起危险操作」） */
-function RowMenu({ name, canDestroy, onDestroy }: { name: string; canDestroy: boolean; onDestroy: () => void }) {
+function RowMenu({ name, canDestroy, onDestroy }: { name: string; canDestroy: boolean; onDestroy: (trigger: HTMLButtonElement | null) => void }) {
+  const trigger = useRef<HTMLButtonElement>(null)
   return (
     <Menu.Root modal={false}>
       <Menu.Trigger
+        ref={trigger}
         aria-label={`${name}的更多操作`}
         className="grid size-8 place-items-center rounded-lg bg-jolu-side text-jolu-muted outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage"
       >
         <Ellipsis aria-hidden className="size-[18px]" />
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="end" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] min-w-[140px] rounded-[8px] border border-jolu-border bg-jolu-bg p-1 shadow-popover">
+        <Menu.Content align="end" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] min-w-[140px] rounded-[8px] border border-jolu-border bg-jolu-cc-surface p-1 shadow-popover">
           <Menu.Item
             disabled={!canDestroy}
-            onSelect={onDestroy}
+            onSelect={() => onDestroy(trigger.current)}
             className="flex h-8 cursor-default select-none items-center rounded-[6px] px-2.5 text-xs text-jolu-danger outline-none data-[highlighted]:bg-jolu-danger-soft data-[disabled]:text-jolu-muted data-[disabled]:opacity-60"
           >
             销毁此灵动岛
@@ -339,7 +340,7 @@ function ActionButton({ action, icon, label, done }: { action: "refresh" | "rese
       type="button"
       disabled={busy || !isTauri}
       onClick={() => void run()}
-      className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-jolu-side px-2.5 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-45 [&_svg]:text-jolu-muted"
+      className="jolu-control flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-jolu-border bg-jolu-cc-surface px-2.5 text-xs font-medium text-jolu-text outline-none hover:bg-jolu-stage active:bg-jolu-track focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:pointer-events-none disabled:opacity-45 [&_svg]:text-jolu-muted"
     >
       {busy ? <LoaderCircle aria-hidden className="size-4 animate-spin" /> : icon}
       {label}
@@ -351,7 +352,7 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col gap-2">
       <h2 className="text-sm font-semibold text-jolu-text">{title}</h2>
-      <div className="flex flex-col overflow-hidden rounded-[9px] border border-jolu-border [&>*+*]:border-t [&>*+*]:border-jolu-border">{children}</div>
+      <div className="jolu-card flex flex-col overflow-hidden rounded-xl border border-jolu-border bg-jolu-cc-surface [&>*+*]:border-t [&>*+*]:border-jolu-border">{children}</div>
     </section>
   )
 }
@@ -359,7 +360,7 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 /** 设置行：标题 13/500 + 说明 11 灰字，控件靠右；card 为独立带框的一行 */
 function Row({ title, desc, control, card = false, className }: { title: string; desc: string; control: ReactNode; card?: boolean; className?: string }) {
   return (
-    <div className={cn("flex h-14 items-center gap-[18px] px-4", card && "border border-jolu-border bg-jolu-bg", className)}>
+    <div className={cn("flex h-14 items-center gap-[18px] px-4", card && "jolu-card border border-jolu-border bg-jolu-cc-surface", className)}>
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="text-[13px] font-medium text-jolu-text">{title}</span>
         <span className="truncate text-[11px] text-jolu-muted" title={desc}>{desc}</span>

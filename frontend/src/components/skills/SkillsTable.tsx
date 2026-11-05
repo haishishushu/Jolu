@@ -32,7 +32,7 @@ export function SkillsTable({ items, total, selected, busy, showPlatform, onSele
   const picked = items.filter((i) => selected.has(skillKey(i))).length
   const HeadBox = picked === 0 ? Square : picked === items.length ? SquareCheck : SquareMinus
   return (
-    <section className="overflow-hidden rounded-xl border border-jolu-border bg-jolu-bg">
+    <section className="jolu-card overflow-hidden rounded-xl border border-jolu-border bg-jolu-cc-surface">
       <div className={cn(COLS, "h-10 bg-jolu-side px-3.5 text-[11px] font-medium text-jolu-muted")}>
         <button type="button" aria-label={picked ? "取消全选" : "全选当前结果"} onClick={() => onSelectAll(picked === 0)} className="grid size-5 place-items-center rounded outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent">
           <HeadBox aria-hidden className={cn("size-3.5", picked ? "text-jolu-on" : "text-jolu-muted")} />
@@ -84,11 +84,11 @@ export function SkillsTable({ items, total, selected, busy, showPlatform, onSele
                 <ChevronRight aria-hidden className="size-4" />
               </button>
               <Menu.Root modal={false}>
-                <Menu.Trigger aria-label={`${item.name} 更多操作`} className="grid h-7 w-6 place-items-center rounded-lg border border-jolu-border bg-jolu-bg text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage">
+                <Menu.Trigger aria-label={`${item.name} 更多操作`} className="jolu-control grid h-7 w-6 place-items-center rounded-lg border border-jolu-border bg-jolu-bg text-jolu-text outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent data-[state=open]:bg-jolu-stage">
                   <Ellipsis aria-hidden className="size-4" />
                 </Menu.Trigger>
                 <Menu.Portal>
-                  <Menu.Content align="end" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] w-[176px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
+                  <Menu.Content align="end" sideOffset={6} collisionPadding={12} className="motion-popover z-[100] w-[176px] rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover">
                     <Menu.Item className={MENU_ITEM} onSelect={() => onOpenDir(item)}><FolderOpen aria-hidden className="size-4 text-jolu-muted" />打开目录</Menu.Item>
                     <Menu.Item className={MENU_ITEM} disabled={item.readonly} onSelect={() => onEdit(item)}><Pencil aria-hidden className="size-4 text-jolu-muted" />编辑 Skill</Menu.Item>
                     <Menu.Item className={MENU_ITEM} onSelect={() => onCopy(item)}><Copy aria-hidden className="size-4 text-jolu-muted" />复制到供应商</Menu.Item>

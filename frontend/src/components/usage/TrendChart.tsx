@@ -139,7 +139,7 @@ export function TrendChart({ points, bucket, mode, onDrill }: {
       {point && (
         <div
           role="tooltip"
-          className="pointer-events-none absolute top-0 z-10 flex w-[200px] flex-col gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover"
+          className="pointer-events-none absolute top-0 z-10 flex w-[200px] flex-col gap-2 rounded-xl border border-jolu-border bg-jolu-cc-surface p-3 shadow-popover"
           style={xAt(hover, points.length, plot.width) > plot.width / 2
             ? { right: plot.width - xAt(hover, points.length, plot.width) + 12 }
             : { left: AXIS_W + xAt(hover, points.length, plot.width) + 12 }}

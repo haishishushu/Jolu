@@ -90,7 +90,7 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
         )}
       </div>
 
-      <section className="flex min-h-[92px] items-center gap-4 rounded-xl border border-jolu-border bg-jolu-bg p-5">
+      <section className="jolu-card flex min-h-[92px] items-center gap-4 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5">
         <SkillIcon item={current} size={48} />
         <div className="flex min-w-0 flex-1 flex-col gap-[7px]">
           <h2 className="truncate text-xl font-semibold text-jolu-text">{current.name}</h2>
@@ -105,7 +105,7 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
         <p role="alert" className="rounded-[10px] bg-jolu-danger-soft px-4 py-3 text-xs text-jolu-danger">读取失败：{error}</p>
       ) : (
         <div className="flex min-h-[650px] gap-4">
-          <aside className="flex w-[280px] shrink-0 flex-col gap-4 rounded-xl border border-jolu-border bg-jolu-bg p-4">
+          <aside className="jolu-card flex w-[280px] shrink-0 flex-col gap-4 rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
             <h3 className="text-sm font-semibold text-jolu-text">文件与来源</h3>
             <div className="flex max-h-[260px] flex-col gap-0.5 overflow-y-auto">
               {!detail && <LoaderCircle aria-hidden className="size-4 animate-spin text-jolu-muted" />}
@@ -147,7 +147,7 @@ export function SkillDetail({ item, onBack, onEdit, onCopy, onOpenDir }: {
             <JoluButton variant="outline" size="sm" className="h-[30px] self-start" onClick={() => void copyPath()}><Copy aria-hidden />复制路径</JoluButton>
           </aside>
 
-          <section className="flex min-w-0 flex-1 flex-col gap-[18px] rounded-xl border border-jolu-border bg-jolu-bg p-6">
+          <section className="jolu-card flex min-w-0 flex-1 flex-col gap-[18px] rounded-xl border border-jolu-border bg-jolu-cc-surface p-6">
             <div role="tablist" aria-label="内容视图" className="flex h-8 shrink-0 gap-5 border-b border-jolu-border">
               {(["preview", "source"] as const).map((key) => (
                 <button

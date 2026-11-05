@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
+import * as RadixDialog from "@radix-ui/react-dialog"
 import {
   Cable, ChevronDown, ChevronRight, Folder, GripVertical, Link2, Pin, PinOff, Plus, Settings2, ShieldAlert, TriangleAlert, Users, X,
 } from "lucide-react"
@@ -14,6 +15,8 @@ import { useConnections } from "@/hooks/useConnections"
 import { useToast } from "@/components/ui/Toast"
 import { GatewayAccessBar } from "@/components/gateway/GatewayAccessBar"
 import { JoluSwitch } from "@/components/ui/JoluSwitch"
+import { ConfirmDialog as ActionConfirmDialog } from "@/components/ui/ConfirmDialog"
+import { JoluButton } from "@/components/ui/JoluButton"
 import { AppIcon } from "@/components/brand/AppIcon"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import type { Connection, PlatformId } from "@/types"
@@ -35,6 +38,7 @@ type Dialog =
   | { kind: "gemini" }
   | { kind: "restore-failed"; message: string; agent: string }
   | { kind: "catalog" }
+  | { kind: "confirm"; title: string; description: string; label: string; danger?: boolean; work: () => Promise<boolean | void> }
   | null
 
 type LinkPath = { key: string; d: string; connected: boolean }
@@ -109,6 +113,8 @@ export function GatewayView() {
   const initialView = readViewState()
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const operationLock = useRef(false)
+  const accessTrigger = useRef<HTMLButtonElement>(null)
   const [view, setView] = useState<"group" | "flat">(initialView.view === "flat" ? "flat" : "group")
   const [onlyServing, setOnlyServing] = useState(initialView.onlyServing === true)
   const [editing, setEditing] = useState(false)
@@ -160,8 +166,9 @@ export function GatewayView() {
     return () => window.clearInterval(timer)
   }, [refresh])
 
-  const run = async (work: () => Promise<unknown>, ok?: string) => {
-    if (busy) return false
+  const run = async (work: () => Promise<unknown>, ok?: string, throwOnFailure = false) => {
+    if (operationLock.current) return false
+    operationLock.current = true
     setBusy(true)
     try {
       await work()
@@ -170,8 +177,10 @@ export function GatewayView() {
       return true
     } catch (error) {
       toast.danger("操作失败", String(error))
+      if (throwOnFailure) throw error
       return false
     } finally {
+      operationLock.current = false
       setBusy(false)
     }
   }
@@ -327,8 +336,11 @@ export function GatewayView() {
   const wire = (agent: string) => {
     if (agent === "codex") return setDialog({ kind: "codex" })
     if (agent === "gemini") return setDialog({ kind: "gemini" })
-    void run(() => gatewayApi.setWiring(agent, true), `已接入 ${agentLabel(agent)}`)
+    setDialog({ kind: "confirm", title: `接入 ${agentLabel(agent)}？`, description: "将更新这个工具的本机配置，使其通过 Jolu 模型入口调用模型。原连接配置会被保留，断开时恢复。", label: "确认接入", work: () => run(() => gatewayApi.setWiring(agent, true), `已接入 ${agentLabel(agent)}`, true) })
   }
+
+  const confirmUnwire = (agent: string) => setDialog({ kind: "confirm", title: `断开 ${agentLabel(agent)}？`, description: "将恢复这个工具接入前的连接配置，后续请求不再通过 Jolu 模型入口。", label: "确认断开", danger: true, work: () => run(() => gatewayApi.setWiring(agent, false), `已断开 ${agentLabel(agent)}`, true) })
+  const confirmAccept = (agent: string) => setDialog({ kind: "confirm", title: `接受 ${agentLabel(agent)} 的现有配置？`, description: "将以工具当前的外部配置为准，结束 Jolu 对这份接线记录的管理。确认前请核对配置变动。", label: "接受现状", work: () => run(() => gatewayApi.acceptWiring(agent), "已接受现状", true) })
 
   const unwire = async (agent: string) => {
     if (!isTauri) return
@@ -458,9 +470,11 @@ export function GatewayView() {
   const deleteGroup = async (kind: GroupKind, group: GatewayGroupDto) => {
     setClosing(`${kind}:${group.id}`)
     await new Promise((resolve) => window.setTimeout(resolve, 200))
-    const ok = await run(() => gatewayApi.deleteGroup(kind, group.id), "已删除分组")
-    setClosing(null)
-    if (ok) setDialog(null)
+    try {
+      return await run(() => gatewayApi.deleteGroup(kind, group.id), "已删除分组", true)
+    } finally {
+      setClosing(null)
+    }
   }
 
   return (
@@ -472,7 +486,7 @@ export function GatewayView() {
             把官方订阅、API Key 和第三方 Key 接进同一个本机入口，各工具按「来源/模型」取用。
           </p>
         </div>
-        <button type="button" onClick={() => setDialog({ kind: "wiring" })} className="motion-button flex h-8 items-center gap-2 rounded-lg border border-jolu-border px-3 text-[11.5px] text-jolu-text hover:bg-jolu-side">
+        <button ref={accessTrigger} type="button" onClick={() => setDialog({ kind: "wiring" })} className="jolu-control motion-button flex h-8 items-center gap-2 rounded-lg border border-jolu-border bg-jolu-cc-surface px-3 text-[11.5px] text-jolu-text hover:bg-jolu-side">
           <Cable className="h-3.5 w-3.5" />
           接入设置
         </button>
@@ -482,7 +496,11 @@ export function GatewayView() {
 
       <GatewayAccessBar status={status} loading={loading} busy={busy} desktop={isTauri}
         sources={serving.length} models={catalog.length} agents={wired}
-        onToggle={(on) => { void run(() => gatewayApi.setMode(on ? "relay" : "observe", status?.default_connection ?? null), on ? "模型转发已开启" : "已关闭模型转发，一键接入的工具已恢复原连接") }} />
+        onToggle={(on) => {
+          const work = (throwOnFailure = false) => run(() => gatewayApi.setMode(on ? "relay" : "observe", status?.default_connection ?? null), on ? "模型转发已开启" : "已关闭模型转发，一键接入的工具已恢复原连接", throwOnFailure)
+          if (!on && wired > 0) setDialog({ kind: "confirm", title: "关闭模型转发？", description: `将停止模型入口转发，并把 ${wired} 个已接入工具恢复到原连接。正在使用模型入口的调用可能中断。`, label: "确认关闭", danger: true, work: () => work(true) })
+          else void work()
+        }} />
 
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1 rounded-lg bg-jolu-track p-0.5">
@@ -616,7 +634,7 @@ export function GatewayView() {
 
         <div className="relative z-10 flex flex-col gap-2.5">
           <ColumnHeader step="2" title="模型池" count={`${serving.length} 在池`} />
-          <div ref={hubRef} className={cn("flex flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-3", running && "gw-hub-running")}>
+          <div ref={hubRef} className={cn("jolu-card flex flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-3", running && "gw-hub-running")}>
             <div className="flex items-center gap-2.5">
               <AppIcon size={32} className="rounded-lg" />
               <div className="flex min-w-0 flex-col gap-0.5">
@@ -679,7 +697,7 @@ export function GatewayView() {
                     {...groupDragProps("agent", group)}
                   >
                     {visibleAgents(members).map((entry) => (
-                      <AgentRow key={entry.agent} entry={entry} busy={busy || !isTauri} editing={editing} groups={agentGroups} onWire={() => wire(entry.agent)} onUnwire={() => void unwire(entry.agent)} onAccept={() => run(() => gatewayApi.acceptWiring(entry.agent), "已接受现状")} onMove={(groupId) => void move("agent", entry.agent, groupId)} />
+                      <AgentRow key={entry.agent} entry={entry} busy={busy || !isTauri} editing={editing} groups={agentGroups} onWire={() => wire(entry.agent)} onUnwire={() => confirmUnwire(entry.agent)} onAccept={() => confirmAccept(entry.agent)} onMove={(groupId) => void move("agent", entry.agent, groupId)} />
                     ))}
                   </GroupCard>
                 )
@@ -704,7 +722,7 @@ export function GatewayView() {
                 dropTarget={false}
               >
                 {visibleAgents(ungroupedAgents).map((entry) => (
-                  <AgentRow key={entry.agent} entry={entry} busy={busy || !isTauri} editing={editing} groups={agentGroups} onWire={() => wire(entry.agent)} onUnwire={() => void unwire(entry.agent)} onAccept={() => run(() => gatewayApi.acceptWiring(entry.agent), "已接受现状")} onMove={(groupId) => void move("agent", entry.agent, groupId)} />
+                  <AgentRow key={entry.agent} entry={entry} busy={busy || !isTauri} editing={editing} groups={agentGroups} onWire={() => wire(entry.agent)} onUnwire={() => confirmUnwire(entry.agent)} onAccept={() => confirmAccept(entry.agent)} onMove={(groupId) => void move("agent", entry.agent, groupId)} />
                 ))}
               </GroupCard>
               <AddCard label="新建 Agent 分组" hint="或拖入 Agent" onClick={() => setDialog({ kind: "new-group", groupKind: "agent" })} />
@@ -712,7 +730,7 @@ export function GatewayView() {
           ) : (
             <FlatList>
               {visibleAgents(agents).map((entry) => (
-                <AgentRow key={entry.agent} entry={entry} busy={busy || !isTauri} editing={editing} groups={agentGroups} onWire={() => wire(entry.agent)} onUnwire={() => void unwire(entry.agent)} onAccept={() => run(() => gatewayApi.acceptWiring(entry.agent), "已接受现状")} onMove={(groupId) => void move("agent", entry.agent, groupId)} />
+                <AgentRow key={entry.agent} entry={entry} busy={busy || !isTauri} editing={editing} groups={agentGroups} onWire={() => wire(entry.agent)} onUnwire={() => confirmUnwire(entry.agent)} onAccept={() => confirmAccept(entry.agent)} onMove={(groupId) => void move("agent", entry.agent, groupId)} />
               ))}
             </FlatList>
           )}
@@ -729,7 +747,7 @@ export function GatewayView() {
       </section>
 
       {dialog?.kind === "new-group" && <NewGroupDialog kind={dialog.groupKind} busy={busy} onClose={() => setDialog(null)} onCreate={(name) => void createGroup(dialog.groupKind, name)} />}
-      {dialog?.kind === "delete-group" && <ConfirmDialog title={`删除「${dialog.group.name}」？`} warning="组里的成员会回到「未分组」；来源、连接和模型都不会被删除。" confirm="删除分组" danger busy={busy} onClose={() => setDialog(null)} onConfirm={() => void deleteGroup(dialog.groupKind, dialog.group)} />}
+      {dialog?.kind === "delete-group" && <ConfirmDialog title={`删除「${dialog.group.name}」？`} warning="组里的成员会回到「未分组」；来源、连接和模型都不会被删除。" confirm="删除分组" danger busy={busy} onClose={() => setDialog(null)} onConfirm={() => deleteGroup(dialog.groupKind, dialog.group)} />}
       {dialog?.kind === "rename" && (
         <RenameDialog connection={dialog.connection} busy={busy} onClose={() => setDialog(null)} onSave={async (name, slug) => {
           const ok = await run(async () => {
@@ -740,10 +758,11 @@ export function GatewayView() {
         }} />
       )}
       {dialog?.kind === "serve-conflict" && <MessageDialog title="这个来源没有加入模型池" tone="danger" message={dialog.message} onClose={() => setDialog(null)} />}
-      {dialog?.kind === "wiring" && <WiringDialog agents={agents} busy={busy} onClose={() => setDialog(null)} onWire={(agent) => { setDialog(null); wire(agent) }} onUnwire={(agent) => { setDialog(null); void unwire(agent) }} onAccept={(agent) => run(() => gatewayApi.acceptWiring(agent), "已接受现状")} />}
-      {dialog?.kind === "codex" && <CodexDialog mode={agents.find((entry) => entry.agent === "codex")?.codex_mode ?? "provider"} busy={busy} onClose={() => setDialog(null)} onConfirm={async () => { setDialog(null); await run(() => gatewayApi.setWiring("codex", true), "已接入 Codex") }} />}
-      {dialog?.kind === "gemini" && <GeminiDialog busy={busy} onClose={() => setDialog(null)} onConfirm={async () => { setDialog(null); await run(() => gatewayApi.setWiring("gemini", true), "已接入 Gemini CLI") }} />}
+      {dialog?.kind === "wiring" && <WiringDialog agents={agents} busy={busy} onClose={() => setDialog(null)} onWire={(agent) => { setDialog(null); wire(agent) }} onUnwire={confirmUnwire} onAccept={confirmAccept} />}
+      {dialog?.kind === "codex" && <CodexDialog returnFocusTo={accessTrigger.current} mode={agents.find((entry) => entry.agent === "codex")?.codex_mode ?? "provider"} busy={busy} onClose={() => setDialog(null)} onConfirm={() => run(() => gatewayApi.setWiring("codex", true), "已接入 Codex", true)} />}
+      {dialog?.kind === "gemini" && <GeminiDialog returnFocusTo={accessTrigger.current} busy={busy} onClose={() => setDialog(null)} onConfirm={() => run(() => gatewayApi.setWiring("gemini", true), "已接入 Gemini CLI", true)} />}
       {dialog?.kind === "restore-failed" && <MessageDialog title="没能恢复工具配置" tone="danger" message={dialog.message} action={{ label: "重试断开", onClick: async () => { setDialog(null); await unwire(dialog.agent) } }} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "confirm" && <ActionConfirmDialog returnFocusTo={accessTrigger.current} title={dialog.title} description={dialog.description} confirmLabel={dialog.label} danger={dialog.danger} onClose={() => setDialog(null)} onConfirm={dialog.work} />}
       {dialog?.kind === "catalog" && <CatalogDialog models={catalog} onClose={() => setDialog(null)} />}
     </div>
   )
@@ -974,7 +993,7 @@ function FlatList({ children }: { children: React.ReactNode }) {
 
 function RouteLog({ rows }: { rows: RouteLogDto[] }) {
   return (
-    <section className="flex flex-col overflow-hidden rounded-xl border border-jolu-border bg-jolu-bg">
+    <section className="jolu-card flex flex-col overflow-hidden rounded-xl border border-jolu-border bg-jolu-cc-surface">
       <header className="flex h-11 items-center gap-2 px-4">
         <Link2 className="h-3.5 w-3.5 text-jolu-on" />
         <span className="text-[12.5px] text-jolu-text">路由流水</span>
@@ -1011,27 +1030,30 @@ function Notice({ tone, children }: { tone: "muted" | "danger"; children: React.
 
 /* ─────────────────────────── 弹窗 ─────────────────────────── */
 
-function Modal({ title, icon, tone, children, footer, onClose }: { title: string; icon?: React.ReactNode; tone?: "danger"; children: React.ReactNode; footer: React.ReactNode; onClose: () => void }) {
-  return (
-    <div className="motion-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6" onClick={onClose}>
-      <div className="motion-dialog gw-dialog-enter flex max-h-[86vh] w-full max-w-[540px] flex-col gap-3 overflow-y-auto rounded-[14px] border border-jolu-border bg-jolu-bg p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+function Modal({ title, icon, tone, children, footer, onClose, busy = false }: { title: string; icon?: React.ReactNode; tone?: "danger"; children: React.ReactNode; footer: React.ReactNode; onClose: () => void; busy?: boolean }) {
+  const trigger = useRef(document.activeElement)
+  return <RadixDialog.Root open onOpenChange={value => { if (!value && !busy) onClose() }}>
+    <RadixDialog.Portal>
+      <RadixDialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
+      <RadixDialog.Content aria-describedby={undefined} aria-busy={busy}
+        onPointerDownOutside={event => event.preventDefault()}
+        onEscapeKeyDown={event => { if (busy) event.preventDefault() }}
+        onCloseAutoFocus={event => { event.preventDefault(); if (trigger.current instanceof HTMLElement && trigger.current.isConnected) trigger.current.focus() }}
+        className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex max-h-[calc(100dvh-70px)] w-[540px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-y-auto rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none">
         <div className="flex items-center gap-2">
           {icon}
-          <span className={cn("text-[16px] font-semibold", tone === "danger" ? "text-jolu-danger" : "text-jolu-text")}>{title}</span>
-          <div className="flex-1" />
-          <button type="button" onClick={onClose} className="text-jolu-muted"><X className="h-3.5 w-3.5" /></button>
+          <RadixDialog.Title className={cn("min-w-0 flex-1 text-base font-semibold", tone === "danger" ? "text-jolu-danger" : "text-jolu-text")}>{title}</RadixDialog.Title>
+          <RadixDialog.Close aria-label="关闭" disabled={busy} className="grid size-8 shrink-0 place-items-center rounded-lg text-jolu-muted outline-none hover:bg-jolu-stage focus-visible:outline-2 focus-visible:outline-jolu-accent disabled:opacity-40"><X aria-hidden className="size-4" /></RadixDialog.Close>
         </div>
         {children}
-        <div className="flex justify-end gap-2">{footer}</div>
-      </div>
-    </div>
-  )
+        <div className="flex flex-wrap justify-end gap-2">{footer}</div>
+      </RadixDialog.Content>
+    </RadixDialog.Portal>
+  </RadixDialog.Root>
 }
 
 function Button({ label, primary, danger, disabled, onClick }: { label: string; primary?: boolean; danger?: boolean; disabled?: boolean; onClick: () => void }) {
-  return (
-    <button type="button" disabled={disabled} onClick={onClick} className={cn("motion-button h-9 rounded-lg px-3.5 text-[10.5px] disabled:opacity-40", primary ? (danger ? "bg-jolu-danger text-white" : "bg-jolu-accent text-jolu-on") : "border border-jolu-border text-jolu-text")}>{label}</button>
-  )
+  return <JoluButton variant={primary ? (danger ? "danger" : "primary") : "outline"} disabled={disabled} onClick={onClick}>{label}</JoluButton>
 }
 
 function Warning({ children, tone = "danger" }: { children: React.ReactNode; tone?: "danger" | "muted" }) {
@@ -1041,15 +1063,15 @@ function Warning({ children, tone = "danger" }: { children: React.ReactNode; ton
 function NewGroupDialog({ kind, busy, onClose, onCreate }: { kind: GroupKind; busy: boolean; onClose: () => void; onCreate: (name: string) => void }) {
   const [name, setName] = useState("")
   return (
-    <Modal title={kind === "source" ? "新建来源分组" : "新建 Agent 分组"} onClose={onClose} footer={<><Button label="取消" onClick={onClose} /><Button label="创建" primary disabled={busy || !name.trim()} onClick={() => onCreate(name.trim())} /></>}>
+    <Modal busy={busy} title={kind === "source" ? "新建来源分组" : "新建 Agent 分组"} onClose={onClose} footer={<><Button label="取消" disabled={busy} onClick={onClose} /><Button label="创建" primary disabled={busy || !name.trim()} onClick={() => onCreate(name.trim())} /></>}>
       <p className="text-[10px] text-jolu-muted">只影响排列，不改变路由、接线和 Agent 菜单。成员之后可以随时移动。</p>
-      <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="分组名称" className="h-9 rounded-lg border border-jolu-border bg-jolu-side px-3 text-[11px] text-jolu-text outline-none focus:border-jolu-accent" />
+      <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="分组名称" className="jolu-control h-9 rounded-lg border border-jolu-border bg-jolu-side px-3 text-[11px] text-jolu-text outline-none focus:border-jolu-accent" />
     </Modal>
   )
 }
 
-function ConfirmDialog({ title, warning, confirm, danger, busy, onClose, onConfirm }: { title: string; warning: string; confirm: string; danger?: boolean; busy: boolean; onClose: () => void; onConfirm: () => void }) {
-  return <Modal title={title} tone={danger ? "danger" : undefined} onClose={onClose} footer={<><Button label="取消" onClick={onClose} /><Button label={confirm} primary danger={danger} disabled={busy} onClick={onConfirm} /></>}><Warning>{warning}</Warning></Modal>
+function ConfirmDialog({ title, warning, confirm, danger, onClose, onConfirm }: { title: string; warning: string; confirm: string; danger?: boolean; busy: boolean; onClose: () => void; onConfirm: () => Promise<boolean | void> }) {
+  return <ActionConfirmDialog title={title} description={warning} confirmLabel={confirm} danger={danger} onClose={onClose} onConfirm={onConfirm} />
 }
 
 function MessageDialog({ title, tone, message, action, onClose }: { title: string; tone?: "danger"; message: string; action?: { label: string; onClick: () => void }; onClose: () => void }) {
@@ -1066,10 +1088,10 @@ function RenameDialog({ connection, busy, onClose, onSave }: { connection: Conne
   const reserved = ["route", "auto", "jolu", "group", "default"].includes(slug.trim())
   const invalid = !!slug && (!/^[a-z0-9-]+$/.test(slug) || slug.startsWith("-") || reserved)
   return (
-    <Modal title="重命名来源" onClose={onClose} footer={<><Button label="取消" onClick={onClose} /><Button label="保存" primary disabled={busy || invalid || !name.trim()} onClick={() => onSave(name.trim(), slug.trim())} /></>}>
+    <Modal busy={busy} title="重命名来源" onClose={onClose} footer={<><Button label="取消" disabled={busy} onClick={onClose} /><Button label="保存" primary disabled={busy || invalid || !name.trim()} onClick={() => onSave(name.trim(), slug.trim())} /></>}>
       <div className="flex flex-col gap-1">
         <span className="text-[9.5px] text-jolu-muted">显示名称</span>
-        <input value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded-lg border border-jolu-border bg-jolu-side px-3 text-[11px] text-jolu-text outline-none focus:border-jolu-accent" />
+        <input value={name} onChange={(event) => setName(event.target.value)} className="jolu-control h-9 rounded-lg border border-jolu-border bg-jolu-side px-3 text-[11px] text-jolu-text outline-none focus:border-jolu-accent" />
         <span className="text-[8.5px] text-jolu-muted">只改显示名；已接入的工具不受影响。</span>
       </div>
       <div className="flex flex-col gap-1">
@@ -1083,7 +1105,7 @@ function RenameDialog({ connection, busy, onClose, onSave }: { connection: Conne
 
 function WiringDialog({ agents, busy, onClose, onWire, onUnwire, onAccept }: { agents: WiringStatusDto[]; busy: boolean; onClose: () => void; onWire: (agent: string) => void; onUnwire: (agent: string) => void; onAccept: (agent: string) => void }) {
   return (
-    <Modal title="Agent 接线" onClose={onClose} footer={<Button label="关闭" onClick={onClose} />}>
+    <Modal busy={busy} title="Agent 接线" onClose={onClose} footer={<Button label="关闭" disabled={busy} onClick={onClose} />}>
       <p className="text-[9.5px] text-jolu-muted">状态按配置文件里实际写入的值判断；重新应用不会重新拍快照。</p>
       <div className="flex flex-col gap-1.5">
         {agents.map((entry) => (
@@ -1103,10 +1125,10 @@ function WiringDialog({ agents, busy, onClose, onWire, onUnwire, onAccept }: { a
   )
 }
 
-function CodexDialog({ mode, busy, onClose, onConfirm }: { mode: "oauth" | "provider"; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+function CodexDialog({ mode, returnFocusTo, onClose, onConfirm }: { mode: "oauth" | "provider"; busy: boolean; returnFocusTo?: HTMLElement | null; onClose: () => void; onConfirm: () => Promise<boolean> }) {
   const oauth = mode === "oauth"
   return (
-    <Modal title="接入 Codex" onClose={onClose} footer={<><Button label="取消" onClick={onClose} /><Button label="接入" primary disabled={busy} onClick={onConfirm} /></>}>
+    <ActionConfirmDialog returnFocusTo={returnFocusTo} title="接入 Codex" description="确认下方接线方式后更新 Codex 本机配置。" confirmLabel="接入" onClose={onClose} onConfirm={onConfirm}>
       <p className="text-[10px] text-jolu-muted">Jolu 会把 Codex 的请求转到本机模型入口；只写入 config.toml。</p>
       <div className={cn("flex flex-col gap-1.5 rounded-lg border p-3", oauth ? "border-jolu-on bg-jolu-status-success-bg" : "border-jolu-border bg-jolu-side")}>
         <span className="text-[11px] font-semibold text-jolu-text">{oauth ? "保留 ChatGPT 登录" : "使用网关 Key"}</span>
@@ -1114,13 +1136,13 @@ function CodexDialog({ mode, busy, onClose, onConfirm }: { mode: "oauth" | "prov
       </div>
       {!oauth && <Warning tone="muted">如果以后登录 ChatGPT，重新接线即可切回保留登录的接法。</Warning>}
       <Warning tone="muted">Codex 发 Responses 请求；只支持 Chat Completions 的上游会在请求时返回 404。</Warning>
-    </Modal>
+    </ActionConfirmDialog>
   )
 }
 
-function GeminiDialog({ busy, onClose, onConfirm }: { busy: boolean; onClose: () => void; onConfirm: () => void }) {
+function GeminiDialog({ returnFocusTo, onClose, onConfirm }: { busy: boolean; returnFocusTo?: HTMLElement | null; onClose: () => void; onConfirm: () => Promise<boolean> }) {
   return (
-    <Modal title="接入 Gemini CLI" tone="danger" icon={<TriangleAlert className="h-4 w-4 text-jolu-danger" />} onClose={onClose} footer={<><Button label="取消" onClick={onClose} /><Button label="确认接入" primary disabled={busy} onClick={onConfirm} /></>}>
+    <ActionConfirmDialog returnFocusTo={returnFocusTo} title="接入 Gemini CLI" description="接线期间 Gemini 将使用 Jolu 网关 Key，断开时恢复原登录方式。" confirmLabel="确认接入" onClose={onClose} onConfirm={onConfirm}>
       <Warning>接线期间 Gemini 会改用 Jolu 网关 Key，不再使用 Google 账号登录。OAuth 凭据文件不会被删除。</Warning>
       <div className="flex flex-col rounded-lg bg-jolu-side px-3">
         <Line label="当前登录方式" value="Google 账号 · oauth-personal" />
@@ -1128,7 +1150,7 @@ function GeminiDialog({ busy, onClose, onConfirm }: { busy: boolean; onClose: ()
         <Line label="断开时" value="恢复原登录方式与原 Key" />
       </div>
       <span className="text-[8.5px] text-jolu-muted">原值会存进接线记录；如果断开时还原失败，会在「Agent 接线」里提示并提供重试。</span>
-    </Modal>
+    </ActionConfirmDialog>
   )
 }
 

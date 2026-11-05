@@ -24,7 +24,7 @@ export function ProvidersView({ initialTab = "connect", accountTarget, onAccount
 
   return (
     <div className={cn("flex w-full flex-col gap-3", tab === "accounts" && "h-full min-h-0")}>
-      <div role="tablist" aria-label="供应商" className="flex h-11 shrink-0 gap-6 border-b border-jolu-border">
+      <div role="tablist" aria-label="供应商" className="jolu-tablist h-11">
         <TabButton active={tab === "connect"} icon={<Blocks aria-hidden className="size-[17px]" />} onClick={() => setTab("connect")}>供应商连接</TabButton>
         <TabButton active={tab === "accounts"} icon={<UsersRound aria-hidden className="size-[17px]" />} onClick={() => setTab("accounts")}>账号管理</TabButton>
       </div>
@@ -65,8 +65,8 @@ function TabButton({ active, icon, onClick, children }: { active: boolean; icon:
       aria-selected={active}
       onClick={onClick}
       className={cn(
-        "-mb-px flex items-center gap-2 border-b-2 px-0.5 text-sm outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
-        active ? "border-jolu-accent font-semibold text-jolu-text [&_svg]:text-jolu-on" : "border-transparent text-jolu-muted hover:text-jolu-text",
+        "jolu-tab h-9 text-sm",
+        active ? "[&_svg]:text-jolu-on" : "[&_svg]:text-jolu-muted",
       )}
     >
       {icon}
@@ -120,7 +120,7 @@ function Card({ logo, badge, badgeTone, title, desc, action }: {
   action: React.ReactNode
 }) {
   return (
-    <div className="flex h-[172px] min-w-0 flex-col gap-2.5 rounded-xl border border-jolu-border bg-jolu-bg p-4">
+    <div className="jolu-card flex h-[172px] min-w-0 flex-col gap-2.5 rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
       <div className="flex h-7 items-center justify-between">
         {logo}
         <span className={cn("rounded-[5px] px-2 py-[5px] text-[11px] leading-none", badgeTone === "on" ? "bg-jolu-selected text-jolu-on" : "bg-jolu-stage text-jolu-muted")}>{badge}</span>

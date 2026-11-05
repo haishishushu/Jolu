@@ -175,7 +175,7 @@ export function UsageView({ active, request, onOpenSession }: {
 
   return (
     <div className="flex w-full flex-col gap-3">
-      <div role="tablist" aria-label="用量统计" className="flex h-[38px] gap-6 border-b border-jolu-border">
+      <div role="tablist" aria-label="用量统计" className="jolu-tablist h-[38px]">
         {TABS.map((t) => (
           <button
             key={t.value}
@@ -184,8 +184,8 @@ export function UsageView({ active, request, onOpenSession }: {
             aria-selected={tab === t.value}
             onClick={() => setTab(t.value)}
             className={cn(
-              "-mb-px border-b-2 px-0.5 text-sm outline-none focus-visible:outline-2 focus-visible:outline-jolu-accent",
-              tab === t.value ? "border-jolu-accent font-semibold text-jolu-text" : "border-transparent text-jolu-muted hover:text-jolu-text",
+              "jolu-tab h-[30px] text-sm",
+              tab === t.value && "font-semibold",
             )}
           >
             {t.label}
@@ -227,7 +227,7 @@ export function UsageView({ active, request, onOpenSession }: {
             <RefreshButton loading={calls.refreshing} onClick={calls.refresh} />
           </div>
           <div className="flex h-[34px] items-center gap-2">
-            <label className="flex h-[34px] w-[360px] items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">
+            <label className="jolu-control flex h-[34px] w-[360px] items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">
               <Search aria-hidden className="size-4 shrink-0 text-jolu-muted" />
               <input
                 value={searchDraft}

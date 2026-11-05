@@ -356,7 +356,7 @@ function AboutDialog({ version, onClose, exiting }: { version: string; onClose: 
   }, [exiting])
   return (
     <div inert={exiting} data-state={exiting ? "closed" : "open"} className="motion-overlay absolute inset-0 z-20 grid place-items-center bg-black/25 p-8">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="motion-dialog flex w-[380px] max-w-full flex-col gap-4 rounded-xl border bg-surface p-5 shadow-dialog">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="motion-dialog flex w-[380px] max-w-full flex-col gap-4 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5 shadow-dialog">
         <div className="flex items-center gap-2.5">
           <AppIcon size={32} />
           <div className="flex flex-col">

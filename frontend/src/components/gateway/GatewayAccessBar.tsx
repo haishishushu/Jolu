@@ -3,6 +3,7 @@ import { Copy, RefreshCw } from "lucide-react"
 import { gatewayApi, type GatewayStatusDto } from "@/lib/gatewayApi"
 import { gatewayRunLine } from "@/lib/gatewayPage"
 import { JoluSwitch } from "@/components/ui/JoluSwitch"
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog"
 import { useToast } from "@/components/ui/Toast"
 import { cn } from "@/lib/utils"
 
@@ -57,15 +58,24 @@ export function GatewayAccessBar({ status, loading, busy, desktop, sources, mode
         <span className="shrink-0 text-jolu-muted">API Key</span>
         <code className="text-jolu-text" aria-live="polite">{mask ?? (keyError ? "读取失败" : desktop ? "读取中…" : "桌面端可用")}</code>
         <button type="button" className={button} aria-label="复制 API Key" disabled={!mask || working || !desktop} onClick={() => void act(() => gatewayApi.copyKey(), "API Key 已复制")}><Copy size={13} />复制</button>
-        {confirmRefresh ? <>
-          <span className="text-jolu-muted">旧 Key 将失效</span>
-          <button type="button" className={button} disabled={working} onClick={() => void act(async () => { setMask(await gatewayApi.accessKey(true)); setKeyError(false); setConfirmRefresh(false) }, "API Key 已刷新，请重新复制到手动配置的工具")}>确认刷新</button>
-          <button type="button" className={button} disabled={working} onClick={() => setConfirmRefresh(false)}>取消</button>
-        </> : <button type="button" className={button} aria-label={keyError ? "重试读取 API Key" : "刷新 API Key"} disabled={!desktop || working || (!mask && !keyError)} title="刷新只影响手动配置的工具，一键接入保持可用" onClick={() => keyError
+        <button type="button" className={button} aria-label={keyError ? "重试读取 API Key" : "刷新 API Key"} disabled={!desktop || working || (!mask && !keyError)} title="刷新只影响手动配置的工具，一键接入保持可用" onClick={() => keyError
           ? void act(async () => { setMask(await gatewayApi.accessKey(false)); setKeyError(false) }, "API Key 已就绪")
-          : setConfirmRefresh(true)}><RefreshCw size={13} />{keyError ? "重试" : "刷新"}</button>}
+          : setConfirmRefresh(true)}><RefreshCw size={13} />{keyError ? "重试" : "刷新"}</button>
       </div>
-      {!confirmRefresh && <span className="text-[10px] text-jolu-muted">仅供本机手动接入，一键接入无需填写</span>}
+      <span className="text-[10px] text-jolu-muted">仅供本机手动接入，一键接入无需填写</span>
     </div>
+    {confirmRefresh && <ConfirmDialog
+      title="刷新网关 API Key？"
+      description="旧 Key 将立即失效。手动配置的工具需要重新填写新 Key；一键接入保持可用。"
+      confirmLabel="确认刷新"
+      danger
+      onClose={() => setConfirmRefresh(false)}
+      onConfirm={async () => {
+        const next = await gatewayApi.accessKey(true)
+        setMask(next)
+        setKeyError(false)
+        toast.success("API Key 已刷新，请重新复制到手动配置的工具")
+      }}
+    />}
   </section>
 }

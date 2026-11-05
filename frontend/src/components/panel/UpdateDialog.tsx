@@ -50,7 +50,7 @@ export function UpdateDialog({ onViewTasks }: { onViewTasks: () => void }) {
 
   return (
     <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="motion-overlay absolute inset-0 z-20 grid place-items-center bg-black/25 p-8">
-      <div className="motion-dialog flex w-[360px] max-w-full flex-col gap-3.5 rounded-xl border bg-surface p-5 shadow-dialog">
+      <div className="motion-dialog flex w-[360px] max-w-full flex-col gap-3.5 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5 shadow-dialog">
         <div className="flex items-center gap-3">
           <span className={`grid size-10 place-items-center rounded-full ${downloadError ? "bg-danger-soft" : "bg-success-soft"} ${installing ? "animate-pulse" : ""}`}>
             {ready || downloaded ? <Check className="size-5 text-success-text" aria-hidden />

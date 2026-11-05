@@ -97,7 +97,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
   )
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-5">
+    <section className="jolu-card flex min-h-0 min-w-0 flex-1 flex-col gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-5">
       <div className="flex items-start gap-2.5">
         <div className="flex min-w-0 flex-1 flex-col gap-[7px]">
           <h3 className="truncate text-lg font-semibold text-jolu-text" title={sessionTitle(session)}>{sessionTitle(session)}</h3>
@@ -108,7 +108,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
             <Ellipsis aria-hidden className="size-4" />
           </Menu.Trigger>
           <Menu.Portal>
-            <Menu.Content align="end" sideOffset={6} className="motion-popover z-[100] w-[200px] rounded-xl border border-jolu-border bg-jolu-bg p-1.5 shadow-popover">
+            <Menu.Content align="end" sideOffset={6} className="motion-popover z-[100] w-[200px] rounded-xl border border-jolu-border bg-jolu-cc-surface p-1.5 shadow-popover">
               <MenuItem icon={<Copy />} onSelect={() => copy(session.session_id, "会话 ID")}>复制会话 ID</MenuItem>
               <MenuItem icon={<Folder />} disabled={!session.cwd} onSelect={() => session.cwd && copy(session.cwd, "项目路径")}>复制项目路径</MenuItem>
               <MenuItem icon={<ChartColumn />} onSelect={onDrillUsage}>查看用量明细</MenuItem>

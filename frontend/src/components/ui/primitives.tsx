@@ -73,7 +73,7 @@ export function Checkbox({ checked }: { checked: boolean }) {
   )
 }
 
-/** 分段控件：容器 surface-3 圆角 9 内边距 2；选中项 surface + 描边 圆角 7 */
+/** 分段控件：容器灰轨道圆角 12 内边距 4；选中项实色表面与短投影 */
 export function Segmented<T extends string>({
   items,
   value,
@@ -92,8 +92,8 @@ export function Segmented<T extends string>({
     value,
   })
   return (
-    <div ref={root} className={cn("relative isolate inline-flex gap-0.5 rounded-[9px] bg-surface-3 p-0.5", className)}>
-      <span ref={indicator} aria-hidden="true" data-motion-indicator className="motion-indicator pointer-events-none absolute left-0 top-0 -z-10 rounded-[7px] border bg-surface" />
+    <div ref={root} className={cn("relative isolate inline-flex gap-1 rounded-xl bg-jolu-cc-track p-1", className)}>
+      <span ref={indicator} aria-hidden="true" data-motion-indicator className="motion-indicator pointer-events-none absolute left-0 top-0 -z-10 rounded-lg bg-jolu-cc-surface shadow-[0_2px_4px_var(--jolu-cc-control-shadow)]" />
       {items.map((it) => {
         const active = it.value === value
         return (
@@ -104,7 +104,7 @@ export function Segmented<T extends string>({
             aria-pressed={active}
             onClick={() => onChange?.(it.value)}
             className={cn(
-              "relative grid rounded-[7px] border border-transparent px-3 py-1.5 text-xs transition-colors",
+              "relative grid rounded-lg px-3 py-1.5 text-xs transition-colors",
               active
                 ? "font-semibold text-text-primary"
                 : "text-text-secondary hover:text-text-primary",

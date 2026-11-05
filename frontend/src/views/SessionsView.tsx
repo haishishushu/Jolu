@@ -176,7 +176,7 @@ export function SessionsView({ active, target, onDrillUsage, onCreateAutomation 
       </div>
 
       <div className="flex h-[38px] items-center gap-2.5">
-        <label className="flex h-[38px] w-[360px] items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">
+        <label className="jolu-control flex h-[38px] w-[360px] items-center gap-2 rounded-lg border border-jolu-border bg-jolu-bg px-3 focus-within:border-jolu-accent">
           <Search aria-hidden className="size-4 shrink-0 text-jolu-muted" />
           <input
             value={searchDraft}
@@ -298,7 +298,7 @@ function Stat({ icon, label, value, note, selected, bare }: { icon: React.ReactN
 
 function Placeholder({ icon, title, note, action, loading }: { icon?: React.ReactNode; title: string; note: string; action?: React.ReactNode; loading?: boolean }) {
   return (
-    <div className="flex flex-1 flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-bg p-4">
+    <div className="jolu-card flex flex-1 flex-col items-start gap-3 rounded-xl border border-jolu-border bg-jolu-cc-surface p-4">
       {icon && <span className="text-jolu-muted [&_svg]:size-7">{icon}</span>}
       <span className={cn("font-semibold text-jolu-text", loading ? "text-sm" : "text-base")}>{title}</span>
       {loading && [230, 285, 190].map((w) => <span key={w} className="h-6 animate-pulse rounded-[5px] bg-jolu-track" style={{ width: w }} />)}

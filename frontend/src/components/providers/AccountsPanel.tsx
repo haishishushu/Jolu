@@ -345,7 +345,7 @@ function MoreFilter({ accounts, value, onChange }: { accounts: readonly Connecti
         {inMore ? providerEntry(value).name : "更多供应商"}
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Content align="start" sideOffset={6} collisionPadding={12} style={{ maxHeight: "var(--radix-dropdown-menu-content-available-height)" }} className="motion-popover z-[100] grid w-[528px] max-w-[calc(100vw-24px)] overflow-y-auto grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3 shadow-popover">
+        <Menu.Content align="start" sideOffset={6} collisionPadding={12} style={{ maxHeight: "var(--radix-dropdown-menu-content-available-height)" }} className="motion-popover z-[100] grid w-[528px] max-w-[calc(100vw-24px)] overflow-y-auto grid-cols-3 gap-2 rounded-xl border border-jolu-border bg-jolu-cc-surface p-3 shadow-popover">
           {item("all", `全部供应商 · ${accounts.length}`, value === null, () => onChange(null))}
           {PROVIDERS.map((entry) => item(entry.id, `${entry.name} · ${count(entry.id)}`, value === entry.id, () => onChange(entry.id), entry.platformId))}
         </Menu.Content>
@@ -398,7 +398,7 @@ function AccountCard({ account, current, located, selecting = false, selected = 
   const emptyReason=isApi && balance.state && balance.state.state!=="ok" ? balance.state.reason : quota.state && quota.state.state!=="ok" ? quota.state.reason : "供应商未返回可展示的额度或余额"
   const name = displayName(account, hidden)
   return (
-    <article role="listitem" data-account-card data-account-id={account.id} data-account-located={located ? "true" : undefined} className={cn("flex h-full min-h-0 min-w-0 flex-col gap-1.5 rounded-xl border bg-jolu-bg p-3", current ? "border-jolu-accent" : "border-jolu-border", located && "ring-2 ring-jolu-accent ring-inset")}>
+    <article role="listitem" data-account-card data-account-id={account.id} data-account-located={located ? "true" : undefined} className={cn("jolu-card flex h-full min-h-0 min-w-0 flex-col gap-1.5 rounded-xl border bg-jolu-cc-surface p-3", current ? "border-jolu-accent" : "border-jolu-border", located && "ring-2 ring-jolu-accent ring-inset")}>
       <div className="flex h-8 shrink-0 items-center gap-2">
         {selecting && <input type="checkbox" aria-label={selectionLabel ?? "选择账号"} checked={selected} disabled={disabled} onChange={onToggle} className="size-4 shrink-0 cursor-pointer accent-jolu-accent disabled:cursor-default" />}
         <span className="grid size-6 shrink-0 place-items-center"><PlatformLogo platform={account.platformId} size={22} /></span>
@@ -627,7 +627,7 @@ function ConfirmShell({ title, subtitle, children, footer, onClose, busy }: {
     <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose() }}>
       <Dialog.Portal>
         <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
-        <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-bg p-6 shadow-dialog outline-none">
+        <Dialog.Content aria-describedby={undefined} className="motion-dialog fixed left-1/2 top-[calc(50%+15px)] z-50 flex w-[480px] max-w-[calc(100vw-48px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-jolu-border bg-jolu-cc-surface p-6 shadow-dialog outline-none">
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-1">
               <Dialog.Title className="text-base font-semibold text-jolu-text">{title}</Dialog.Title>
@@ -648,12 +648,15 @@ function ConfirmShell({ title, subtitle, children, footer, onClose, busy }: {
 }
 
 function useConfirm(onConfirm: () => Promise<void>) {
+  const lock = useRef(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const run = async () => {
+    if (lock.current) return
+    lock.current = true
     setBusy(true)
     setError(null)
-    try { await onConfirm() } catch (reason) { setError(String(reason)) } finally { setBusy(false) }
+    try { await onConfirm() } catch (reason) { setError(String(reason)) } finally { lock.current = false; setBusy(false) }
   }
   return { busy, error, run }
 }
@@ -699,7 +702,7 @@ function RemoveDialog({ account, current, alternatives, islandUsers, onClose, on
             label="替代账号"
             value={replacement || NONE}
             onValueChange={(value) => setReplacement(value === NONE ? "" : value)}
-            className="h-10 w-full rounded-lg border-jolu-border bg-jolu-bg px-3 text-jolu-text hover:bg-jolu-stage"
+            className="jolu-control h-10 w-full rounded-lg border-jolu-border bg-jolu-bg px-3 text-jolu-text hover:bg-jolu-stage"
             options={[
               ...alternatives.map((a) => ({ value: a.id, label: `${a.baseName} · ${a.kind === "api" ? "API Key" : "订阅"}` })),
               { value: NONE, label: `暂不使用 ${entry.name}` },
@@ -756,16 +759,16 @@ function EditDialog({ account, others, onClose, onSave }: {
     >
       <label className="flex flex-col gap-[7px]">
         <span className="text-xs font-medium text-jolu-text">连接名称 *</span>
-        <input value={name} onChange={(event) => setName(event.target.value)} spellCheck={false} autoComplete="off" className="h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
+        <input value={name} onChange={(event) => setName(event.target.value)} spellCheck={false} autoComplete="off" className="jolu-control h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
         {nameError && name !== account.baseName && <span className="text-[11px] text-jolu-danger">{nameError}</span>}
       </label>
       {account.kind === "api" && (
         <div className="flex flex-col gap-[7px]">
           <span className="text-xs font-medium text-jolu-text">API Key</span>
           {replacing ? (
-            <input type="password" value={secret} onChange={(event) => { setSecret(event.target.value); setModelReady(false) }} placeholder="粘贴新的 API Key" spellCheck={false} autoComplete="off" className="h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
+            <input type="password" value={secret} onChange={(event) => { setSecret(event.target.value); setModelReady(false) }} placeholder="粘贴新的 API Key" spellCheck={false} autoComplete="off" className="jolu-control h-10 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none focus:border-jolu-accent" />
           ) : (
-            <div className="flex h-10 items-center justify-between rounded-lg border border-jolu-border bg-jolu-side px-3 text-[13px] text-jolu-muted">
+            <div className="jolu-control flex h-10 items-center justify-between rounded-lg border border-jolu-border bg-jolu-side px-3 text-[13px] text-jolu-muted">
               <span>已保存 · {account.masked || "••••"}</span>
               <JoluButton size="sm" variant="neutral" className="h-7" onClick={() => setReplacing(true)}>更换密钥</JoluButton>
             </div>
@@ -884,7 +887,7 @@ function CustomModelSection({ baseUrl, secret, protocol, model, onModel }: {
             aria-label="模型 ID"
             spellCheck={false}
             autoComplete="off"
-            className="h-10 min-w-0 flex-1 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent disabled:bg-jolu-side disabled:text-jolu-muted"
+            className="jolu-control h-10 min-w-0 flex-1 rounded-lg border border-jolu-border bg-jolu-bg px-3 font-mono text-[13px] text-jolu-text outline-none placeholder:text-jolu-muted focus:border-jolu-accent disabled:bg-jolu-side disabled:text-jolu-muted"
           />
         ) : (
           <ModelPicker models={models} value={models.length ? model : ""} onChange={(next) => onModel(next, true)} />

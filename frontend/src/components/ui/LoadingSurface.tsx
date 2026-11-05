@@ -13,7 +13,7 @@ export function LoadingSurface({ layout = "table", label = "正在加载", class
   layout?: SkeletonLayout; label?: string; className?: string
 }) {
   const rows = <div className="flex flex-col gap-5">{Array.from({ length: 5 }, (_, i) => <div key={i} className="flex items-center gap-4"><Bar className="size-8 shrink-0" /><div className="flex flex-1 flex-col gap-2"><Bar className={i % 2 ? "w-2/3" : "w-1/2"} /><Bar className="h-2 w-1/3" /></div><Bar className="w-16" /></div>)}</div>
-  const card = <div className="flex h-[100px] flex-col gap-2 rounded-xl border border-jolu-border bg-jolu-bg p-3.5"><Bar className="w-1/3" /><Bar className="h-7 w-2/3" /><Bar className="h-2 w-1/2" /></div>
+  const card = <div className="jolu-card flex h-[100px] flex-col gap-2 rounded-xl border border-jolu-border bg-jolu-cc-surface p-3.5"><Bar className="w-1/3" /><Bar className="h-7 w-2/3" /><Bar className="h-2 w-1/2" /></div>
   return <div role="status" aria-label={label} aria-busy="true" className={cn("loading-surface min-w-0 w-full",layout==="accounts"&&"flex min-h-0 flex-col", className)}>
     <span className="sr-only">{label}</span>
     <div aria-hidden className={cn("skeleton-content flex flex-col gap-3",layout==="accounts"&&"min-h-0 flex-1")}>
@@ -26,7 +26,7 @@ export function LoadingSurface({ layout = "table", label = "正在加载", class
       : layout === "cards" ? <div className="grid grid-cols-2 gap-4">{[0, 1, 2, 3].map(i => <div key={i}>{card}</div>)}</div>
       : layout === "sessions" ? <div className="grid min-h-[600px] grid-cols-[1fr_2fr] gap-4"><div className="rounded-xl border border-jolu-border p-4">{rows}</div><div className="flex flex-col gap-6 rounded-xl border border-jolu-border p-5"><Bar className="w-1/3" /><Bar className="h-20 w-full" /><Bar className="h-32 w-4/5" /></div></div>
       : layout === "messages" ? <div className="flex min-h-52 flex-col gap-5"><Bar className="h-16 w-4/5 self-end" /><Bar className="h-24 w-full" /><Bar className="h-12 w-3/4" /></div>
-      : <div className={cn("rounded-xl border border-jolu-border bg-jolu-bg p-5", layout === "settings" && "min-h-[360px]")}>{rows}</div>}
+      : <div className={cn("jolu-card rounded-xl border border-jolu-border bg-jolu-cc-surface p-5", layout === "settings" && "min-h-[360px]")}>{rows}</div>}
     </div>
   </div>
 }

@@ -109,7 +109,7 @@ export function CheckinAccountStats({ accountId, statistics, active, identityKey
     </section>
     <Dialog.Portal>
       <Dialog.Overlay className="motion-overlay fixed inset-x-0 bottom-0 top-[30px] z-50 bg-black/40" />
-      <Dialog.Content aria-describedby={undefined} className="fixed bottom-0 right-0 top-[30px] z-50 flex w-[480px] max-w-full flex-col border-l border-jolu-border bg-jolu-bg shadow-dialog outline-none">
+      <Dialog.Content aria-describedby={undefined} className="fixed bottom-0 right-0 top-[30px] z-50 flex w-[480px] max-w-full flex-col border-l border-jolu-border bg-jolu-cc-surface shadow-dialog outline-none">
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-jolu-border p-6">
           <div className="min-w-0"><Dialog.Title className="text-lg font-semibold text-jolu-text">账号详情</Dialog.Title><p className="mt-2 text-xs text-jolu-muted">{providerLabel}</p><p className="mt-1 break-all text-xs text-jolu-text">{accountLabel}</p></div>
           <Dialog.Close aria-label="关闭账号详情" className="grid size-8 shrink-0 place-items-center rounded-lg text-jolu-muted outline-none hover:bg-jolu-side focus-visible:outline-2 focus-visible:outline-jolu-accent"><X aria-hidden className="size-4" /></Dialog.Close>
