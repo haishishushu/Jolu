@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { DeltaPhase } from "@/components/island/TokenDelta"
 import type { IslandData } from "@/components/island/UsageIsland"
 import { CLAUDE_QUOTAS, LOCAL_SOURCE, RUNNING_SESSION_TEXT, SESSIONS, TOTAL_DELTA_TEXT } from "@/mock/data"
@@ -18,6 +18,7 @@ import { useSourceMetrics } from "@/hooks/useSourceMetrics"
 import { useCollectionStatus } from "@/hooks/useCollectionStatus"
 import { balanceSnapshotTime, connectionQueries, islandActiveConnection, islandConnectionStatus, islandCost } from "@/lib/islandPresentation"
 import { dockQuotaView } from "@/lib/dockQuotaView"
+import { carriedDeltaCountKey, carriedDeltaView, latchSessionDelta } from "@/lib/carriedDelta"
 import { onUsageChanged } from "@/lib/usageChanges"
 import { useGatewayActivity } from "@/hooks/useGatewayActivity"
 
@@ -166,6 +167,52 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
     collection.status && !collection.status.ok && collection.status.failed_sources.includes(islandPlatform),
   )
 
+  // 胶囊的「正在写入」与「本轮增量」：来源提供可信运行状态（running 会话）才算工作中；
+  // 采集源出错时状态不可判定，不当成工作中。增量取后端 running_tokens（只含 running 会话），
+  // 拿不到就是 null——胶囊显示未知，不补 0、不拿示例数字。
+  const islandSessions = sourceFailed
+    ? live.sessions.map((session) => ({ ...session, state: "unknown" as const }))
+    : live.sessions
+  const working = !sourceFailed && live.sessions.some((session) => session.state === "running")
+  const liveDelta = sourceFailed ? null : live.runningDelta
+  /* 胶囊收缩态尾部增量段的 A + B 组合（§5.7）：锁存值 ?? 今日累计。
+     A 本轮终值锁存：进行中记下 running_tokens 的最新非零读数，结束后停在这个读数上，不跳变、
+       不重新起跳；新一轮从 0 / 较小值往上走时被新值覆盖。锁存只存在这一处。
+     B 今日累计兜底：应用重启（内存态锁存丢失）后、或当天第一笔还没落库时，显示 today_tokens。
+     清空时机：今日累计归 0 / null（后端跨天重置、切换平台、重启后的初始快照）与手动刷新。
+     不在前端判日期，也不在前端累加 Token。 */
+  // 判定源放 ref：同一帧里 React 可能多次执行渲染体（严格模式、并发重放），
+  // 按 ref 递推才能让每一步都拿到上一次的锁存值，不会互相覆盖成旧值。
+  const latchedRef = useRef<number | null>(null)
+  // 渲染用镜像是 state：锁存值变化要能自己触发一次更新，不依赖别处的状态碰巧跟着变。
+  // 用 layout effect 同步，提交后、绘制前落定，不会出现一帧旧读数。
+  const [latchedDelta, setLatchedDelta] = useState<number | null>(null)
+  // 手动刷新（右键「立即刷新」、连接更新、平台切换）都走现有刷新入口：锁存一起清，
+  // 本轮仍在写的会话会在下一次推送重新锁存；清掉后没有本轮值就回落到今日累计。
+  const resetMark = useRef(refreshSerial)
+  if (resetMark.current !== refreshSerial) {
+    resetMark.current = refreshSerial
+    latchedRef.current = null
+  }
+  const nextLatched = latchSessionDelta({
+    previous: latchedRef.current,
+    working,
+    runningDelta: live.runningDelta,
+    todayTokens: live.todayTokens,
+  })
+  if (nextLatched !== latchedRef.current) latchedRef.current = nextLatched
+  useLayoutEffect(() => {
+    setLatchedDelta((current) => (current === nextLatched ? current : nextLatched))
+  }, [nextLatched])
+  const carried = carriedDeltaView({
+    latched: latchedDelta,
+    todayTokens: live.todayTokens,
+    sourceFailed,
+  })
+  const carriedDelta = carried.value
+  const carriedSource = carried.source
+  const carriedCountKey = carriedDeltaCountKey(carried.source, working)
+
   const data: IslandData = isTauri || live.live
     ? {
         platform: islandPlatform as PlatformId,
@@ -217,7 +264,7 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
         connectionLabel: active?.name ?? (profile.connection_id
           ? `${profile.connection_name ?? "所选连接"}（不可用）`
           : conn.label ?? undefined),
-        sessions: sourceFailed ? live.sessions.map((session) => ({ ...session, state: "unknown" as const })) : live.sessions,
+        sessions: islandSessions,
         sessionStatusUnknown: sourceFailed,
         sessionCountText: sourceFailed && live.sessions.length > 0
           ? `${live.sessions.length} 个会话状态未知`
@@ -228,6 +275,14 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
         // 逐帧追数由叶子组件经 LiveCountsContext 订阅，岛体本身不随每帧重渲染
         deltaCountKey: "total",
         deltaPhase: live.deltaPhase,
+        // 胶囊收缩态用：是否有会话正在写入、本轮已写入的 Token 增量（未知为 null）。
+        // 经典样式不读这两个字段。
+        working,
+        liveDelta,
+        // 胶囊尾部增量段：锁存值 ?? 今日累计（§5.7），以及它来自哪一边（决定文案）。
+        carriedDelta,
+        carriedSource,
+        carriedCountKey,
         status: nativeMonitor && active?.status === "connected" ? { tone: "success", label: "本机监控" } : islandConnectionStatus(active?.status ?? null, false, Boolean(profile.connection_id)),
         sourceText: `${collection.status && !collection.status.ok ? `采集异常：${collection.status.errors.join("；")} · ` : ""}${officialApiUsage.state?.state === "ok" ? `API 用量来源：${officialApiUsage.state.source} · ` : ""}统计来源：本机 ${PLATFORM_NAMES[islandPlatform] ?? islandPlatform} 会话记录（无法按账号区分）· ${live.activityKind === "running" ? "按本轮开始／结束事件及会话存活状态判断；思考、等待输入及压缩期间保留会话与 Token" : islandPlatform === "zcode" ? `${live.activeWindowSeconds} 秒内有新记录视为最近活跃；完成 / 失败 / 运行中按本机库的请求状态标注` : `${live.activeWindowSeconds} 秒内有新记录视为最近活跃`}`,
       }

@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react"
+import { useEffect, useState } from "react"
 import { api, compactTokens, isTauri, listenLiveUsage, type LiveUsageDto } from "@/lib/api"
 import { useRef } from "react"
 import { LiveTokenCounter } from "@/lib/liveTokenCounter"
@@ -14,6 +14,17 @@ export interface LiveUsage {
   counts: LiveCounts
   /** 追数合计当前是否大于 0（只在跨越 0 时变化，不随每帧变化） */
   deltaPositive: boolean
+  /**
+   * 本轮已写入的 Token 增量：后端按 running 会话求和（`running_tokens`），每来一次推送才更新，
+   * 不随追数每帧变化。没有 running 会话、或来源不提供时为 null——是「未知」，不是 0。
+   */
+  runningDelta: number | null
+  /**
+   * 今日累计写入的 Token（后端 `today_tokens`，只统计已落库的请求，含今天所有会话）。
+   * 随真实写入增长，**跨天由后端重置**；会话结束后不再变化，胶囊的增量段就停在这个最后读数上。
+   * 未知为 null——是「未知」，不是 0。
+   */
+  todayTokens: number | null
   deltaPhase: DeltaPhase
   sessions: SessionActivity[]
   activityCountText: string | null
@@ -43,6 +54,7 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
   const [deltaPositive, setDeltaPositive] = useState(false)
   const [phase, setPhase] = useState<DeltaPhase>("idle")
   const [sessions, setSessions] = useState<SessionActivity[]>([])
+  const [runningDelta, setRunningDelta] = useState<number | null>(null)
   const [today, setToday] = useState<number | null>(null)
   const [windowSec, setWindowSec] = useState(90)
   const [live, setLive] = useState(false)
@@ -60,6 +72,7 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
     setDeltaPositive(false)
     setPhase("idle")
     setSessions([])
+    setRunningDelta(null)
     setToday(null)
     setLive(false)
     setPulseSerial(0)
@@ -72,6 +85,8 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
     let highlightTimer: number | null = null
     let showing = false
     let hadSessions = false
+    /** 上一次推送的今日累计值：只有真的变了才起补间，心跳推送不逐帧跑空帧 */
+    let todayTarget: number | null = null
     const counter = new LiveTokenCounter()
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
 
@@ -121,6 +136,17 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
       cursor = u.cursor
       setLive(true)
       setToday(u.today_tokens)
+      // 常驻增量段（胶囊的 +xx.xK）追的是「今日累计写入」：它与 running_tokens 不同，
+      // 会话结束后后端仍给同一个数（跨天由后端重置），所以这一段可以一直停在最后读数上。
+      // 值真变化时才起 900ms 补间，同一数值的心跳推送不重复跑帧。
+      if (!dnd && u.today_tokens != null && u.today_tokens !== todayTarget) {
+        todayTarget = u.today_tokens
+        counter.setTarget("today", u.today_tokens, performance.now())
+        animate()
+      }
+      // 运行合计：后端只把 running 会话的本轮 Token 求和，没有 running 会话时为 null。
+      // 心跳推送里数值不变，setState 同值不会多渲染一次。
+      setRunningDelta(u.running_tokens ?? null)
       setWindowSec(u.active_window_seconds)
       const hasRunningSnapshot = u.running_tokens != null
       if (!dnd && hasRunningSnapshot) {
@@ -223,6 +249,8 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
   return {
     counts,
     deltaPositive,
+    runningDelta,
+    todayTokens: today,
     deltaPhase: phase,
     // 会话数组只在事件到达时换新引用，逐帧数值由各行按 countKey 自行订阅。
     sessions,

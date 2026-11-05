@@ -18,7 +18,10 @@ const EYES: Record<BotExpr, EyeStyle> = {
   idle: { k: "pill", c: W, g: "#FFFFFF66" },
   blinkShot: { k: "line", c: W, g: "#FFFFFF66" },
   look: { k: "pill", c: W, g: "#FFFFFF66" },
-  work: { k: "pill", h: 0.85, c: "#5BF08A", g: "#30D15899", cls: "cbot-scan" },
+  // 工作中的眼睛用主题绿：fill 由 capsule.css 的 `.cbot[data-expr="work"] .cbot-eyes-inner > *`
+  // 覆盖成 --pn-capsule-green（浅深色各一套），这里的 c 只是 CSS 没命中时的兜底；
+  // 光晕也换成同一个变量，免得浅色主题下深绿瞳孔外面套一圈亮薄荷色。
+  work: { k: "pill", h: 0.85, c: "#5BF08A", g: "color-mix(in srgb, var(--pn-capsule-green) 55%, transparent)", cls: "cbot-scan" },
   refresh: { k: "spin", c: "#7DD8FF", g: "#5AC8FA99", cls: "cbot-spin" },
   happy: { k: "happy", c: W, g: "#FFFFFF66" },
   surprise: { k: "round", s: 1.15, c: W, g: "#FFFFFF66", cls: "cbot-hop" },
@@ -224,6 +227,8 @@ export function Bot({
   })
 
   return (
+    // data-expr 给 capsule.css 用：只有「工作中」把眼睛染成 --pn-capsule-green，
+    // 其他表达式（含表情库预览）保持原色；blink / scan 的 keyframes 不受影响。
     <svg
       ref={svgRef}
       width={size}
@@ -231,6 +236,7 @@ export function Bot({
       viewBox={`0 0 ${size} ${size}`}
       aria-hidden={interactive ? undefined : true}
       className={cn("cbot", e.cls, ticking && "cbot-ticking", display && "cbot-showing", className)}
+      data-expr={expr}
       data-small={small && count ? 1 : 0}
       style={{ ["--F" as string]: n(F), ["--z" as string]: n(size / F), ["--glow" as string]: e.g }}
     >

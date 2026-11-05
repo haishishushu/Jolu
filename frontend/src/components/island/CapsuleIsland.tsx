@@ -9,8 +9,10 @@ import { AgentStack, GatewaySection, RelayRoute, wiredAgents } from "./CapsuleGa
 import { useBotShots } from "@/hooks/useBotShots"
 import type { GatewayActivity } from "@/hooks/useGatewayActivity"
 import { botExpression, BOT_NAMES } from "@/lib/botExpression"
+import type { CarriedDeltaSource } from "@/lib/carriedDelta"
 import { authQuotaRows } from "@/lib/authQuotaRows"
-import { listenEvent } from "@/lib/api"
+import { compactTokens, listenEvent } from "@/lib/api"
+import { useLiveCount } from "@/lib/liveCounts"
 import { islandIdFromSearch } from "@/lib/islandProfile"
 import { reducedMotion } from "@/lib/motion"
 import { cn } from "@/lib/utils"
@@ -44,6 +46,44 @@ function ringColor(q: QuotaWindow): string {
   if (p !== null && p >= 100) return "var(--pn-capsule-red)"
   if (p !== null && p >= 80) return "var(--pn-capsule-orange)"
   return q.key === "5h" ? "var(--pn-capsule-cyan)" : "var(--pn-capsule-green)"
+}
+
+/**
+ * 收缩胶囊上的增量段（原型 collapsedHTML() 的 live）：绿色脉冲点 + `+12.8K`。
+ * 逐帧数值从 LiveCountsContext 的追数键订阅，只有本组件随追数重渲染；
+ * 没有可信数字时按现有未知值写法只显示破折号——不写假的 0，也不假装有数据。
+ * 追数键只在会话进行中给：结束后不再起补间，数字停在 `tokens` 的最后一个读数上。
+ *
+ * 同一个数字有两种来源（§5.7）：`session` 是本轮终值锁存（本轮写入），
+ * `today` 是今日累计兜底（重启 / 当天第一笔还没落库）。文案必须分得开，不能都叫「今日累计写入」。
+ */
+function LiveTokens({ countKey, tokens, text, source }: {
+  countKey?: string
+  tokens: number | null
+  text: string | null
+  source: CarriedDeltaSource | null
+}) {
+  const animated = useLiveCount(countKey)
+  const value = animated ?? tokens
+  const name = source === "session" ? "本轮写入" : "今日累计写入"
+  const compact = value == null ? null : `+${compactTokens(value)}`
+  const title = value == null
+    ? `${name}暂无数据`
+    : source === "session"
+      // 锁存：会话结束后不再增长，读数就是本轮终值
+      ? `${name} ${compact}（本轮累计 ${value.toLocaleString("zh-CN")} Token；会话结束后停在这个读数，不再增长）`
+      : `${name} ${compact}（今日已落库 ${value.toLocaleString("zh-CN")} Token，含今天所有会话）`
+  return (
+    <span
+      className="cap-live cap-num cap-mono"
+      data-token-value={value ?? undefined}
+      data-carried-source={source ?? undefined}
+      aria-label={title}
+      title={title}
+    >
+      {compact ?? text ?? "—"}
+    </span>
+  )
 }
 
 export function CapsuleIsland({
@@ -83,9 +123,11 @@ export function CapsuleIsland({
   const running = data.sessions?.filter((s) => s.state === "running").length ?? 0
   // 只有来源提供可信运行状态（running）时才算「工作中」，不把最近活跃当成正在写入
   const working = !data.sessionStatusUnknown && running > 0
+  // 数据层（useIslandWindowModel）已经按同一份 running 判定算好 working；浏览器预览没有该字段时按会话推断
+  const writing = data.working ?? working
   const showDelta = data.deltaPhase !== undefined && data.deltaPhase !== "idle"
   const { shot, inactiveMs } = useBotShots({
-    deltaPhase: data.deltaPhase, open, quotaUsed, active: working || showDelta,
+    deltaPhase: data.deltaPhase, open, quotaUsed, active: writing || showDelta,
     identity: `${data.platform}:${data.kind}:${data.connectionId ?? ""}`,
   })
 
@@ -94,6 +136,15 @@ export function CapsuleIsland({
   const relay = relayOn ? gateway!.activity.shown : null
   const agents = useMemo(() => (relayOn ? wiredAgents(gateway!.status, gateway!.activity) : []), [relayOn, gateway])
   const drifted = agents.filter((w) => w.drift).length
+  // 收缩胶囊的增量段常驻：只要「锁存值 ?? 今日累计」有值就渲染，与是否正在写入无关。
+  // 进行中由追数键逐帧追上；会话结束后停在锁存的本轮终值上（后端给的是本轮累计，不是归零的
+  // running_tokens），重启后没有锁存才回落到今日累计。今日累计归 0 / 手动刷新清掉锁存后这一段自然消失。
+  // 没有数值时退回文本（浏览器预览的示例数据）。
+  // 未连接、被转发路线占位时不渲染——那两种分支本来就没有增量可写。
+  const carried = data.carriedDelta ?? data.deltaTokens ?? null
+  // 数值来源只对真实数据有意义：预览分支没有 carriedDelta，退回示例文案时按今日累计命名
+  const carriedSource = data.carriedDelta != null ? data.carriedSource ?? null : null
+  const liveVisible = !data.unavailable && !relay && (carried != null ? carried !== 0 : Boolean(data.deltaText))
   // 绿点、「n 分钟前」需要随时间刷新；只在有转发数据时每 30 秒刷新一次
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -112,11 +163,11 @@ export function CapsuleIsland({
     connected: data.connected ?? data.status?.tone === "success",
     queryFailed: showQuotas && Boolean(data.queryFailed),
     quotaUsed: quotaRows.map((q) => q.usedPercent),
-    dragging, refreshing, working, shot, inactiveMs: relay ? 0 : inactiveMs, docked: Boolean(dockEdge), hover,
+    dragging, refreshing, working: writing, shot, inactiveMs: relay ? 0 : inactiveMs, docked: Boolean(dockEdge), hover,
     relay: relay ? (relay.phase === "failed" ? "rejected" : relay.phase) : null,
   })
   // 逐帧数值来自追数存储；没有追数键（浏览器预览的示例数据）时不轮播，避免显示假的 0
-  const ticker = working && showDelta && data.deltaCountKey ? { countKey: data.deltaCountKey, label: "本段 Token", sub: `${running} 个会话写入中` } : null
+  const ticker = writing && showDelta && data.deltaCountKey ? { countKey: data.deltaCountKey, label: "本段 Token", sub: `${running} 个会话写入中` } : null
 
   const focused = pinRing ?? focusRing
   const focusWindow = focused !== null ? ringWindows[focused] : undefined
@@ -175,7 +226,7 @@ export function CapsuleIsland({
   // 完整胶囊宽 = 左内边距 3 + bot 32 + 间距 10 + 内容 + 右内边距 12，再加 1px 边框 ×2
   const capsuleW = Math.max(38, mainW + 59)
   // 迷你胶囊：2 + bot 26 + 8（再加工作中的脉冲点 6+6），再加边框
-  const miniW = (working ? 48 : 36) + 2
+  const miniW = (writing ? 48 : 36) + 2
   const shellW = view === "card" ? EXPANDED_W : view === "mini" ? miniW : capsuleW
   const shellH = view === "card" ? cardH : view === "mini" ? 32 : CAP_H
   const radius = view === "card" ? 28 : view === "mini" ? 16 : 20
@@ -281,7 +332,10 @@ export function CapsuleIsland({
     }
   }, [open, connectionMenuOpen, collapse])
 
-  const bubbleVisible = view !== "card" && view !== "mini" && !data.sessionStatusUnknown && running >= 2
+  // 会话气泡：只在完整胶囊（非卡片、非迷你）且确实有会话在写入、且 ≥ 2 个运行时出现
+  // （原型 bubblesHTML：`if (S.working && S.sessions.length >= 2)`）。
+  // 数字用 running 会话数——失败 / 最近活跃的会话不计入「几个会话在跑」。
+  const bubbleVisible = view !== "card" && view !== "mini" && writing && running >= 2
   const driftVisible = view !== "card" && view !== "mini" && drifted > 0
 
   // ---------- 内容 ----------
@@ -462,13 +516,20 @@ export function CapsuleIsland({
                 ticker={open || view === "mini" || relay ? null : ticker}
               />
               {/* 迷你胶囊只留 bot 与工作中的脉冲点（原型 collapsedHTML 的 mini 分支） */}
-              {view === "mini" && working && <span className="cap-pulse" />}
+              {view === "mini" && writing && <span className="cap-pulse" />}
               <span ref={mainRef} className="cap-main">
                 {collapsedMain}
-                {showDelta && !data.unavailable && !relay && (
+                {/* 常驻增量段：绿色脉冲点 + `+12.8K`。段宽一并计入 mainW，胶囊宽度照旧按内容测量 */}
+                {liveVisible && (
                   <>
                     <span className="cap-hair" />
-                    <span className="cap-live cap-num cap-mono"><AnimatedTokens tokens={data.deltaTokens} text={data.deltaText} countKey={data.deltaCountKey} className="!text-[12px] !font-semibold" /></span>
+                    <LiveTokens
+                      // 只在进行中订阅追数键：结束后不再跑逐帧动画，停在最后读数
+                      countKey={writing ? data.carriedCountKey : undefined}
+                      tokens={carried}
+                      text={data.deltaText ?? null}
+                      source={carriedSource}
+                    />
                   </>
                 )}
                 {relayOn && agents.length > 0 && <>{!relay && <span className="cap-hair" />}<AgentStack agents={agents} activity={gateway!.activity} now={now} /></>}
@@ -506,7 +567,15 @@ export function CapsuleIsland({
                 <div className="cap-sec cap-col">
                   <div className="cap-sh">
                     <span>{sectionTitle}</span>
-                    <em><AnimatedTokens tokens={data.deltaTokens} text={data.deltaText} countKey={data.deltaCountKey} className="!text-[11px] !text-[var(--pn-capsule-green)]" /></em>
+                    <em>
+                      {/* 进行中追本轮实时值（本段 Token）；结束后停到常驻的今日累计，不再跑逐帧动画 */}
+                      <AnimatedTokens
+                        tokens={writing ? (data.liveDelta ?? data.deltaTokens) : carried}
+                        text={data.deltaText}
+                        countKey={writing ? data.deltaCountKey : undefined}
+                        className="!text-[11px] !text-[var(--pn-capsule-green)]"
+                      />
+                    </em>
                   </div>
                   {sessionTotal > 0 && <SessionList sessions={data.sessions!} showUnknownTag={data.sessionStatusUnknown} />}
                 </div>

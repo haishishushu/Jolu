@@ -8,6 +8,7 @@ import { ConnectionKindChip, Divider, StatusDot } from "@/components/ui/primitiv
 import { UsageRow } from "./UsageRow"
 import { AnimatedTokens, TokenDelta, type DeltaPhase } from "./TokenDelta"
 import { SessionList } from "./SessionList"
+import type { CarriedDeltaSource } from "@/lib/carriedDelta"
 import type { PlatformId, QuotaWindow, SessionActivity } from "@/types"
 
 /**
@@ -70,6 +71,22 @@ export interface IslandData {
   /** 胶囊样式用：有可用连接 / 额度查询失败。经典样式不读这两个字段 */
   connected?: boolean
   queryFailed?: boolean
+  /** 胶囊样式用：有会话正在写入 Token（来源提供可信运行状态时才为真）。经典样式不读 */
+  working?: boolean
+  /** 胶囊样式用：本轮已写入的 Token 增量；未知为 null，不写假的 0。经典样式不读 */
+  liveDelta?: number | null
+  /**
+   * 胶囊样式用：收缩胶囊尾部增量段的常驻数值，**锁存值 ?? 今日累计**。
+   * A：会话进行中锁存 `running_tokens`（只含 running 会话）的最新读数，结束后停在这个读数上，
+   *    数字不跳变、不重新起跳；新一轮开始时被新值覆盖。
+   * B：没有锁存（应用重启丢了内存态）时用 `today_tokens`（今日已落库的新鲜 Token 合计）兜底。
+   * 两者都未知 / 为 0 时不渲染。经典样式不读
+   */
+  carriedDelta?: number | null
+  /** 胶囊样式用：`carriedDelta` 的来源——`session` = 本轮锁存，`today` = 今日累计兜底。决定文案差异；经典样式不读 */
+  carriedSource?: CarriedDeltaSource | null
+  /** 胶囊样式用：`carriedDelta` 的追数键。只在进行中给；结束后传空，数字停在最后值不跑逐帧动画 */
+  carriedCountKey?: string
   /** 胶囊样式用：生效连接的 id，切换连接时据此重置额度基线 */
   connectionId?: string | null
 }

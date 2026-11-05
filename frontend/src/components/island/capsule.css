@@ -168,6 +168,11 @@
 .cbot .cbot-ring:focus { outline: none; }
 .cbot .cbot-ring:focus-visible .cbot-ring-track { stroke: var(--pn-capsule-blue); }
 .cbot .cbot-eyes-inner { transform-box: fill-box; transform-origin: center; }
+/* 工作中（表达式 work）：眼睛用胶囊的绿色强调色，会话结束后随表达式回到默认墨色。
+   命中是最内层眼睛形状——.cbot-eyes-inner 的直接子节点（两只眼睛各自渲染的 rect / circle / path），
+   fill 走 CSS 声明覆盖 SVG 的 fill 属性；.cbot-eyes-slide 的位移与 .cbot-blink / .cbot-scan 的
+   keyframes 都写在别的节点 / 别的属性上，不受这条影响。其他表达式不命中，保持原色。 */
+.cbot[data-expr="work"] .cbot-eyes-inner > * { fill: var(--pn-capsule-green); }
 /* 运行中轮播：眼睛向上滑出，Token 数从下方滑入 */
 .cbot .cbot-eyes-slide, .cbot .cbot-tick { transition: transform .45s var(--cap-spring), opacity .25s; }
 .cbot .cbot-tick { opacity: 0; transform: translateY(calc(var(--F) * .32px)); }

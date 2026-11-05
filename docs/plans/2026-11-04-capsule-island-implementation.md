@@ -229,3 +229,164 @@ node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs
 - 只有展开的卡片投影，取值改成 `0 4px 16px`：偏移 4 + 模糊 16 = 20px，正好等于窗口内边距，永远不会被切边。
 - 胶囊窗口的内边距 `p-3.5` → `p-5`（14 → 20px），把卡片阴影的 20px 完整包进窗口；迷你胶囊、贴边完整胶囊的锚定逻辑不变。
 - `.cap-bubble`（运行中会话、积分气泡）阴影同步降到 `0 3px 12px`，同样落在窗口内。
+
+## 5. 2026-11-05 追加：API Key 胶囊的「正在写入」与多会话气泡（对照原型）
+
+按 `output/island-prototype/app.js` 的 `collapsedHTML()` / `bubblesHTML()` / `expression()` 逐条核对收缩胶囊，
+补齐胶囊侧的数据层字段并修正增量段的显示条件。`views/classic/` 与经典专用组件没有改动，行为不变。
+
+### 5.1 数据层
+
+| 字段 | 真实来源 | 拿不到时 |
+|---|---|---|
+| `data.working` | `useLiveUsage` 的会话列表里存在 `state === "running"`；后端按请求开始 / 结束事件与会话存活状态判定。采集源出错（`collection.status.failed_sources` 含本平台）时为 `false` | `false`（不显示增量段、不出气泡） |
+| `data.liveDelta` | `live-usage` 推送的 `running_tokens`（`db::sum_running_tokens`：只把 running 会话的本轮 Token 求和）；`useLiveUsage` 新增 `runningDelta` 暴露它，只在推送到达时更新，不参与逐帧追数 | `null`（胶囊只显示破折号，不写 0） |
+
+- `IslandData` 新增两个可选字段（`working?` / `liveDelta?`），注释标明「胶囊样式用，经典样式不读」。
+- 网关活动（`useGatewayActivity` / `gateway_today_counts`）只有「请求在途」和成功 / 被拒 / 失败次数，没有 Token 增量，
+  所以没有拿它当这两个字段的来源；增量必须是本机会话记录里的真实数字。
+- 浏览器预览（`mock/data.ts`）没有这两个字段，胶囊按会话状态自行推断 `working`，增量回落到 `deltaText` 示例文案。
+
+### 5.2 收缩胶囊的增量段
+
+- 出现条件（2026-11-05 晚改为常驻，见 §5.6；原型是 `const live = S.working || (S.shot && S.sessions.length)`）：
+  `!unavailable && !relay && (carried != null ? carried !== 0 : Boolean(deltaText))`。
+  Auth 分支同样有这个段（原型 auth 分支也是 `quotaHTML() + wait + live`），不是只有 API 分支。
+- 内容：`<span class="cap-hair" />` + `.cap-live`（绿色 + 脉冲点，`.cap-live` 自带 `::before` 圆点），
+  数字用 `compactTokens` 格式化（`+12.8K`）。原型只有数字、没有 `Token` 后缀，这一处去掉了后缀。
+- 增量未知：只显示 `—`（与额度芯片、今日 Token 的未知写法一致），不写 `+0`；`deltaText` 有值时（浏览器预览）用它。
+- 宽度：段在同一个 `.cap-main` 里，`mainW` 由 `ResizeObserver` 实测，`capsuleW = mainW + 59` 自动包含新段；
+  `.cap-cl` 是 `white-space: nowrap`，外壳 `overflow: hidden` 只会在测量前那一帧有可能切边，下一帧跟平；
+  窗口仍按预留盒子「变大立刻跟、变小等形变结束」，数字位数变化只让胶囊宽 1–2px，不裁切不换行。
+
+### 5.3 多会话气泡
+
+- 条件 `writing && running >= 2`（原型 `S.working && S.sessions.length >= 2`），只在完整胶囊出现，卡片与迷你态不画。
+- 数字用 running 会话数，失败 / 最近活跃不计入；状态不可判定时整段不渲染（不假装有会话在跑）。
+- 位置沿用 A3-1：`.cap-bubble` 在胶囊右侧 8px、高 40、圆角 20，转圈用 `.cap-spinner`（`inset: 4px`），
+  三栏网格保证气泡出现时胶囊不位移。
+
+### 5.4 表情优先级
+
+`lib/botExpression.ts` 与原型 `expression()` 的顺序逐条一致：出错 › 网关被拒 › 额度用尽 › 拖动 › 任一窗口 ≥ 80%
+› 等额度 › 刷新中 › 转发中 › 转发成功 › 工作中 › 一次性表情 › 睡着 › 打招呼 › 贴边 › 悬停 › 空闲，不需要改。
+
+### 5.5 验证
+
+- `pnpm --dir frontend typecheck` → exit 0。
+- `node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs` → 294 项全过。
+
+### 5.6 2026-11-05 追加：工作中眼睛变绿、增量段常驻
+
+真机看过之后提的两条修改。只动 `components/island/` 与两个 hook，经典样式（`UsageIsland.tsx` / `views/classic/`）的行为不变。
+
+**眼睛变绿（只在工作中）**
+
+- `Bot.tsx` 根节点 `<svg class="cbot">` 新增 `data-expr={expr}`，值就是 `lib/botExpression.ts` 算出的表情；`work` 只在 `writing === true` 且没有更高优先级状态（出错 / 网关被拒 / 额度用尽 / 拖动 / 任一窗口 ≥ 80% / 等额度 / 刷新中 / 转发中）时出现。
+- 颜色由 `capsule.css` 一条规则给出：`.cbot[data-expr="work"] .cbot-eyes-inner > * { fill: var(--pn-capsule-green) }`。
+  命中的是最内层眼睛形状——`.cbot-eyes-inner` 的直接子节点，即两只眼睛各自渲染的 `<rect>`（`work` 的 `pill` 形状）：
+  CSS 的 `fill` 声明覆盖 `Bot.tsx` 里 `EYES[expr].c` 写出的 SVG `fill` 属性。
+- 不新增颜色变量：浅色用 `--pn-capsule-green: #28a745`（bot 底色 `--pn-capsule-bot: #1d1d1f`，对比约 5.4:1），
+  深色自动翻成 `#30d158`（底色 `#2c2c2e`，约 6.9:1）。只动眼睛，bot 底色与额度环不动。
+- `EYES.work.g`（眼睛外那圈 drop-shadow 光晕）一起换成 `color-mix(in srgb, var(--pn-capsule-green) 55%, transparent)`，
+  免得浅色主题下深绿瞳孔外面套一圈亮薄荷光晕。
+- `work` 之外的表情（一次性表情 `happy / surprise / greet / reset`、`refresh` 的青、`worry` 的橙、`error` 的红叉、`sleep` 的灰线）
+  不命中这条规则，表情库预览保持原色；`.cbot-blink` / `.cbot-scan` 的 keyframes 作用在 `.cbot-eyes-inner` 的 `transform` 上，
+  与 `fill` 无关，眨眼与扫视照旧。
+
+**增量段常驻**
+
+- 值：`data.carriedDelta` 取 `live-usage` 推送的 `today_tokens`（`db::today_fresh_tokens`：今天已落库请求的新鲜 Token 合计）。
+  它与 `running_tokens` 不同——会话结束后仍是同一个数，跨天由后端重置；只有它为 null 或 0（今天还没落库任何请求、
+  而第一个请求正在写入）时才退回本轮 `running_tokens`。前端不自己累加，也不做日期判断。
+- 条件：`const carried = data.carriedDelta ?? data.deltaTokens ?? null`，
+  `liveVisible = !data.unavailable && !relay && (carried != null ? carried !== 0 : Boolean(data.deltaText))`。
+  不再依赖 `writing || deltaPhase !== "idle"`，所以会话结束时这一段留在原地；被清零成 0 / null 后自然消失
+  （没有数值时退回 `deltaText`，只在浏览器预览的示例数据里出现）。
+- 追数：`useLiveUsage` 给今日累计加了一个追数键 `today`（`counter.setTarget("today", u.today_tokens, ...)`，
+  数值不变的心跳推送不重跑补间），经 `useIslandWindowModel` 的 `data.carriedCountKey` 传下去；
+  `LiveTokens` 只在 `writing` 为真时订阅 `countKey`，结束后传 `undefined`，数字停在 `tokens` 的最后读数，不再逐帧。
+  卡片里分区头部的 `AnimatedTokens` 同样只在 `writing` 时订阅 `data.deltaCountKey`，结束后显示常驻值，
+  而不是追数被清空后的 `+0`。
+- 视觉不变：仍是一个 `.cap-hair` + 绿色 `.cap-live`（`+xx.xK`），宽度继续由 `mainW` 实测驱动（`capsuleW = mainW + 59`），
+  `.cap-cl` 是 `white-space: nowrap`，位数变多只让胶囊宽几像素，不换行不裁切。
+- 验证：`pnpm --dir frontend typecheck` → exit 0；`node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs` → 294 项全过。
+
+### 5.7 2026-11-05 追加：增量段改成 A + B 组合（本轮终值锁存 + 今日累计兜底）
+
+§5.6 的常驻值只有一个来源——今日累计写入。会话结束时它停在今日总量（`+2.3M`）上，那不是「本轮写了多少」；
+应用重启（内存态丢干净）或当天第一笔请求还没落库时，也只靠它兜底。这一版把两件事拆开，优先级写死。
+
+**显示优先级：锁存值 ?? 今日累计**
+
+| 情况 | 显示 | 来源 |
+|---|---|---|
+| 有本轮锁存值（> 0） | 本轮写入的终值 | A · `running_tokens` 的最新非零读数（只含 running 会话） |
+| 没有锁存（应用重启、当天第一笔还没落库） | 今日已落库合计 | B · `today_tokens` |
+| 两者都未知 / 为 0，或采集源出错 | 整段不渲染（胶囊收窄） | `null` |
+
+表达式（`lib/carriedDelta.ts` + `hooks/useIslandWindowModel.ts`）：
+
+```ts
+const carried = carriedDeltaView({ latched: latchedDelta, todayTokens: live.todayTokens, sourceFailed })
+// value  = latched > 0 ? latched : todayTokens > 0 ? todayTokens : null
+data.carriedDelta   = carried.value                       // 数字
+data.carriedSource  = carried.source                      // "session" | "today" | null，决定文案
+data.carriedCountKey = carriedDeltaCountKey(carried.source, working) // 只有进行中才有追数键
+```
+
+**锁存在哪**
+
+- 只存一处：`useIslandWindowModel` 的 `latchedRef`（`useRef`，判定源）+ `latchedDelta`（`useState`，渲染镜像）。
+  渲染体按 ref 递推——同一帧里 React 可能执行两次渲染体（严格模式 / 并发重放），按 ref 递推才能每一步都拿到
+  上一次的锁存值；`useLayoutEffect` 把 ref 的值同步进 state，提交后、绘制前落定，不会出现一帧旧读数。
+  `useLiveUsage` 不新增锁存，前端任何地方都不累加 Token。
+- 判定规则，纯函数 `latchSessionDelta`：
+  1. `working` 为真且 `running_tokens` > 0 → 记这个最新值（本轮累计写入）；
+  2. 本轮刚起跑（0 / 未知）→ 保持上一次锁存，避免被 0 抹掉后闪一下；
+  3. 没有可记的本轮值，且 `today_tokens` 归 0 / null → 清空；
+  4. 其余情况（会话已结束、今日累计还有值）→ 停在最后一个锁存值上，不跳变、不重新起跳。
+- 新一轮：`working` 重新为真、`running_tokens` 从 0 / 较小值往上走时被新值覆盖，等于从新的一轮重新计
+  （不做「只涨不跌」的取最大）。
+
+**清空时机**
+
+| 时机 | 具体触发点 |
+|---|---|
+| 跨天 | 后端把 `today_tokens` 重置为 0（区间内无记录）或 null（有 total 未知的历史行）→ 规则 3 清空。前端不判日期，昨天的终值不会一直挂着；跨过午夜而本轮仍在写时按规则 1 继续记本轮（那不是昨天的终值） |
+| 手动刷新 | 右键「立即刷新」、连接更新、平台切换都走现有刷新入口，`refreshSerial` 递增 → `resetMark` 发现变化就把锁存置空；仍在写的会话在下一次推送重新锁存，没有本轮值就回落到今日累计 |
+| 重启 | 内存态锁存随进程消失（`latchedRef` / `latchedDelta` 初始为 `null`），显示自动落到 B 的今日累计 |
+
+清空后既没有本轮值、今日累计也是 0 / null → `carriedDelta` 为 `null` → `liveVisible` 为假 → 整段不渲染，
+胶囊按 `mainW` 实测宽度收窄。
+
+**两种来源的文案**
+
+数字外观不变（`.cap-hair` + 绿色 `.cap-live` 的 `+xx.xK`），来源差异写在 `title` 与 `aria-label`，并用
+`data-carried-source` 标出来源：
+
+| 来源 | `title` / `aria-label` 原文 |
+|---|---|
+| `session`（锁存） | `本轮写入 +30.2K（本轮累计 30,200 Token；会话结束后停在这个读数，不再增长）` |
+| `today`（兜底） | `今日累计写入 +2.30M（今日已落库 2,300,000 Token，含今天所有会话）` |
+| 无数值 | `本轮写入暂无数据` / `今日累计写入暂无数据`（浏览器预览走 `deltaText` 示例分支，不报错） |
+
+**结束后无动画**
+
+- 追数键只在 `working` 为真时给：锁存分支订阅本轮合计 `total`，兜底分支订阅 `today`；结束后 `carriedCountKey`
+  为 `undefined`，`LiveTokens` 的 `countKey` 也传空 → `useLiveCount` 取不到帧值，直接显示 `tokens` 的静态读数，
+  不跑补间、不跳回 `+0`。
+- `working` 期间的实时追数保持原样（本轮 `total` 的 900ms 补间、心跳推送不重跑补间都不变）。
+- 展开卡片头部的 `AnimatedTokens` 沿用 §5.6 的判定（`writing ? (liveDelta ?? deltaTokens) : carried`），
+  结束后显示锁存的本轮终值，`countKey` 传空——本来就没有「结束后跳回 +0」的问题，无需另外改。
+- 视觉不变：宽度仍由 `mainW` 实测驱动（`capsuleW = mainW + 59`），不换行、不裁切，不新增颜色变量
+  （仍是 `--pn-capsule-green`）。
+
+**验证**
+
+- `pnpm --dir frontend typecheck` → exit 0。
+- `node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs` → 306 项全过（基线 294 + 新增
+  12 项 `lib/carriedDelta.test.mjs`：锁存递推、新一轮覆盖、0 / 未知不抹值、结束后停住、跨天清空、
+  跨午夜进行中不清、手动刷新回落今日、显示优先级、0 / null 不渲染、采集源出错、追数键）。
+
+
