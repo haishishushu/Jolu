@@ -13,6 +13,11 @@ export interface RouteStartEvent {
   agent: string | null
   requested_model: string
   source: string
+  /** 开始 / 结束共用的递增序号；旧版后端不返回 */
+  seq?: number
+  connection_id?: string | null
+  session_platform?: string | null
+  session_id?: string | null
 }
 
 export interface RouteEndEvent {
@@ -25,6 +30,10 @@ export interface RouteEndEvent {
   status_code: number | null
   result: "ok" | "rejected" | "failed" | string
   duration_ms: number
+  seq?: number
+  connection_id?: string | null
+  session_platform?: string | null
+  session_id?: string | null
 }
 
 /** 胶囊上正在显示的一次转发 */

@@ -398,6 +398,8 @@ async fn gemini_generate(
             );
         }
     };
+    // 先留一份请求头：Agent 识别与流水记录要用，请求体读取会消费 request
+    let headers = request.headers().clone();
     let body = match axum::body::to_bytes(request.into_body(), BODY_LIMIT).await {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -407,7 +409,7 @@ async fn gemini_generate(
             );
         }
     };
-    crate::gateway::adapter::gemini::handle(deps, model, method, body).await
+    crate::gateway::adapter::gemini::handle(deps, model, method, body, &headers).await
 }
 
 /// `GET /v1beta/models`：Gemini 格式的模型清单（只读缓存，不在这里打上游）。
@@ -728,10 +730,11 @@ mod tests {
             )
             .unwrap();
         }
-        let base = spawn_router(deps).await;
+        let base = spawn_router(deps.clone()).await;
         let response = reqwest::Client::builder().no_proxy().build().unwrap()
             .post(format!("{base}/v1beta/models/gem/gemini-2.5-pro:generateContent"))
             .header("content-type", "application/json")
+            .header("user-agent", "CloudCodeVSCode/0.65.0 (aidev_client; os_type=Windows; proxy_client=geminicli)")
             .body(r#"{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"temperature":0.1}}"#)
             .send()
             .await
@@ -748,6 +751,12 @@ mod tests {
         assert!(request.contains("\"model\":\"gemini-2.5-pro\""), "slug 必须被去掉：{request}");
         assert!(request.contains("\"stream\":false"), "{request}");
         assert!(request.contains("\"role\":\"user\""), "{request}");
+
+        // 统一网关：Gemini 入口同样写路由流水，识别新版 UA；不带会话标识时不猜会话
+        let rows = crate::gateway::route_log::recent(&deps.db.lock().unwrap(), 5).unwrap();
+        let row = rows.iter().find(|r| r.requested_model == "gem/gemini-2.5-pro").expect("Gemini 请求应写入路由流水");
+        assert_eq!((row.agent.as_deref(), row.result.as_str(), row.connection_id.as_deref()), (Some("gemini"), "ok", Some("c-gem")));
+        assert_eq!(row.session_id, None);
     }
 
     #[tokio::test]

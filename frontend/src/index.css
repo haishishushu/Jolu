@@ -153,6 +153,19 @@
   --jolu-cc-pressed: #eaeaec;
   --jolu-cc-inset: #00000012;
 }
+/* 统一网关（J6）连线色：Jolu.pen 的 jolu-gateway-* 没有区分浅深色，两种主题同值。 */
+:root {
+  --jolu-gateway-blue: #3986e8;
+  --jolu-gateway-purple: #8b69db;
+  --jolu-gateway-amber: #c99237;
+  --jolu-gateway-glow-green: #06c16744;
+  --jolu-gateway-glow-blue: #3986e844;
+  --jolu-gateway-glow-purple: #8b69db33;
+  --jolu-gateway-glow-amber: #c9923733;
+  --jolu-gateway-blue-soft: #edf4fe;
+  --jolu-gateway-purple-soft: #f4f0fc;
+  --jolu-gateway-amber-soft: #fcf5e9;
+}
 .dark {
   --jolu-bg: #0d0d0d;
   --jolu-side: #141414;
@@ -370,6 +383,12 @@
   --color-jolu-bg: var(--jolu-bg);
   --color-jolu-side: var(--jolu-side);
   --color-jolu-stage: var(--jolu-stage);
+  --color-jolu-gateway-blue: var(--jolu-gateway-blue);
+  --color-jolu-gateway-purple: var(--jolu-gateway-purple);
+  --color-jolu-gateway-amber: var(--jolu-gateway-amber);
+  --color-jolu-gateway-blue-soft: var(--jolu-gateway-blue-soft);
+  --color-jolu-gateway-purple-soft: var(--jolu-gateway-purple-soft);
+  --color-jolu-gateway-amber-soft: var(--jolu-gateway-amber-soft);
   --color-jolu-text: var(--jolu-text);
   --color-jolu-muted: var(--jolu-muted);
   --color-jolu-border: var(--jolu-border);
@@ -610,87 +629,51 @@ html.reduce-motion .motion-toast { transform: none; transition: none; }
 .motion-select-chevron { transition: transform 160ms var(--motion-ease); }
 [data-state="open"] > .motion-select-chevron { transform: rotate(180deg); }
 
-/* 模型入口（画板 OX4b7）：链路描线、悬停高亮、流光点、模型池呼吸、分组展开。 */
-@keyframes gw-breathe {
-  from { box-shadow: 0 1px 2px rgba(20, 60, 40, 0.10), 0 8px 22px rgba(20, 60, 40, 0.16); }
-  to { box-shadow: 0 1px 2px rgba(20, 60, 40, 0.16), 0 14px 34px rgba(20, 60, 40, 0.30); }
-}
+/* 统一网关：复制成功对勾的弹出（沿用模型入口旧稿 OX4b7 的 pop 曲线）。 */
 @keyframes gw-pop {
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
-@keyframes gw-rise {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
+
+/* 统一网关 · 来源直连最近会话（画板 J6-03）：
+   运行中 2.4px 主线 + 柔光，结束 220ms 淡为 1.4px；悬停 140ms / 退出 100ms；展开 240ms，箭头 160ms。
+   位移与淡入只用 transform / opacity，不做全属性过渡；减少动效时停止流光与过渡。 */
+.gw6-scroll { scrollbar-width: thin; scrollbar-color: var(--jolu-track) var(--jolu-stage); overflow-anchor: none; }
+.gw6-scroll::-webkit-scrollbar { width: 4px; }
+.gw6-scroll::-webkit-scrollbar-track { background: var(--jolu-stage); border-radius: 2px; }
+.gw6-scroll::-webkit-scrollbar-thumb { background: var(--jolu-track); border-radius: 2px; }
+.gw6-dots {
+  background-image: radial-gradient(circle, var(--jolu-border) 1px, transparent 1.2px);
+  background-size: 28px 28px;
+  background-position: 0 0;
 }
-.gw-hub-running { animation: gw-breathe 3.2s ease-in-out infinite alternate; }
-.gw-group-enter { animation: gw-pop 240ms var(--motion-ease) both; }
-.gw-dialog-enter { animation: gw-rise 200ms var(--motion-ease) both; }
-.gw-link {
-  transition: stroke-width 180ms var(--motion-ease), opacity 180ms var(--motion-ease),
-    stroke 400ms var(--motion-ease);
+.gw6-line {
+  transition: stroke-width 220ms var(--motion-ease), opacity var(--gw6-hover-ms, 100ms) var(--motion-ease);
 }
-.gw-card {
-  max-height: 1200px;
-  transition: box-shadow 160ms var(--motion-ease), border-color 160ms ease,
-    max-height 200ms var(--motion-ease), transform 120ms var(--motion-ease);
+.gw6-glow { transition: opacity 220ms var(--motion-ease); }
+.gw6-card {
+  transition: border-color 220ms var(--motion-ease), box-shadow 220ms var(--motion-ease), opacity var(--gw6-hover-ms, 100ms) var(--motion-ease);
 }
-.gw-card:hover { box-shadow: 0 6px 18px rgba(20, 60, 40, 0.10); }
-.gw-card-closing {
-  max-height: 0 !important;
-  opacity: 0;
-  margin-top: -10px;
-  overflow: hidden;
-  transition: max-height 200ms var(--motion-ease), opacity 200ms var(--motion-ease),
-    margin-top 200ms var(--motion-ease);
-}
-.gw-expand {
+.gw6-expand {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 180ms var(--motion-ease);
+  transition: grid-template-rows 240ms var(--motion-ease);
 }
-.gw-expand.open { grid-template-rows: 1fr; }
-.gw-expand > div { overflow: hidden; min-height: 0; }
-html.reduce-motion .gw-hub-running,
-html.reduce-motion .gw-group-enter,
-html.reduce-motion .gw-dialog-enter { animation: none; }
-html.reduce-motion .gw-link,
-html.reduce-motion .gw-card,
-html.reduce-motion .gw-expand,
-html.reduce-motion .gw-card-closing { transition: none; }
-@keyframes gw-draw { to { stroke-dashoffset: 0; } }
-@keyframes gw-row {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
-}
-@keyframes gw-fail {
-  from { box-shadow: inset 3px 0 0 #f59e0b, inset 0 0 0 20px rgba(245, 158, 11, 0.12); }
-  to { box-shadow: inset 3px 0 0 #f59e0b, inset 0 0 0 0 rgba(245, 158, 11, 0); }
-}
-.gw-link-draw {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  animation: gw-draw 400ms var(--motion-ease) forwards;
-}
-.gw-card-lifting {
-  transform: scale(1.02);
-  box-shadow: 0 14px 30px rgba(20, 60, 40, 0.22);
-  opacity: 0.92;
-  z-index: 20;
-}
-.gw-row-in { animation: gw-row 240ms var(--motion-ease) both; }
-.gw-row-fail { box-shadow: inset 3px 0 0 #f59e0b; animation: gw-row 240ms var(--motion-ease) both, gw-fail 1.2s ease-out; }
-::view-transition-group(*) { animation-duration: 180ms; animation-timing-function: var(--motion-ease); }
-html.reduce-motion .gw-flow-dot { display: none; }
-html.reduce-motion .gw-link-draw,
-html.reduce-motion .gw-row-in,
-html.reduce-motion .gw-row-fail { animation: none; }
-html.reduce-motion .gw-card-lifting { transform: none; }
+.gw6-expand.open { grid-template-rows: 1fr; }
+.gw6-expand > div { overflow: hidden; min-height: 0; }
+.gw6-chevron { transition: transform 160ms var(--motion-ease); }
+.gw6-copied { animation: gw-pop 160ms var(--motion-ease) both; }
+html.reduce-motion .gw6-flow { display: none; }
+html.reduce-motion .gw6-line,
+html.reduce-motion .gw6-glow,
+html.reduce-motion .gw6-card,
+html.reduce-motion .gw6-expand,
+html.reduce-motion .gw6-chevron { transition: none; }
+html.reduce-motion .gw6-copied { animation: none; }
 @media (prefers-reduced-motion: reduce) {
-  .gw-hub-running, .gw-group-enter, .gw-dialog-enter, .gw-link-draw, .gw-row-in, .gw-row-fail { animation: none; }
-  .gw-link, .gw-card, .gw-expand, .gw-card-closing { transition: none; }
-  .gw-flow-dot { display: none; }
-  .gw-card-lifting { transform: none; }
+  .gw6-flow { display: none; }
+  .gw6-line, .gw6-glow, .gw6-card, .gw6-expand, .gw6-chevron { transition: none; }
+  .gw6-copied { animation: none; }
 }
 
 /* 主题只渐变静态背景，避免全树重绘或覆盖控件的 transform/opacity 过渡。 */

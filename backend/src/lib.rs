@@ -2202,6 +2202,36 @@ fn gateway_set_serve(app: tauri::AppHandle, connection_id: String, enabled: bool
     connections::set_serve(&db, &connection_id, enabled)
 }
 
+/// 批量加入 / 移出模型池的单项结果。
+#[derive(serde::Serialize)]
+struct ServeBatchItem {
+    connection_id: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// 批量加入 / 移出模型池（管理来源弹窗）：逐个执行，单个失败不影响其他来源，结果逐项返回。
+#[tauri::command]
+fn gateway_set_serve_many(app: tauri::AppHandle, connection_ids: Vec<String>, enabled: bool) -> Result<Vec<ServeBatchItem>, String> {
+    let state = app.state::<Db>();
+    let db = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    Ok(connection_ids
+        .into_iter()
+        .map(|id| match connections::set_serve(&db, &id, enabled) {
+            Ok(()) => ServeBatchItem { connection_id: id, ok: true, error: None },
+            Err(error) => ServeBatchItem { connection_id: id, ok: false, error: Some(error) },
+        })
+        .collect())
+}
+
+/// 各来源经网关的使用情况（路由流水保留范围内）：最近使用时间、请求数与失败数。
+#[tauri::command]
+fn gateway_source_usage(app: tauri::AppHandle) -> Result<Vec<crate::gateway::route_log::SourceUsage>, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::route_log::source_usage(&conn).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn gateway_source_capabilities(app: tauri::AppHandle) -> Result<Vec<crate::gateway::subscription::Capability>, String> {
     let state = app.state::<Db>();
@@ -2328,6 +2358,27 @@ fn gateway_route_log(app: tauri::AppHandle) -> Result<Vec<crate::gateway::route_
     let state = app.state::<Db>();
     let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
     crate::gateway::route_log::recent(&conn, 20).map_err(|error| error.to_string())
+}
+
+/// 路由流水分页（统一网关）：`upper_id` 为空时以当前最新一条建立查询范围，翻页时带回同一上界。
+#[tauri::command]
+fn gateway_route_log_page(
+    app: tauri::AppHandle,
+    page: i64,
+    page_size: i64,
+    upper_id: Option<i64>,
+) -> Result<crate::gateway::route_log::RouteLogPage, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::route_log::page(&conn, page, page_size, upper_id).map_err(|error| error.to_string())
+}
+
+/// 统一网关「模型来源 → 最近会话」：在途快照（带序号）+ 经网关的会话及其来源关联、权威 Token。
+#[tauri::command]
+fn gateway_sessions_overview(app: tauri::AppHandle) -> Result<crate::gateway::sessions::SessionsOverview, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+    crate::gateway::sessions::overview(&conn).map_err(|error| error.to_string())
 }
 
 /// 今日（本地零点起）经网关的请求数：(ok, rejected, failed)。
@@ -3675,6 +3726,8 @@ pub fn run() {
             set_cost_currency,
             gateway_set_mode,
             gateway_set_serve,
+            gateway_set_serve_many,
+            gateway_source_usage,
             gateway_source_capabilities,
             gateway_wiring_set,
             gateway_escape,
@@ -3688,6 +3741,8 @@ pub fn run() {
             gateway_wiring_accept,
             gateway_catalog,
             gateway_route_log,
+            gateway_route_log_page,
+            gateway_sessions_overview,
             gateway_today_counts,
             dock_undock,
             cost_estimate,

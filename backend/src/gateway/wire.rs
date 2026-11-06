@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+use crate::gateway::activity::RouteMeta;
 use crate::gateway::route::{self, RouteDecision};
 use crate::proxy::ProxyDeps;
 
@@ -174,6 +175,60 @@ pub(crate) fn session_key(protocol: CallerProtocol, headers: &HeaderMap, body: &
     format!("tok:{token}:{slug}")
 }
 
+/// 会话 ID 只接受常见的标识字符，避免把整段 JSON 或异常长值当成会话。
+fn plausible_session_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then(|| value.to_string())
+}
+
+/// Claude Code 的 `metadata.user_id`：新版是 JSON（含 session_id），旧版是
+/// `user_<hash>_account_<uuid>_session_<uuid>`。两种都取不出会话时返回 None。
+fn claude_session_from_user_id(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let user = value.pointer("/metadata/user_id")?.as_str()?.trim();
+    if let Ok(inner) = serde_json::from_str::<serde_json::Value>(user) {
+        return inner.get("session_id").and_then(|v| v.as_str()).and_then(plausible_session_id);
+    }
+    user.rsplit_once("_session_").and_then(|(_, session)| plausible_session_id(session))
+}
+
+/// 已验证的调用方会话（统一网关开发说明 §6.1）。只认工具原生携带、可与会话线程对应的会话 ID：
+/// - Claude Code：`X-Claude-Code-Session-Id` 头，或 `metadata.user_id` 里的 session_id；
+/// - Codex：`session-id`（根会话；子线程请求也归到用户看到的根会话）；
+/// - OpenCode：`x-opencode-session-id`（子会话带 `x-opencode-parent-session-id`，归到父会话），
+///   统计里的会话 ID 带 `opencode:` 前缀（见 `opencode_usage.rs`），这里按同一格式拼接。
+///
+/// 请求级 ID（`x-client-request-id`）、`prompt_cache_key`、通用亲和头和令牌兜底都只用于亲和，
+/// 不能当成会话身份；识别不出 Agent 时也不猜。
+pub(crate) fn session_identity(agent: Option<&str>, headers: &HeaderMap, body: &[u8]) -> Option<crate::gateway::activity::SessionRef> {
+    let (platform, session) = match agent? {
+        "claude-code" => (
+            "claude",
+            header_value(headers, "x-claude-code-session-id")
+                .and_then(|v| plausible_session_id(&v))
+                .or_else(|| claude_session_from_user_id(body))?,
+        ),
+        "codex" => (
+            "codex",
+            header_value(headers, "session-id")
+                .or_else(|| header_value(headers, "session_id"))
+                .and_then(|v| plausible_session_id(&v))?,
+        ),
+        "opencode" => (
+            "opencode",
+            header_value(headers, "x-opencode-parent-session-id")
+                .or_else(|| header_value(headers, "x-opencode-session-id"))
+                .and_then(|v| plausible_session_id(&v))
+                .map(|id| format!("opencode:{id}"))?,
+        ),
+        _ => return None,
+    };
+    Some(crate::gateway::activity::SessionRef { platform: platform.into(), session_id: session })
+}
+
 /// 从调用方令牌 / 客户端头识别是哪个 agent（只用于路由流水，不做鉴权）。
 pub(crate) fn agent_from_headers(headers: &HeaderMap) -> Option<String> {
     let token = headers
@@ -201,22 +256,32 @@ pub(crate) fn agent_from_headers(headers: &HeaderMap) -> Option<String> {
         }
     }
     let ua = headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or_default();
-    if ua.starts_with("GeminiCLI") {
+    // Gemini CLI 旧版 UA 以 GeminiCLI 开头；0.65 起改为 CloudCodeVSCode/…（…proxy_client=geminicli）
+    if ua.starts_with("GeminiCLI") || ua.to_ascii_lowercase().contains("proxy_client=geminicli") {
         return Some("gemini".into());
     }
     if ua.starts_with("codex_cli_rs") {
         return Some("codex".into());
+    }
+    if ua.starts_with("claude-cli/") {
+        return Some("claude-code".into());
+    }
+    // OpenCode 每个模型请求都带 x-opencode-client / x-opencode-session-id
+    if ua.to_ascii_lowercase().starts_with("opencode/")
+        || headers.contains_key("x-opencode-client")
+        || headers.contains_key("x-opencode-session-id")
+    {
+        return Some("opencode".into());
     }
     None
 }
 
 /// 写一条路由流水并发结束事件。事件先于写库发出：数据库忙、这一条没写进库时界面仍能收到。
 #[allow(clippy::too_many_arguments)]
-fn record_route(
+pub(crate) fn record_route(
     deps: &Arc<ProxyDeps>,
     request_id: u64,
-    agent: Option<&str>,
-    requested: &str,
+    meta: &RouteMeta,
     source: Option<&str>,
     upstream: Option<&str>,
     status: Option<u16>,
@@ -224,33 +289,69 @@ fn record_route(
     started: std::time::Instant,
 ) {
     use crate::gateway::activity::{emit_end, RouteEnd};
+    let duration_ms = started.elapsed().as_millis() as i64;
     emit_end(
         &deps.on_activity,
         &RouteEnd {
             request_id,
             ts: chrono::Local::now().timestamp_millis(),
-            agent,
-            requested_model: requested,
+            agent: meta.agent.as_deref(),
+            requested_model: &meta.requested_model,
             source,
             upstream_model: upstream,
             status_code: status,
             result,
-            duration_ms: started.elapsed().as_millis() as i64,
+            duration_ms,
+            connection_id: meta.connection_id.as_deref(),
+            session_platform: meta.session_platform(),
+            session_id: meta.session_id(),
         },
     );
     let Ok(conn) = deps.db.try_lock() else { return };
     crate::gateway::route_log::record(
         &conn,
         crate::gateway::route_log::NewEntry {
-            agent,
-            requested_model: requested,
+            agent: meta.agent.as_deref(),
+            requested_model: &meta.requested_model,
             source,
             upstream_model: upstream,
             status_code: status.map(i64::from),
             result,
-            duration_ms: Some(started.elapsed().as_millis() as i64),
+            duration_ms: Some(duration_ms),
+            connection_id: meta.connection_id.as_deref(),
+            session_platform: meta.session_platform(),
+            session_id: meta.session_id(),
         },
     );
+}
+
+/// 选路成功、交给上游之前：发开始事件；返回的 guard 保证请求中途被取消时也有结束事件。
+pub(crate) fn begin_route(
+    deps: &Arc<ProxyDeps>,
+    request_id: u64,
+    meta: &RouteMeta,
+    entry: &route::PoolEntry,
+    started: std::time::Instant,
+) -> crate::gateway::activity::EndGuard {
+    crate::gateway::activity::emit_start(
+        &deps.on_activity,
+        &crate::gateway::activity::RouteStart {
+            request_id,
+            ts: chrono::Local::now().timestamp_millis(),
+            agent: meta.agent.as_deref(),
+            requested_model: &meta.requested_model,
+            source: &entry.slug,
+            connection_id: meta.connection_id.as_deref(),
+            session_platform: meta.session_platform(),
+            session_id: meta.session_id(),
+        },
+    );
+    crate::gateway::activity::EndGuard::new(deps.on_activity.clone(), request_id, meta, &entry.slug, started)
+}
+
+/// 选中连接后的元数据（连接 id 只在命中来源时才有）。
+pub(crate) fn linked(meta: &RouteMeta, entry: &route::PoolEntry) -> RouteMeta {
+    RouteMeta { connection_id: Some(entry.connection_id.clone()), ..meta.clone() }
 }
 
 /// 网关运行态（亲和 + 冷却）的借用引用，避免在 async 里长期持锁。
@@ -272,6 +373,12 @@ pub(crate) async fn handle(
     let agent = agent_from_headers(&headers);
     let Some(model) = extract_model(&body) else {
         return error_response(StatusCode::BAD_REQUEST, "请求体缺少 model 字段或不是有效 JSON");
+    };
+    let meta = RouteMeta {
+        session: session_identity(agent.as_deref(), &headers, &body),
+        agent: agent.clone(),
+        requested_model: model.clone(),
+        connection_id: None,
     };
 
     // 模型池快照：拿不到数据库锁时沿用旧索引（与观测模式 KeyIndex 同策略）
@@ -323,21 +430,11 @@ pub(crate) async fn handle(
         }
     }
     // 选路成功：先发开始事件，再交给上游。guard 保证请求中途被取消时也有结束事件。
-    let begin = |source: &str| {
-        crate::gateway::activity::emit_start(
-            &deps.on_activity,
-            &crate::gateway::activity::RouteStart {
-                request_id,
-                ts: chrono::Local::now().timestamp_millis(),
-                agent: agent.as_deref(),
-                requested_model: &model,
-                source,
-            },
-        );
-        crate::gateway::activity::EndGuard::new(deps.on_activity.clone(), request_id, agent.as_deref(), &model, source, started)
-    };
+    let begin = |entry: &route::PoolEntry, meta: &RouteMeta| begin_route(&deps, request_id, meta, entry, started);
+    let outcome = |response: &Response| if response.status().is_success() { "ok" } else { "failed" };
     match decision {
         RouteDecision::Direct(entry, upstream_model) => {
+            let meta = linked(&meta, entry);
             if entry.protocol != protocol.wire_name() {
                 let response = error_response(
                     StatusCode::BAD_REQUEST,
@@ -349,10 +446,10 @@ pub(crate) async fn handle(
                         wire_label(protocol),
                     ),
                 );
-                record_route(&deps, request_id, agent.as_deref(), &model, Some(&entry.slug), None, Some(400), "failed", started);
+                record_route(&deps, request_id, &meta, Some(&entry.slug), None, Some(400), "failed", started);
                 return response;
             }
-            let guard = begin(&entry.slug);
+            let guard = begin(entry, &meta);
             let upstream_for_log = upstream_model.clone();
             let response = crate::gateway::adapter::direct::forward(
                 deps.clone(),
@@ -368,12 +465,11 @@ pub(crate) async fn handle(
             record_route(
                 &deps,
                 request_id,
-                agent.as_deref(),
-                &model,
+                &meta,
                 Some(&entry.slug),
                 Some(&upstream_for_log),
                 Some(response.status().as_u16()),
-                if response.status().is_success() { "ok" } else { "failed" },
+                outcome(&response),
                 started,
             );
             note_outcome(&deps, !response.status().is_success(), &format!("连接「{}」返回 {}", entry.slug, response.status()));
@@ -386,61 +482,61 @@ pub(crate) async fn handle(
             response
         }
         RouteDecision::Subscription(entry) => {
-            let response = if matches!(entry.platform.as_str(), "codex" | "opencode") {
-                if protocol == CallerProtocol::Anthropic {
-                    error_response(StatusCode::BAD_REQUEST, "Codex 订阅只服务 OpenAI 协议请求")
-                } else {
-                    let guard = begin(&entry.slug);
-                    let response = crate::gateway::adapter::codex::forward(deps.clone(), entry, protocol, body).await;
+            let meta = linked(&meta, entry);
+            let platform = entry.platform.as_str();
+            // 协议不匹配或平台未接入：本地直接返回，不发开始事件（不会显示成「运行中」）
+            let unsupported = match platform {
+                "codex" | "opencode" if protocol == CallerProtocol::Anthropic => {
+                    Some(error_response(StatusCode::BAD_REQUEST, "Codex 订阅只服务 OpenAI 协议请求"))
+                }
+                "claude" if protocol != CallerProtocol::Anthropic => {
+                    Some(error_response(StatusCode::BAD_REQUEST, "Claude 订阅当前只服务 Anthropic Messages 协议请求"))
+                }
+                "codex" | "opencode" | "claude" | "grok" | "workbuddy" | "qoder" | "trae" | "zcode" => None,
+                _ => Some(error_response(StatusCode::NOT_IMPLEMENTED, "该平台的订阅适配器尚未接入")),
+            };
+            let response = match unsupported {
+                Some(response) => response,
+                None => {
+                    let guard = begin(entry, &meta);
+                    let response = match platform {
+                        "codex" | "opencode" => crate::gateway::adapter::codex::forward(deps.clone(), entry, protocol, body).await,
+                        "claude" => crate::gateway::adapter::claude::forward(deps.clone(), entry, &session, body).await,
+                        "grok" => crate::gateway::adapter::grok::forward(deps.clone(), entry, protocol, body).await,
+                        "zcode" => crate::gateway::adapter::zcode::forward(deps.clone(), entry, protocol, body).await,
+                        _ => {
+                            // 只说 Chat 的来源（WorkBuddy / Qoder / Trae）：Anthropic 调用方（Claude Code）经协议转换后转发，回复再转回
+                            let anthropic = protocol == CallerProtocol::Anthropic;
+                            let converted = if anthropic {
+                                crate::gateway::translate::anthropic_request(&body).map(|b| (CallerProtocol::Chat, b))
+                            } else {
+                                Ok((protocol, body))
+                            };
+                            match converted {
+                                Err(e) => error_response(StatusCode::BAD_REQUEST, &e),
+                                Ok((protocol, body)) => {
+                                    let response = match platform {
+                                        "workbuddy" => crate::gateway::adapter::workbuddy::forward(deps.clone(), entry, protocol, body).await,
+                                        "qoder" => crate::gateway::adapter::qoder::forward(deps.clone(), entry, protocol, body).await,
+                                        _ => crate::gateway::adapter::trae::forward(deps.clone(), entry, protocol, body, &session).await,
+                                    };
+                                    if anthropic { crate::gateway::translate::anthropic_response(response, &model).await } else { response }
+                                }
+                            }
+                        }
+                    };
                     guard.finish();
                     response
                 }
-            } else if entry.platform == "claude" {
-                if protocol != CallerProtocol::Anthropic {
-                    error_response(StatusCode::BAD_REQUEST, "Claude 订阅当前只服务 Anthropic Messages 协议请求")
-                } else {
-                    let guard = begin(&entry.slug);
-                    let response = crate::gateway::adapter::claude::forward(deps.clone(), entry, &session, body).await;
-                    guard.finish();
-                    response
-                }
-            } else if entry.platform == "grok" {
-                crate::gateway::adapter::grok::forward(deps.clone(), entry, protocol, body).await
-            } else if matches!(entry.platform.as_str(), "workbuddy" | "qoder" | "trae") {
-                // 只说 Chat 的来源：Anthropic 调用方（Claude Code）经协议转换后转发，回复再转回
-                let anthropic = protocol == CallerProtocol::Anthropic;
-                let converted = if anthropic {
-                    crate::gateway::translate::anthropic_request(&body).map(|b| (CallerProtocol::Chat, b))
-                } else {
-                    Ok((protocol, body))
-                };
-                match converted {
-                    Err(e) => error_response(StatusCode::BAD_REQUEST, &e),
-                    Ok((protocol, body)) => {
-                        let response = if entry.platform == "workbuddy" {
-                            crate::gateway::adapter::workbuddy::forward(deps.clone(), entry, protocol, body).await
-                        } else if entry.platform == "qoder" {
-                            crate::gateway::adapter::qoder::forward(deps.clone(), entry, protocol, body).await
-                        } else {
-                            crate::gateway::adapter::trae::forward(deps.clone(), entry, protocol, body, &session).await
-                        };
-                        if anthropic { crate::gateway::translate::anthropic_response(response, &model).await } else { response }
-                    }
-                }
-            } else if entry.platform == "zcode" {
-                crate::gateway::adapter::zcode::forward(deps.clone(), entry, protocol, body).await
-            } else {
-                error_response(StatusCode::NOT_IMPLEMENTED, "该平台的订阅适配器尚未接入")
             };
             record_route(
                 &deps,
                 request_id,
-                agent.as_deref(),
-                &model,
+                &meta,
                 Some(&entry.slug),
                 None,
                 Some(response.status().as_u16()),
-                if response.status().is_success() { "ok" } else { "failed" },
+                outcome(&response),
                 started,
             );
             response
@@ -454,7 +550,7 @@ pub(crate) async fn handle(
                 route::RejectKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
                 route::RejectKind::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             };
-            record_route(&deps, request_id, agent.as_deref(), &model, None, None, Some(status.as_u16()), "rejected", started);
+            record_route(&deps, request_id, &meta, None, None, Some(status.as_u16()), "rejected", started);
             match retry_after {
                 Some(seconds) => error_response_with_retry(status, &message, seconds),
                 None => error_response(status, &message),
@@ -556,7 +652,59 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "GeminiCLI/0.34.0/... (win32; x64)".parse().unwrap());
         assert_eq!(agent_from_headers(&headers).as_deref(), Some("gemini"));
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "CloudCodeVSCode/0.65.0 (aidev_client; os_type=Windows; proxy_client=geminicli)".parse().unwrap());
+        assert_eq!(agent_from_headers(&headers).as_deref(), Some("gemini"));
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "claude-cli/2.1.0 (external, cli)".parse().unwrap());
+        assert_eq!(agent_from_headers(&headers).as_deref(), Some("claude-code"));
         assert_eq!(agent_from_headers(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn session_identity_only_trusts_native_session_ids() {
+        let none = HeaderMap::new();
+        // Claude Code：JSON user_id 里的 session_id；旧格式 _session_ 后缀；专用头优先
+        let body = br#"{"metadata":{"user_id":"{\"device_id\":\"d\",\"session_id\":\"ses-1\"}"}}"#;
+        let got = session_identity(Some("claude-code"), &none, body).unwrap();
+        assert_eq!((got.platform.as_str(), got.session_id.as_str()), ("claude", "ses-1"));
+        let legacy = br#"{"metadata":{"user_id":"user_abc_account_11-22_session_33-44"}}"#;
+        assert_eq!(session_identity(Some("claude-code"), &none, legacy).unwrap().session_id, "33-44");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-claude-code-session-id", "hdr-ses".parse().unwrap());
+        assert_eq!(session_identity(Some("claude-code"), &headers, body).unwrap().session_id, "hdr-ses");
+        // 普通 user_id 不是会话
+        assert!(session_identity(Some("claude-code"), &none, br#"{"metadata":{"user_id":"someone"}}"#).is_none());
+
+        // Codex：只认根会话头；请求级 ID 与缓存键不算
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", "root-1".parse().unwrap());
+        headers.insert("thread-id", "child-1".parse().unwrap());
+        let got = session_identity(Some("codex"), &headers, b"{}").unwrap();
+        assert_eq!((got.platform.as_str(), got.session_id.as_str()), ("codex", "root-1"));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-client-request-id", "req-1".parse().unwrap());
+        assert!(session_identity(Some("codex"), &headers, br#"{"prompt_cache_key":"cache-1"}"#).is_none());
+
+        // OpenCode：本会话 ID；子会话归到父会话；只有亲和头不算
+        let mut headers = HeaderMap::new();
+        headers.insert("x-opencode-session-id", "ses_child".parse().unwrap());
+        assert_eq!(session_identity(Some("opencode"), &headers, b"{}").unwrap().session_id, "opencode:ses_child");
+        headers.insert("x-opencode-parent-session-id", "ses_root".parse().unwrap());
+        let got = session_identity(Some("opencode"), &headers, b"{}").unwrap();
+        assert_eq!((got.platform.as_str(), got.session_id.as_str()), ("opencode", "opencode:ses_root"));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-opencode-session", "affinity-root".parse().unwrap());
+        assert!(session_identity(Some("opencode"), &headers, b"{}").is_none());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-opencode-client", "cli".parse().unwrap());
+        assert_eq!(agent_from_headers(&headers).as_deref(), Some("opencode"));
+
+        // 识别不出 Agent，或别的 Agent 只有通用头：不猜
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", "root-1".parse().unwrap());
+        assert!(session_identity(None, &headers, body).is_none());
+        assert!(session_identity(Some("gemini"), &headers, body).is_none());
     }
 
     #[test]

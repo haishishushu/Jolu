@@ -301,6 +301,10 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN serve_enabled INTEGER NOT NULL DEFAULT 0", []);
     // 会话生命周期：旧库升级后默认均为停止，避免把近期 Token 误报成正在运行。
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN is_running INTEGER NOT NULL DEFAULT 0", []);
+    // 统一网关：流水记录选中的连接与已验证的调用方会话（可空新列，旧行保持 NULL，可恢复）
+    let _ = conn.execute("ALTER TABLE gateway_route_log ADD COLUMN connection_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE gateway_route_log ADD COLUMN session_platform TEXT", []);
+    let _ = conn.execute("ALTER TABLE gateway_route_log ADD COLUMN session_id TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN activity_state TEXT NOT NULL DEFAULT 'done'", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN activity_updated_ms INTEGER", []);
     let _ = conn.execute(

@@ -38,6 +38,15 @@ Remove-Item Env:JOLU_DEV_URL                                 # 验收结束后�
 
 `start.ps1` 必须保持纯 ASCII：Windows PowerShell 5.1 会把不带 BOM 的 UTF-8 文件按 ANSI 读取，中文注释可能吞掉下一行代码。
 
+## 统一网关（J6）
+
+- `gateway-unified.e2e.mjs`：浏览器预览，挂载真实 `GatewayView` 与合成 API / 合成事件通道（不连桌面、不调原生命令）。覆盖运行优先、流光、K/M 缩写、真实 0 与「—」、展开收起、请求结束与乱序事件、路由流水翻页带回查询上界、非法页码、管理来源弹窗。需要先启动前端服务，用 `JOLU_PREVIEW_URL` 指定地址；截图在 `output/acceptance/gateway-unified/`。
+- `gateway-unified-desktop.e2e.mjs`：真实桌面验收。隔离 Jolu 实例 + 真实 Claude Code / Codex / OpenCode / Gemini CLI + 合成模型上游 `model-upstream.py`。步骤：
+  1. 按上文 5193 方式编译并 `start.ps1 -Executable …` 启动隔离实例；
+  2. `JOLU_UPSTREAM_DELAY=4 python -I scripts/acceptance/model-upstream.py 18766`（只监听回环，回复固定文本与合成用量；请求头写入 `output/acceptance/upstream-requests.jsonl`，凭据类请求头脱敏）；
+  3. 在 `output/acceptance/node` 里设置 `JOLU_DEV_URL` 后运行脚本。
+  脚本经应用命令创建两个指向合成上游的自定义来源、开启转发，临时读取剪贴板里的手动接入 Key 后恢复原文本；每个 CLI 用 `output/acceptance/cli-home/<工具>` 作为独立主目录，并去掉本机 shell 里的 `ANTHROPIC_*` / `OPENAI_*` / `GEMINI_*` 等变量，不读写真实配置。核对：运行中显示、结束后无残留在途请求、各工具会话 ID 与其本地会话文件一致、来源关联、Gemini 只记流水不猜会话。报告与截图在 `output/acceptance/gateway-unified-desktop/`。OpenCode 首次在空主目录运行会下载 provider，可能需要几分钟。
+
 ## 灵动岛分身（画布 22）
 
 `island-clones.e2e.mjs` 直接用 Playwright 的 `connectOverCDP` 连接 9337，不经过 playwright-cli。在隔离应用启动后运行 `main` 阶段；结束应用、用同一隔离目录重启后再运行 `after-restart` 阶段。脚本会核对菜单顺序、右上角总数、销毁禁用、分身窗口与 `settings.json` 的 `island_clones` 一致，以及销毁本体时的接任。开发端口被系统排除时，用 `--config` 覆盖 `build.devUrl` 后再 `tauri dev`。

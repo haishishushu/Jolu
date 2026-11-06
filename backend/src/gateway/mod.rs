@@ -21,6 +21,7 @@ pub mod groups;
 pub mod identity;
 pub mod route_log;
 pub mod route;
+pub(crate) mod sessions;
 pub mod server;
 pub(crate) mod subscription;
 pub(crate) mod translate;

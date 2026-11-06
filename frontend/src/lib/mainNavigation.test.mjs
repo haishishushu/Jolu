@@ -12,7 +12,7 @@ import {
 
 test("签到在供应商同级下方；网关排在 Skills 管理之后（Jolu.pen 模块 I / J）", () => {
   assert.deepEqual(PRIMARY_PAGES.map((item) => item.label), [
-    "灵动岛", "供应商", "一键签到", "用量统计", "会话线程", "自动化", "Skills 管理", "模型入口",
+    "灵动岛", "供应商", "一键签到", "用量统计", "会话线程", "自动化", "Skills 管理", "统一网关",
   ])
   assert.equal(resolveOpenPage("checkin", null), "checkin")
   assert.equal(resolveOpenPage("last", "checkin"), "checkin")

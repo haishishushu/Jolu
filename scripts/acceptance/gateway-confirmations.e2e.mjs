@@ -16,7 +16,16 @@ try {
   page.on("pageerror", error => errors.push(error.message))
   await page.addInitScript(() => {
     window.unexpectedNativeCalls = 0
-    window.__TAURI_INTERNALS__ = { invoke: () => { window.unexpectedNativeCalls++; return Promise.reject(new Error("禁止真实原生调用")) } }
+    // 事件订阅走合成通道（统一网关页会监听请求开始 / 结束），其余原生调用一律拒绝
+    window.__TAURI_INTERNALS__ = {
+      transformCallback: () => 0,
+      unregisterCallback: () => {},
+      invoke: (cmd) => {
+        if (cmd === "plugin:event|listen" || cmd === "plugin:event|unlisten") return Promise.resolve(0)
+        window.unexpectedNativeCalls++
+        return Promise.reject(new Error("禁止真实原生调用"))
+      },
+    }
   })
   await page.route("**/src/hooks/useConnections.ts*", r => r.fulfill({ contentType: "application/javascript", body: 'const connections=[]; const reload=async()=>{}; export function useConnections(){return {connections,reload,loading:false,error:null}}' }))
   await page.route("**/gateway-confirm-check", r => r.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
@@ -34,6 +43,7 @@ const agents=[{agent:'claude-code',wired:true},{agent:'codex',wired:false,codex_
 gatewayApi.status=async()=>({mode:'relay',enabled:true,port:17890,circuit_threshold:3,auto_escape:true,default_connection:null,wiring:agents});
 gatewayApi.groups=async()=>({sources:[{id:'fixture-group',name:'合成分组',sort:0,members:[]}],agents:[]});
 gatewayApi.catalog=async()=>[];gatewayApi.routeLog=async()=>[];gatewayApi.sourceCapabilities=async()=>[];
+gatewayApi.sessionsOverview=async()=>({seq:0,at:0,in_flight:[],sessions:[]});gatewayApi.routeLogPage=async()=>({rows:[],page:1,page_size:10,total:0,page_count:0,upper_id:null});gatewayApi.sourceUsage=async()=>[];
 gatewayApi.accessKey=async refresh=>refresh?deferred('key',{}):'jolu-****fixture';
 gatewayApi.setWiring=(agent,wired)=>deferred('wire',{agent,wired});
 gatewayApi.acceptWiring=agent=>deferred('accept',{agent}); gatewayApi.setMode=mode=>deferred('mode',{mode});
@@ -85,8 +95,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
   assert.equal(await count(), beforeAccept + 1)
   await page.evaluate(() => window.fixture.success())
   await page.getByRole("dialog").waitFor({ state: "detached" })
-  await page.getByRole("switch", { name: "开启模型转发", exact: true }).click()
-  await page.getByRole("dialog", { name: "关闭模型转发？", exact: true }).waitFor()
+  await page.getByRole("switch", { name: "允许接入", exact: true }).click()
+  await page.getByRole("dialog", { name: "关闭统一网关接入？", exact: true }).waitFor()
   const beforeMode = await count()
   await page.getByRole("button", { name: "取消", exact: true }).click()
   await page.getByRole("dialog").waitFor({ state: "detached" })

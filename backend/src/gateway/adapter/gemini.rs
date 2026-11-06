@@ -30,6 +30,7 @@ pub(crate) async fn handle(
     model_id: &str,
     method: GeminiMethod,
     body: axum::body::Bytes,
+    headers: &axum::http::HeaderMap,
 ) -> Response {
     if method == GeminiMethod::Count {
         return json_response(
@@ -37,6 +38,17 @@ pub(crate) async fn handle(
             serde_json::json!({"totalTokens": estimate_tokens(&body)}).to_string(),
         );
     }
+    // 统一网关：与 wire::handle 一样记开始 / 结束事件与路由流水（统一网关开发说明 §6.1）。
+    // Gemini CLI 的 API Key 请求不带会话标识（2026-11-06 用 0.65.0 实测），这里不猜会话。
+    let started = std::time::Instant::now();
+    let request_id = crate::gateway::activity::next_request_id();
+    let agent = crate::gateway::wire::agent_from_headers(headers);
+    let meta = crate::gateway::activity::RouteMeta {
+        session: crate::gateway::wire::session_identity(agent.as_deref(), headers, &body),
+        agent,
+        requested_model: model_id.to_string(),
+        connection_id: None,
+    };
     // Gemini 资源名可能带 `models/` 前缀，菜单 id 是 `<slug>/<model>`，两种都接受
     let model_id = model_id.strip_prefix("models/").unwrap_or(model_id);
     let pool = {
@@ -54,14 +66,30 @@ pub(crate) async fn handle(
             return error_response(StatusCode::SERVICE_UNAVAILABLE, "来源已关闭或配置已变化，请刷新后重试");
         }
     }
-    let (entry, upstream_model) = match decision {
-        RouteDecision::Direct(entry, model) => (entry, model),
-        RouteDecision::Subscription(entry) if entry.platform == "gemini" => {
-            let upstream_model = model_id.split_once('/').map(|(_, model)| model).unwrap_or(model_id);
-            return super::gemini_subscription::forward(deps.clone(), entry, upstream_model, method, body).await;
+    let outcome = |response: &Response| if response.status().is_success() { "ok" } else { "failed" };
+    match decision {
+        RouteDecision::Direct(entry, upstream_model) => {
+            let meta = crate::gateway::wire::linked(&meta, entry);
+            let guard = crate::gateway::wire::begin_route(&deps, request_id, &meta, entry, started);
+            let response = forward_direct(deps.clone(), entry, &upstream_model, method, body).await;
+            guard.finish();
+            crate::gateway::wire::record_route(&deps, request_id, &meta, Some(&entry.slug), Some(&upstream_model), Some(response.status().as_u16()), outcome(&response), started);
+            response
         }
-        RouteDecision::Subscription(_) => {
-            return error_response(StatusCode::BAD_REQUEST, "Gemini 请求只支持 API Key 来源，订阅适配器暂不支持");
+        RouteDecision::Subscription(entry) if entry.platform == "gemini" => {
+            let meta = crate::gateway::wire::linked(&meta, entry);
+            let upstream_model = model_id.split_once('/').map(|(_, model)| model).unwrap_or(model_id).to_string();
+            let guard = crate::gateway::wire::begin_route(&deps, request_id, &meta, entry, started);
+            let response = super::gemini_subscription::forward(deps.clone(), entry, &upstream_model, method, body).await;
+            guard.finish();
+            crate::gateway::wire::record_route(&deps, request_id, &meta, Some(&entry.slug), Some(&upstream_model), Some(response.status().as_u16()), outcome(&response), started);
+            response
+        }
+        RouteDecision::Subscription(entry) => {
+            let meta = crate::gateway::wire::linked(&meta, entry);
+            let response = error_response(StatusCode::BAD_REQUEST, "Gemini 请求只支持 API Key 来源，订阅适配器暂不支持");
+            crate::gateway::wire::record_route(&deps, request_id, &meta, Some(&entry.slug), None, Some(400), "failed", started);
+            response
         }
         RouteDecision::Reject { kind, message, retry_after } => {
             let status = match kind {
@@ -72,15 +100,27 @@ pub(crate) async fn handle(
                 route::RejectKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
                 route::RejectKind::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             };
+            crate::gateway::wire::record_route(&deps, request_id, &meta, None, None, Some(status.as_u16()), "rejected", started);
             let mut response = error_response(status, &message);
             if let Some(seconds) = retry_after {
                 if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
                     response.headers_mut().insert(axum::http::header::RETRY_AFTER, value);
                 }
             }
-            return response;
+            response
         }
-    };
+    }
+}
+
+/// API Key 来源：Gemini 请求转成 OpenAI Chat 发给上游，回复再转回 Gemini 格式。
+async fn forward_direct(
+    deps: Arc<ProxyDeps>,
+    entry: &route::PoolEntry,
+    upstream_model: &str,
+    method: GeminiMethod,
+    body: axum::body::Bytes,
+) -> Response {
+    let upstream_model = upstream_model.to_string();
     if entry.protocol != "openai" {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -159,6 +199,7 @@ pub(crate) async fn handle(
         .body(Body::from_stream(stream_body))
         .unwrap_or_else(|error| error_response(StatusCode::BAD_GATEWAY, &format!("响应构造失败：{error}")))
 }
+
 
 fn chat_endpoint(base: &str) -> String {
     let base = base.trim_end_matches('/');

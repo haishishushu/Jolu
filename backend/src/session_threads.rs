@@ -42,6 +42,9 @@ pub struct SessionFilter {
     pub since: Option<i64>,
     #[serde(default)]
     pub search: Option<String>,
+    /// 只查这些原始会话 ID（统一网关页定向取数用；前端筛选不会传）
+    #[serde(skip)]
+    pub session_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +161,13 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
     if let Some(p) = &f.platform {
         sql.push_str(" AND r.platform = ?");
         args.push(Value::Text(p.clone()));
+    }
+    if let Some(ids) = &f.session_ids {
+        if ids.is_empty() {
+            return Ok(SessionList { sessions: Vec::new(), files: 0 });
+        }
+        sql.push_str(&format!(" AND r.session_id IN ({})", vec!["?"; ids.len()].join(",")));
+        args.extend(ids.iter().cloned().map(Value::Text));
     }
     sql.push_str(" GROUP BY r.platform, r.session_id");
     let files = source_files(conn)?;
