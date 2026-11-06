@@ -124,6 +124,7 @@ static PROXY: LazyLock<Mutex<Option<Arc<ProxyRuntime>>>> = LazyLock::new(|| Mute
 
 pub(crate) struct ProxyRuntime {
     pub port: u16,
+    mode: crate::gateway::Mode,
     shutdown: Arc<tokio::sync::watch::Sender<bool>>,
     pub deps: Arc<ProxyDeps>,
 }
@@ -717,11 +718,13 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         eprintln!("[代理] {warn}");
     }
     let mut upstreams = HashMap::new();
-    if let Some(base) = settings.proxy_claude_upstream.as_deref().filter(|s| !s.trim().is_empty()) {
-        upstreams.insert(ProxyPlatform::Claude, base.trim().trim_end_matches('/').to_string());
-    }
-    if let Some(base) = settings.proxy_codex_upstream.as_deref().filter(|s| !s.trim().is_empty()) {
-        upstreams.insert(ProxyPlatform::Codex, base.trim().trim_end_matches('/').to_string());
+    if mode == crate::gateway::Mode::Observe {
+        if let Some(base) = settings.proxy_claude_upstream.as_deref().filter(|s| !s.trim().is_empty()) {
+            upstreams.insert(ProxyPlatform::Claude, base.trim().trim_end_matches('/').to_string());
+        }
+        if let Some(base) = settings.proxy_codex_upstream.as_deref().filter(|s| !s.trim().is_empty()) {
+            upstreams.insert(ProxyPlatform::Codex, base.trim().trim_end_matches('/').to_string());
+        }
     }
     // 网关模式的上游来自 connections 模型池（serve_enabled），不依赖观测接管的探测值；
     // 观测模式维持原有前置：没有接管上游就拒绝启动。
@@ -867,7 +870,7 @@ pub fn start(app: &tauri::AppHandle) -> Result<(), String> {
         }
     });
 
-    *PROXY.lock().expect("代理状态锁") = Some(Arc::new(ProxyRuntime { port, shutdown, deps }));
+    *PROXY.lock().expect("代理状态锁") = Some(Arc::new(ProxyRuntime { port, mode, shutdown, deps }));
     Ok(())
 }
 
@@ -934,14 +937,24 @@ fn heal_orphans_locked(app: &tauri::AppHandle) {
     }
 
     let settings = app.state::<crate::Cfg>().0.get();
-    let port = settings.proxy_port;
     let runtime = PROXY.lock().ok().and_then(|guard| guard.clone());
+    heal_observed_orphans(&settings, runtime.as_deref());
+}
+
+fn heal_observed_orphans(settings: &crate::settings::Settings, runtime: Option<&ProxyRuntime>) {
+    // 中转接线同时拥有地址与凭证，不能用只还原地址的观测路径修复。
+    // 模式切换期间以实际监听的模式为准；监听已停止时再看保存的模式。
+    let mode = runtime.map(|rt| rt.mode).unwrap_or_else(|| crate::gateway::mode_from(settings).0);
+    if mode == crate::gateway::Mode::Relay {
+        return;
+    }
+    let port = settings.proxy_port;
     for (platform, saved) in [
         (ProxyPlatform::Claude, settings.proxy_claude_upstream.clone()),
         (ProxyPlatform::Codex, settings.proxy_codex_upstream.clone()),
     ] {
         // 代理正接管该平台：配置指向代理是预期状态
-        if runtime.as_ref().is_some_and(|rt| rt.deps.upstreams.contains_key(&platform)) {
+        if runtime.is_some_and(|rt| rt.deps.upstreams.contains_key(&platform)) {
             continue;
         }
         let Ok(Some(current)) = crate::proxy_config::read_current_base(platform) else {
@@ -972,6 +985,7 @@ fn heal_orphans_locked(app: &tauri::AppHandle) {
 }
 
 /// 本机 CLI 配置被外部修改（CC Switch 切换等）后的跟随逻辑：
+/// 仅观测模式保持透明接管；中转模式尊重外部切换，不自动重新接线。
 /// 先清理孤儿代理地址（无论代理是否运行，见 [`heal_orphans`]）；
 /// 代理运行中：读到代理地址 → 自己写的，忽略；读到新网关地址 → 更新保存的上游并重写
 /// 代理地址保持接管；读到空 → 外部切回官方直连，放弃该平台接管并清掉代理地址。
@@ -987,6 +1001,15 @@ fn on_config_changed_locked(app: &tauri::AppHandle) {
     let Some(runtime) = PROXY.lock().expect("代理状态锁").clone() else {
         return;
     };
+    if follow_external_configs(&app.state::<crate::Cfg>().0, &runtime) {
+        let _ = app.emit("settings-changed", app.state::<crate::Cfg>().0.get());
+    }
+}
+
+fn follow_external_configs(store: &crate::settings::Store, runtime: &ProxyRuntime) -> bool {
+    if runtime.mode == crate::gateway::Mode::Relay {
+        return false;
+    }
     let proxy_base = format!("http://127.0.0.1:{}", runtime.port);
     let mut changed = false;
     for platform in [ProxyPlatform::Claude, ProxyPlatform::Codex] {
@@ -1005,9 +1028,7 @@ fn on_config_changed_locked(app: &tauri::AppHandle) {
                     eprintln!("[代理] 跟随外部切换失败（{}）：{error}", platform.display_name());
                     continue;
                 }
-                if app
-                    .state::<crate::Cfg>()
-                    .0
+                if store
                     .try_update(|settings| set_upstream(settings, platform, Some(normalized)))
                     .is_ok()
                 {
@@ -1021,9 +1042,7 @@ fn on_config_changed_locked(app: &tauri::AppHandle) {
                     eprintln!("[代理] 放弃 {} 接管时清理失败：{error}", platform.display_name());
                     continue;
                 }
-                if app
-                    .state::<crate::Cfg>()
-                    .0
+                if store
                     .try_update(|settings| set_upstream(settings, platform, None))
                     .is_ok()
                 {
@@ -1033,9 +1052,7 @@ fn on_config_changed_locked(app: &tauri::AppHandle) {
             }
         }
     }
-    if changed {
-        let _ = app.emit("settings-changed", app.state::<crate::Cfg>().0.get());
-    }
+    changed
 }
 
 fn set_upstream(settings: &mut crate::settings::Settings, platform: ProxyPlatform, value: Option<String>) {
@@ -1047,9 +1064,23 @@ fn set_upstream(settings: &mut crate::settings::Settings, platform: ProxyPlatfor
 
 /// 应用退出时的收尾（RunEvent::Exit）：代理还开着就还原 CLI 配置，避免 CLI 指向失效端口。
 pub fn shutdown_and_restore(app: &tauri::AppHandle) {
-    stop();
-    let Some(store) = app.try_state::<crate::Cfg>() else { return; };
+    let Some(store) = app.try_state::<crate::Cfg>() else { stop(); return; };
     let settings = store.0.get();
+    let mode = PROXY.lock().ok().and_then(|guard| guard.as_ref().map(|rt| rt.mode))
+        .unwrap_or_else(|| crate::gateway::mode_from(&settings).0);
+    if mode == crate::gateway::Mode::Relay {
+        // 中转模式按接线快照成对还原地址与凭证，旧观测上游不能参与。
+        let result = crate::cli_switch::with_switch(|| {
+            let outcome = crate::gateway::escape::restore_all(app);
+            if outcome.failed.is_empty() { Ok(()) } else { Err(outcome.summary()) }
+        });
+        if let Err(error) = result {
+            eprintln!("[模型入口] 退出还原失败：{error}");
+        }
+        stop();
+        return;
+    }
+    stop();
     if settings.proxy_claude_upstream.is_some() || settings.proxy_codex_upstream.is_some() {
         if let Err(error) = crate::proxy_config::restore_all_saved(app) {
             eprintln!("[代理] 退出还原失败：{error}");
@@ -1107,16 +1138,17 @@ pub struct ProxyStatus {
 
 pub fn status(app: &tauri::AppHandle) -> ProxyStatus {
     let settings = app.state::<crate::Cfg>().0.get();
-    let running = PROXY.lock().map(|guard| guard.is_some()).unwrap_or(false);
+    let runtime = PROXY.lock().ok().and_then(|guard| guard.clone());
+    let observing = runtime.as_ref().is_some_and(|rt| rt.mode == crate::gateway::Mode::Observe);
     ProxyStatus {
-        running,
+        running: runtime.is_some(),
         port: settings.proxy_port,
         fallback_reason: FALLBACK_REASON.lock().ok().and_then(|slot| slot.clone()),
         last_error: LAST_ERROR.lock().ok().and_then(|slot| slot.clone()),
         claude_upstream: settings.proxy_claude_upstream.clone(),
         codex_upstream: settings.proxy_codex_upstream.clone(),
-        claude_taken_over: running && settings.proxy_claude_upstream.is_some(),
-        codex_taken_over: running && settings.proxy_codex_upstream.is_some(),
+        claude_taken_over: observing && settings.proxy_claude_upstream.is_some(),
+        codex_taken_over: observing && settings.proxy_codex_upstream.is_some(),
     }
 }
 
@@ -1153,6 +1185,84 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn isolated_configs(test: &str, check: impl FnOnce(&std::path::Path)) {
+        const ROOT: &str = "JOLU_PROXY_CONFIG_TEST_ROOT";
+        if let Some(root) = std::env::var_os(ROOT) {
+            check(std::path::Path::new(&root));
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("jolu-proxy-{}-{test}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(dir.join("claude")).unwrap();
+        std::fs::create_dir_all(dir.join("codex")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("proxy::tests::{test}"), "--nocapture"])
+            .env(ROOT, &dir)
+            .env("CLAUDE_CONFIG_DIR", dir.join("claude"))
+            .env("CODEX_HOME", dir.join("codex"))
+            .output().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    fn config_runtime(mode: crate::gateway::Mode) -> ProxyRuntime {
+        let (deps, _rx) = test_deps(Arc::new(Mutex::new(memory_db())), HashMap::from([
+            (ProxyPlatform::Claude, "https://old-claude.example".into()),
+            (ProxyPlatform::Codex, "https://old-codex.example/v1".into()),
+        ]), None);
+        ProxyRuntime { port: 12731, mode, shutdown: deps.shutdown.clone(), deps }
+    }
+
+    fn write_configs(dir: &std::path::Path, base: &str, token: &str) {
+        std::fs::write(dir.join("claude/settings.json"), serde_json::json!({
+            "env": {"ANTHROPIC_BASE_URL": base, "ANTHROPIC_AUTH_TOKEN": token}, "model": "fixture-model"
+        }).to_string()).unwrap();
+        std::fs::write(dir.join("codex/config.toml"), format!(
+            "model_provider = \"fixture\"\nmodel = \"fixture-model\"\n[model_providers.fixture]\nbase_url = \"{base}\"\nenv_key = \"FIXTURE_API_KEY\"\n"
+        )).unwrap();
+    }
+
+    #[test]
+    fn config_follow_respects_runtime_mode_and_keeps_credentials() {
+        isolated_configs("config_follow_respects_runtime_mode_and_keeps_credentials", |dir| {
+            for mode in [crate::gateway::Mode::Relay, crate::gateway::Mode::Observe] {
+                let store = crate::settings::Store::load(&dir.join(format!("{mode:?}")));
+                store.try_update(|s| s.proxy_mode = "observe".into()).unwrap();
+                write_configs(dir, "https://new.example/v1/", "fixture-upstream-key");
+                let changed = follow_external_configs(&store, &config_runtime(mode));
+                let claude: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("claude/settings.json")).unwrap()).unwrap();
+                let codex = std::fs::read_to_string(dir.join("codex/config.toml")).unwrap().parse::<toml_edit::DocumentMut>().unwrap();
+                let expected = if mode == crate::gateway::Mode::Relay { "https://new.example/v1/" } else { "http://127.0.0.1:12731" };
+                assert_eq!(claude["env"]["ANTHROPIC_BASE_URL"], expected, "{mode:?} 不得混用网关地址和上游密钥");
+                assert_eq!(codex["model_providers"]["fixture"]["base_url"].as_str(), Some(expected));
+                assert_eq!(claude["env"]["ANTHROPIC_AUTH_TOKEN"], "fixture-upstream-key");
+                assert_eq!(claude["model"], "fixture-model");
+                assert_eq!(codex["model_providers"]["fixture"]["env_key"].as_str(), Some("FIXTURE_API_KEY"));
+                assert_eq!(changed, mode == crate::gateway::Mode::Observe);
+                assert_eq!(store.get().proxy_claude_upstream.as_deref(), if changed { Some("https://new.example/v1") } else { None });
+            }
+        });
+    }
+
+    #[test]
+    fn config_healing_respects_gateway_wiring_and_observe_orphans() {
+        isolated_configs("config_healing_respects_gateway_wiring_and_observe_orphans", |dir| {
+            for (mode, running) in [(crate::gateway::Mode::Relay, true), (crate::gateway::Mode::Relay, false), (crate::gateway::Mode::Observe, false)] {
+                let mut settings = crate::settings::Settings::default();
+                settings.proxy_mode = if mode == crate::gateway::Mode::Relay { "relay" } else { "observe" }.into();
+                settings.proxy_port = 12731;
+                settings.proxy_claude_upstream = Some("https://old-claude.example".into());
+                settings.proxy_codex_upstream = Some("https://old-codex.example/v1".into());
+                write_configs(dir, "http://127.0.0.1:12731", "jolu-claude-code.fixture");
+                let runtime = running.then(|| config_runtime(mode));
+                heal_observed_orphans(&settings, runtime.as_ref());
+                let expected = if mode == crate::gateway::Mode::Relay { "http://127.0.0.1:12731" } else { "https://old-claude.example" };
+                assert_eq!(crate::proxy_config::read_current_base(ProxyPlatform::Claude).unwrap().as_deref(), Some(expected));
+                let expected = if mode == crate::gateway::Mode::Relay { "http://127.0.0.1:12731" } else { "https://old-codex.example/v1" };
+                assert_eq!(crate::proxy_config::read_current_base(ProxyPlatform::Codex).unwrap().as_deref(), Some(expected));
+            }
+        });
+    }
 
     fn memory_db() -> rusqlite::Connection {
         crate::db::open(std::path::Path::new(":memory:")).unwrap()
