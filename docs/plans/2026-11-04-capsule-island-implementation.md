@@ -389,4 +389,109 @@ data.carriedCountKey = carriedDeltaCountKey(carried.source, working) // 只有�
   12 项 `lib/carriedDelta.test.mjs`：锁存递推、新一轮覆盖、0 / 未知不抹值、结束后停住、跨天清空、
   跨午夜进行中不清、手动刷新回落今日、显示优先级、0 / null 不渲染、采集源出错、追数键）。
 
+### 5.8 2026-11-05 追加：ZCode 回归——眼睛不变绿、增量段整段消失
+
+真机回归（ZCode 连接，会话正在写入 Token）：胶囊左侧 bot 眼睛不变绿，尾部原本的绿色 `+xx.xK`
+整段消失，只剩 `Zcode —`。§5.7 把增量段改成 A + B 时同时收紧了两处条件，这一节记录实测值、根因、
+新的显示优先级，以及 `working` 的新信号源。
+
+**实测（CDP `Runtime.evaluate` + 后端返回值 + 本机库，2026-11-05 18:36:12）**
+
+| 观察点 | 实际值 |
+|---|---|
+| `live_usage({platform:"zcode", since:null})` 的 `running_tokens` | `null` |
+| 同上 `today_tokens` | `null` |
+| 同上 `active_sessions` | 1 条：`state: "done"`、`running_tokens: null`、`delta_tokens: 748852`、`last_seen_ms` = 18:36:12 |
+| 同上 `active_window_seconds` / `cursor` | `90` / `18922` |
+| `collection_status` | `ok: true`、`failed_sources: []`、`consecutive_failures: 0` → `sourceFailed === false` |
+| `gateway_status` | `mode: "observe"`、`enabled: false` → `useGatewayActivity().relay === false`，`activity.inFlight` 恒为空 |
+| `usage.db` 里 zcode 今日请求 | 89 条；88 条 `total_known = 1`，**1 条 `total_known = 0`**（00:47:59 的失败请求，`raw_usage_json` 为空、`provider_total_tokens` 为空）→ 今日合计 20,253,295 Token 但 `today_fresh_tokens` 的 `CASE WHEN MIN(total_known)=1 … END` 落到 NULL |
+| ZCode 来源库 `model_usage.status` 分布 | `completed 7904` / `error 110` / `cancelled 29`，**没有任何 running / pending 行** |
+| island 窗口 DOM | `.cap-shell[data-cap-expr="peek"]`、`.cbot[data-expr="peek"]`、**无 `.cap-live`**、`.cap-main` 文本 = `Zcode` + `—` |
+
+**根因（两条条件收紧 + ZCode 的结构性事实）**
+
+1. `working` 只剩 `live.sessions.some(s => s.state === "running")`（并对 `sourceFailed` 直接置 false）。
+   ZCode 不是生命周期来源（`db::live_usage` 里 `lifecycle` 只含 codex / claude），
+   `running_tokens` 恒为 `null`；它的 `model_usage` 只在请求**结束时**落行，
+   `zcode_session_state` 因此永远算不出 `running`，`sessions.activity_state` 只会是 done / failed。
+   → 眼睛从来没有变绿的信号。
+2. `liveVisible` 依赖 `carried`（`carriedDelta ?? deltaTokens ?? null`）非空非 0。`carried` 的两条腿对 ZCode 都不成立：
+   A（锁存）要 `working && running_tokens > 0`，`running_tokens` 恒 null；
+   B（今日累计）要 `today_tokens > 0`，当天只要有一条请求的 total 未知就整天返回 null（上表第 7 行）。
+   → 增量段整段被吞掉。
+3. `sourceFailed` 只是把这两个症状坐实：它把 `islandSessions` 的状态改成 `unknown`、把 `working` 压成 false，
+   而它本来不该否认「明明有请求在途 / 刚刚还在写」。
+
+**新的显示优先级（`lib/carriedDelta.ts` 的 `carriedDeltaSegment`）**
+
+| 情况 | 显示 | 来源 |
+|---|---|---|
+| 有本轮锁存（> 0） | 本轮写入终值 `+xx.xK` | A · `running_tokens` 锁存 |
+| 否则今日累计（> 0） | 今日已落库合计 | B · `today_tokens` |
+| 否则仍在写入（`writing`） | **照常渲染这一段，数值显示 `+—`**（未知，`data-carried-unknown="true"`） | 无数值 |
+| 三者都没有 | 整段不渲染（胶囊收窄） | `null` |
+
+浏览器预览的 `deltaText` 示例文案继续优先于 `+—` 分支，`data-carried-source` 文案机制（§5.7 的
+`session` / `today` 两套 `title`）原样保留，只为未知分支加了 `data-carried-unknown` 与
+`本轮正在写入，读数未知（该来源不返回本轮 Token，也没有今日累计可兜底）` 的 `title` / `aria-label`。
+
+**`working` 的新信号源（`lib/islandWriting.ts` 的 `islandWriting`，三个并列，任一为真）**
+
+1. `live.sessions` 有 `state === "running"`（codex / claude 的生命周期来源，原有信号）；
+2. **网关请求在途**：`gateway.relay && gateway.activity.inFlight.length > 0`
+   ——`useGatewayActivity` 的 `inFlight` 就是「请求在处理中」的真实事件；只有 relay 模式才有
+   `gateway-route-start` / `gateway-route` 事件，直连连接（上表 `mode: observe`）恒为 0，不会误报；
+3. **最近活跃窗口内仍有写入**：来源只给「最近活跃」时（`activityKind === "recent"`，含 zcode），
+   最新会话的 `last_seen_ms` 落在 `active_window_seconds`（90 秒）内就是运行证据
+   ——没有生命周期可读时，「刚刚写进去了 Token」是唯一可信的运行痕迹。
+   未来时间戳留 60 秒容差，超出不算。
+
+`sourceFailed` 不再参与 `working` 判定：它只让**展示**的会话状态变「未知」
+（`islandSessions` 仍然逐条改 state），不再把在途请求压成 false。
+
+**关键表达式**
+
+```ts
+// useIslandWindowModel.ts
+const gateway = useGatewayActivity(capsule)          // 前移：working 要读它的 inFlight
+const writing = islandWriting({
+  sessions: live.sessions,
+  recentWindow: live.activityKind === "recent",
+  activeWindowSeconds: live.activeWindowSeconds,
+  inFlight: gateway.relay ? gateway.activity.inFlight.length : 0,
+  now: quotaNow,
+})
+const working = writing.working                       // running 会话 ∥ 网关在途 ∥ 窗口内仍有写入
+
+// CapsuleIsland.tsx
+const segment = carriedDeltaSegment({
+  value: data.carriedDelta ?? data.deltaTokens ?? null,
+  source: data.carriedDelta != null ? data.carriedSource ?? null : null,
+  text: data.deltaText ?? null,
+  writing,                                            // data.working ?? 本地推断
+  unavailable: Boolean(data.unavailable),
+  relay: Boolean(relay),
+})
+```
+
+A + B 的既有语义不变：结束后停在锁存读数、不跳变；跨天 / 手动刷新清空锁存；前端不累加 Token。
+
+**验证**
+
+- `pnpm --dir frontend typecheck` → exit 0。
+- `node --test frontend/src/lib/*.test.mjs frontend/src/hooks/*.test.mjs` → **324 项全过**
+  （基线 306 + 新增 18 项：`lib/islandWriting.test.mjs` 10 项——running 信号、ZCode 的最近活跃信号、
+  窗口边界、生命周期来源不把 done 当 running、网关在途单独驱动、三者皆无、未来时间戳容差、
+  `active_window_seconds` 为 0 的兜底、`lastWriteAt`；`lib/carriedDelta.test.mjs` 新增 8 项——
+  锁存显示、今日累计显示、未知但仍在写入显示 `+—`、静止态不凭空出现 `+—`、`value === 0` 与未知同处理、
+  预览文案优先、连接不可用不渲染、网关占位不渲染）。
+- 用实测快照回放新逻辑（同一份 18:36:12 的 `live_usage`）：
+  静止态（+6 分钟）→ `writing=false`、段不渲染；写入中（最后落库后 12 秒）→ `writing=true`、
+  段渲染为 `+—`；采集源出错 + 网关在途 → `writing=true`、`+—`；生命周期来源 running → `working=true`。
+- island 窗口实测（18:36:12，改动前的运行中实例）：`.cap-shell[data-cap-expr="peek"]`、无 `.cap-live`、
+  `.cap-main` = `Zcode —`——静止态没有凭空出现 `+—`。改动后同一窗口的 DOM 复查需在应用重新启动后进行
+  （该实例在 18:41 前后已退出，本文档不代替那次复查）。
+
+
 

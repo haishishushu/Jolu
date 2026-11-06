@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { api, compactTokens, isTauri, listenLiveUsage, type LiveUsageDto } from "@/lib/api"
+import { api, compactTokens, isTauri, listenLiveUsage, type AttributionDto, type LiveUsageDto } from "@/lib/api"
 import { useRef } from "react"
 import { LiveTokenCounter } from "@/lib/liveTokenCounter"
 import { LiveCounts } from "@/lib/liveCounts"
@@ -33,6 +33,12 @@ export interface LiveUsage {
   activeWindowSeconds: number
   pulseSerial: number
   live: boolean
+  /**
+   * 本平台正在跑的那条已存连接（后端的 `attribution`）。
+   * 只有 `exact` / `mapped` 才带连接；`platform` 档表示归不出唯一一条，界面按平台名展示。
+   * 旧后端不返回该字段时为 null，语义同样是「只说得出平台」。
+   */
+  attribution: AttributionDto | null
 }
 
 export function useConnectionKind(platform: string) {
@@ -58,6 +64,7 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
   const [today, setToday] = useState<number | null>(null)
   const [windowSec, setWindowSec] = useState(90)
   const [live, setLive] = useState(false)
+  const [attribution, setAttribution] = useState<AttributionDto | null>(null)
   const [pulseSerial, setPulseSerial] = useState(0)
   const pausedRef = useRef(paused)
   const resumeRef = useRef<() => void>(() => {})
@@ -75,6 +82,7 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
     setRunningDelta(null)
     setToday(null)
     setLive(false)
+    setAttribution(null)
     setPulseSerial(0)
     if (!isTauri || !enabled) return
     let stopped = false
@@ -136,6 +144,8 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
       cursor = u.cursor
       setLive(true)
       setToday(u.today_tokens)
+      // 归因：本平台正在跑的那条已存连接。后端给的是唯一结论，缺失即「只说得出平台」。
+      setAttribution(u.attribution ?? null)
       // 常驻增量段（胶囊的 +xx.xK）追的是「今日累计写入」：它与 running_tokens 不同，
       // 会话结束后后端仍给同一个数（跨天由后端重置），所以这一段可以一直停在最后读数上。
       // 值真变化时才起 900ms 补间，同一数值的心跳推送不重复跑帧。
@@ -271,6 +281,7 @@ export function useLiveUsage(platform: string, enabled = true, dnd = false, paus
     activeWindowSeconds: windowSec,
     pulseSerial,
     live,
+    attribution,
   }
 }
 

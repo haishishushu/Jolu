@@ -2225,7 +2225,7 @@ mod tests {
 
     /// 每条约 2,004 token 的用户消息：最近 20k 窗口正好从倒数第 10 条开始
     fn long_msgs(n: usize) -> Vec<Message> {
-        (0..n).map(|i| Message { role: "user".into(), ts: None, text: format!("原文{i}号{}", "字".repeat(6000)), tools: vec![] }).collect()
+        (0..n).map(|i| Message { role: "user".into(), ts: None, text: format!("原文{i}号{}", "字".repeat(6000)), tools: vec![], ..Message::default() }).collect()
     }
 
     fn request(messages: Vec<Message>, stored: Vec<DigestRow>) -> GenerateRequest {
@@ -2459,12 +2459,13 @@ mod tests {
     #[test]
     fn unknown_paths_flags_invented() {
         let msgs = vec![
-            Message { role: "user".into(), ts: None, text: "请修改 src/a.ts".into(), tools: vec![] },
+            Message { role: "user".into(), ts: None, text: "请修改 src/a.ts".into(), tools: vec![], ..Message::default() },
             Message {
                 role: "assistant".into(),
                 ts: None,
                 text: String::new(),
                 tools: vec![ToolCall { name: "Read".into(), summary: r"D:\proj\backend\src\lib.rs".into(), ..ToolCall::default() }],
+                ..Message::default()
             },
         ];
         let narrative = "改了 `src/a.ts:12`、backend/src/lib.rs 和 `src/x.ts`，参考 https://example.com/a.ts 与 Cargo.toml；版本 v1.2，见 #3。";
@@ -2760,7 +2761,7 @@ mod tests {
 
     #[test]
     fn current_git_supplement_cannot_become_conversation_evidence() {
-        let msgs = vec![Message { role: "user".into(), text: "说明启动方式".into(), ts: None, tools: vec![] }];
+        let msgs = vec![Message { role: "user".into(), text: "说明启动方式".into(), ts: None, tools: vec![], ..Message::default() }];
         let mut facts = extract_facts(&msgs, None, None);
         facts.git = Some(crate::handoff_facts::GitSnapshot { branch: None, head: None, dirty: vec!["?? docs/today-only.md".into()], dirty_total: 1 });
         let rendered = render_facts(&facts);
@@ -2793,7 +2794,7 @@ mod tests {
         // 会话来源的命令在抽取时已遮蔽；Git 快照、文件清单、回查路径是程序生成的，不再整体遮蔽
         let mut cmd = ToolCall { name: "Bash".into(), summary: "OPENAI_API_KEY=abcdefgh12345678 pnpm test".into(), ..ToolCall::default() };
         cmd.failed = Some(false);
-        let msgs = vec![Message { role: "user".into(), ts: None, text: "跑测试".into(), tools: vec![] }, Message { role: "assistant".into(), ts: None, text: String::new(), tools: vec![cmd] }];
+        let msgs = vec![Message { role: "user".into(), ts: None, text: "跑测试".into(), tools: vec![], ..Message::default() }, Message { role: "assistant".into(), ts: None, text: String::new(), tools: vec![cmd], ..Message::default() }];
         let mut facts = extract_facts(&msgs, None, None);
         let branch = "feature/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
         let file = "src/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789Abc.ts";
@@ -2831,7 +2832,7 @@ mod tests {
     #[test]
     fn check_refs_accepts_older_user_messages() {
         // 用户消息 40 条，时间线只留最近 30 条；「下一步」引用最早的 #1 仍算引用了用户消息
-        let msgs: Vec<Message> = (0..40).map(|i| Message { role: "user".into(), ts: None, text: format!("要求 {i}"), tools: vec![] }).collect();
+        let msgs: Vec<Message> = (0..40).map(|i| Message { role: "user".into(), ts: None, text: format!("要求 {i}"), tools: vec![], ..Message::default() }).collect();
         let facts = extract_facts(&msgs, None, None);
         let body = check_output(&GOOD.replace("（#3）", "（#1）"), StopReason::EndTurn).unwrap();
         assert!(!facts.user_timeline.iter().any(|(i, _)| *i == 0));

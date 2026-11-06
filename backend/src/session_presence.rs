@@ -137,6 +137,7 @@ mod tests {
             session_id: "closed".into(), title: "closed session".into(),
             delta_tokens: 39_100, last_seen_ms: chrono::Local::now().timestamp_millis(),
             started_at_ms: None, running_tokens: None, state: "recent".into(),
+            attribution: crate::attribution::AttributionView::platform(),
         });
         filter_with(&mut usage, |_| Presence::Missing);
         assert!(usage.active_sessions.is_empty(), "recent writes must not keep a closed Claude session visible");

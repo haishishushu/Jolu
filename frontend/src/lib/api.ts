@@ -40,6 +40,22 @@ export interface SourceMetrics {
   tool: number | null
 }
 
+/**
+ * 归因置信度。三档不能合并：
+ * - `exact`：本应用请求路径（网关 / 本地代理）写入的连接，确定；
+ * - `mapped`：由 provider 端点地址或模型清单**唯一**推出，确定但不是请求自己报的；
+ * - `platform`：归不出唯一一条（多命中、无匹配、缺数据），只说得出平台。
+ */
+export type AttributionConfidence = "exact" | "mapped" | "platform"
+
+/** 请求归到的已存连接。`platform` 档不带连接——后端不给假 id，界面显示平台名。 */
+export interface AttributionDto {
+  connection_id: string | null
+  /** 连接名（展示用，不含凭据）；`platform` 档为 null */
+  name: string | null
+  confidence: AttributionConfidence
+}
+
 export interface ActiveSession {
   session_id: string
   title: string
@@ -48,6 +64,8 @@ export interface ActiveSession {
   started_at_ms?: number | null
   running_tokens?: number | null
   state: "running" | "done" | "failed" | "recent"
+  /** 这条会话最近一条请求归到的连接（旧后端不返回该字段） */
+  attribution?: AttributionDto
 }
 
 export interface LiveUsageDto {
@@ -63,6 +81,8 @@ export interface LiveUsageDto {
   initial: boolean
   /** 本平台统计自上次推送后有变化；仅续期运行中会话的心跳为 false，统计视图据此跳过重查 */
   data_changed?: boolean
+  /** 本平台正在跑的那条已存连接；`platform` 档或旧后端不返回时按平台名展示 */
+  attribution?: AttributionDto
 }
 
 /** 接入方式只有官方订阅（Auth）与 API Key 两种 */
@@ -616,6 +636,11 @@ export interface MessageDto {
   ts: number | null
   text: string
   tools: ToolCallDto[]
+  /** 库型来源（ZCode）记录的推理片段；源文件来源没有 */
+  reasoning?: string | null
+  /** 库型来源记录的模型与来源标识（modelId / providerId）；源文件来源没有 */
+  model?: string | null
+  provider?: string | null
 }
 
 export interface MessagePageDto {
@@ -627,6 +652,8 @@ export interface MessagePageDto {
   cost: number
   priced_requests: number
   requests: number
+  /** 正文不完整时的说明（单会话记录过多被截断 / 有坏记录被跳过）；完整时为 null */
+  note?: string | null
 }
 
 export interface ContinueCheckDto {
@@ -769,6 +796,8 @@ export interface StatsCallRowDto {
   first_token_ms: number | null
   status_code: number | null
   failed: boolean
+  /** 这条调用归到的已存连接（可选字段：旧后端不返回） */
+  attribution?: AttributionDto
 }
 
 export interface StatsCallPageDto {

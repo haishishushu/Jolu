@@ -9,14 +9,17 @@ import { AgentStack, GatewaySection, RelayRoute, wiredAgents } from "./CapsuleGa
 import { useBotShots } from "@/hooks/useBotShots"
 import type { GatewayActivity } from "@/hooks/useGatewayActivity"
 import { botExpression, BOT_NAMES } from "@/lib/botExpression"
-import type { CarriedDeltaSource } from "@/lib/carriedDelta"
-import { authQuotaRows } from "@/lib/authQuotaRows"
-import { compactTokens, listenEvent } from "@/lib/api"
+import { carriedDeltaSegment, type CarriedDeltaSource } from "@/lib/carriedDelta"
+import { quotaRowsFor } from "@/lib/authQuotaRows"
+import { capsuleQuotaChips, CHIP_NAME_MAX_WIDTH, compactQuotaNumber, type CapsuleChipWindow } from "@/lib/capsuleQuotaChips"
+import { quotaRings } from "@/lib/quotaRings"
+import { listenEvent } from "@/lib/api"
 import { useLiveCount } from "@/lib/liveCounts"
 import { islandIdFromSearch } from "@/lib/islandProfile"
 import { reducedMotion } from "@/lib/motion"
+import { windowChipLabel, windowRingColor, windowShortLabel } from "@/lib/providers/registry"
 import { cn } from "@/lib/utils"
-import type { QuotaWindow } from "@/types"
+import type { PlatformId, QuotaWindow } from "@/types"
 import "./capsule.css"
 
 /**
@@ -33,19 +36,22 @@ const CAP_H = 40
 const EXPANDED_W = 380
 /** 与 .cap-shell 的 .42s 弹簧同长；缩小时窗口要等形变结束才收 */
 const SHRINK_HOLD_MS = 460
-const LABEL: Record<string, string> = { "5h": "5 小时", "7d": "7 天" }
 
 type CapsuleView = "card" | "capsule" | "mini"
 
-const windowLabel = (q: QuotaWindow) => LABEL[q.key] ?? q.windowName
+/** 环图例的窗口名：描述符声明了短名就用短名，其余回落后端窗口名 */
+const windowLabel = (q: QuotaWindow) => windowShortLabel(q.key) ?? q.windowName
 const resetText = (q: QuotaWindow) => q.resetCountdown?.replace(/^还剩\s*/, "") ?? null
 
-/** 环色：达到 80% 转橙、用尽转红；其余 5h 青、7d 绿（与现有额度判定同一阈值） */
-function ringColor(q: QuotaWindow): string {
+/**
+ * 环色：达到 80% 转橙、用尽转红；其余按窗口身份取色（5h 青、其他绿，与现有额度判定同一阈值）。
+ * 窗口身份色在 `lib/providers/registry.ts`。
+ */
+function ringColor(q: QuotaWindow, platform: PlatformId): string {
   const p = q.usedPercent
   if (p !== null && p >= 100) return "var(--pn-capsule-red)"
   if (p !== null && p >= 80) return "var(--pn-capsule-orange)"
-  return q.key === "5h" ? "var(--pn-capsule-cyan)" : "var(--pn-capsule-green)"
+  return windowRingColor(q.key, platform)
 }
 
 /**
@@ -56,19 +62,24 @@ function ringColor(q: QuotaWindow): string {
  *
  * 同一个数字有两种来源（§5.7）：`session` 是本轮终值锁存（本轮写入），
  * `today` 是今日累计兜底（重启 / 当天第一笔还没落库）。文案必须分得开，不能都叫「今日累计写入」。
+ * 第三种情况（§5.8）：还在写入却两个来源都拿不到数时，段照常渲染、数值显示 `+—`。
  */
-function LiveTokens({ countKey, tokens, text, source }: {
+function LiveTokens({ countKey, tokens, text, source, unknown = false }: {
   countKey?: string
   tokens: number | null
   text: string | null
   source: CarriedDeltaSource | null
+  /** 未知但仍在写入：显示 `+—`（不写假的 0，也不整段吞掉） */
+  unknown?: boolean
 }) {
   const animated = useLiveCount(countKey)
   const value = animated ?? tokens
   const name = source === "session" ? "本轮写入" : "今日累计写入"
-  const compact = value == null ? null : `+${compactTokens(value)}`
+  const compact = value == null ? null : `+${compactQuotaNumber(value)}`
   const title = value == null
-    ? `${name}暂无数据`
+    ? unknown
+      ? "本轮正在写入，读数未知（该来源不返回本轮 Token，也没有今日累计可兜底）"
+      : `${name}暂无数据`
     : source === "session"
       // 锁存：会话结束后不再增长，读数就是本轮终值
       ? `${name} ${compact}（本轮累计 ${value.toLocaleString("zh-CN")} Token；会话结束后停在这个读数，不再增长）`
@@ -78,13 +89,15 @@ function LiveTokens({ countKey, tokens, text, source }: {
       className="cap-live cap-num cap-mono"
       data-token-value={value ?? undefined}
       data-carried-source={source ?? undefined}
+      data-carried-unknown={unknown ? "true" : undefined}
       aria-label={title}
       title={title}
     >
-      {compact ?? text ?? "—"}
+      {compact ?? text ?? (unknown ? "+—" : "—")}
     </span>
   )
 }
+
 
 export function CapsuleIsland({
   data, open, mini = false, onOpenChange, connectionSwitcher, connectionMenuOpen = false, dragging = false, refreshing = false, dockEdge = null, gateway = null, zoom = 1, onHoverChange,
@@ -111,19 +124,56 @@ export function CapsuleIsland({
   // 原型里只有订阅（Auth）才画额度环；API Key 不画环，显示今日 Token 与费用。
   // API 连接也可能返回套餐窗口，但胶囊样式按原型不把它们画成环（否则会出现只有轨道的「白环」）。
   const showQuotas = data.kind === "auth" && !data.unavailable && !data.remainingMetrics && !data.localMetrics
-  const quotaRows = useMemo(() => (data.platform === "grok" ? data.quotas ?? [] : authQuotaRows(data.quotas)).slice(0, 2), [data.platform, data.quotas])
-  // 外圈在前：7 天在外、5 小时在内
-  const ringWindows = useMemo(() => (showQuotas ? [...quotaRows].reverse() : []), [showQuotas, quotaRows])
-  const ringsFor = (aria: boolean): BotRing[] => ringWindows.map((q) => ({
-    p: q.usedPercent, color: ringColor(q), warn: q.usedPercent !== null && q.usedPercent >= 80,
-    aria: aria ? `${windowLabel(q)}额度${q.usedPercent === null ? "未知" : `已用 ${Math.round(q.usedPercent)}%`}${resetText(q) ? `，${resetText(q)} 后重置` : ""}。按 Enter 固定显示` : undefined,
-  }))
+  const quotaRows = useMemo(() => quotaRowsFor(data.platform, data.quotas).slice(0, 2), [data.platform, data.quotas])
+  /**
+   * 参与额度环的窗口：可环化判断在 `lib/quotaRings.ts`，几何按窗口声明
+   * （5h / 7d 弧段环，日额度 / 积分桶刻度环），与套餐口径 `planCoverage` 无关——
+   * ZCode 本机登录只返回日额度桶，不是套餐窗口，但照样进环。
+   * 顺序是外圈在前：订阅窗口优先、日额度在后；未知（没有已用百分比）的窗口不画环。
+   */
+  const ringWindows = useMemo(
+    () => (data.kind === "auth" && !data.unavailable ? quotaRings(data.platform, data.quotas) : []),
+    [data.kind, data.unavailable, data.platform, data.quotas],
+  )
+  const ringsFor = (aria: boolean): BotRing[] => ringWindows.map((ring) => {
+    const q = ring.window
+    const reset = resetText(q)
+    return {
+      p: q.usedPercent,
+      // 几何跟着窗口走：5h / 7d 弧段环，日额度 / 积分桶刻度环
+      geometry: ring.geometry,
+      color: ringColor(q, data.platform),
+      warn: q.usedPercent !== null && q.usedPercent >= 80,
+      aria: aria ? `${windowLabel(q)}额度${q.usedPercent === null ? "未知" : `已用 ${Math.round(q.usedPercent)}%`}${reset ? `，${reset} 后重置` : ""}。按 Enter 固定显示` : undefined,
+    }
+  })
   const quotaUsed = useMemo(() => (showQuotas ? Object.fromEntries(quotaRows.map((q) => [q.key, q.usedPercent])) : {}), [showQuotas, quotaRows])
 
+  // 收缩态芯片的数据源：结构化额度窗口（带后端窗口名），不是 remainingDisplay 的整句行。
+  // 命名窗口（描述符里声明了芯片名的 5h / 7d）沿用占位补全（缺哪个窗口就给哪个的未知 `-`）；
+  // 其余（ZCode 的 bucket 列表，key 是 bucket_id）直接用后端原始列表——它可能多于两个，
+  // 由 capsuleQuotaChips 折成「最紧的一个 + `+N`」。
+  const chipWindows = useMemo<CapsuleChipWindow[]>(() => {
+    const windows = data.quotas ?? []
+    if (windows.length === 0) return []
+    const named = windows.some((w) => windowChipLabel(w.key) !== null)
+    const source = named ? quotaRows : windows
+    return source.map((w) => ({
+      key: w.key,
+      // 5h/7d 一直用短标识；其余用后端窗口名（GLM-5.3 / GLM-5.3-Flash），超长由短形式收口
+      name: windowChipLabel(w.key) ?? w.windowName,
+      usedPercent: w.usedPercent,
+      amountText: w.usedText,
+      remainingText: w.remainingText ?? null,
+      reset: resetText(w),
+    }))
+  }, [data.quotas, quotaRows])
+  const { chips: quotaChipList, more: quotaChipMore } = useMemo(() => capsuleQuotaChips(chipWindows), [chipWindows])
+
   const running = data.sessions?.filter((s) => s.state === "running").length ?? 0
-  // 只有来源提供可信运行状态（running）时才算「工作中」，不把最近活跃当成正在写入
+  // 数据层（useIslandWindowModel）已按 §5.8 的三信号（running 会话 / 网关请求在途 / 最近活跃窗口内仍有写入）
+  // 算好 working；浏览器预览没有该字段，只能按示例数据里的 running 会话推断。
   const working = !data.sessionStatusUnknown && running > 0
-  // 数据层（useIslandWindowModel）已经按同一份 running 判定算好 working；浏览器预览没有该字段时按会话推断
   const writing = data.working ?? working
   const showDelta = data.deltaPhase !== undefined && data.deltaPhase !== "idle"
   const { shot, inactiveMs } = useBotShots({
@@ -136,15 +186,19 @@ export function CapsuleIsland({
   const relay = relayOn ? gateway!.activity.shown : null
   const agents = useMemo(() => (relayOn ? wiredAgents(gateway!.status, gateway!.activity) : []), [relayOn, gateway])
   const drifted = agents.filter((w) => w.drift).length
-  // 收缩胶囊的增量段常驻：只要「锁存值 ?? 今日累计」有值就渲染，与是否正在写入无关。
-  // 进行中由追数键逐帧追上；会话结束后停在锁存的本轮终值上（后端给的是本轮累计，不是归零的
+  // 收缩胶囊尾部增量段的显示优先级（§5.8：锁存 → 今日累计 → 写入中未知 `+—` → 不渲染）。
+  // 进行中由追数键逐帧追上；结束后停在锁存的本轮终值上（后端给的是本轮累计，不是归零的
   // running_tokens），重启后没有锁存才回落到今日累计。今日累计归 0 / 手动刷新清掉锁存后这一段自然消失。
-  // 没有数值时退回文本（浏览器预览的示例数据）。
-  // 未连接、被转发路线占位时不渲染——那两种分支本来就没有增量可写。
-  const carried = data.carriedDelta ?? data.deltaTokens ?? null
-  // 数值来源只对真实数据有意义：预览分支没有 carriedDelta，退回示例文案时按今日累计命名
-  const carriedSource = data.carriedDelta != null ? data.carriedSource ?? null : null
-  const liveVisible = !data.unavailable && !relay && (carried != null ? carried !== 0 : Boolean(data.deltaText))
+  // 两个数值都没有但确实还在写入时不再整段吞掉，改显示 `+—`（未知）；三个都没有才不渲染。
+  const segment = carriedDeltaSegment({
+    value: data.carriedDelta ?? data.deltaTokens ?? null,
+    // 数值来源只对真实数据有意义：预览分支没有 carriedDelta，退回示例文案时按今日累计命名
+    source: data.carriedDelta != null ? data.carriedSource ?? null : null,
+    text: data.deltaText ?? null,
+    writing,
+    unavailable: Boolean(data.unavailable),
+    relay: Boolean(relay),
+  })
   // 绿点、「n 分钟前」需要随时间刷新；只在有转发数据时每 30 秒刷新一次
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -170,7 +224,7 @@ export function CapsuleIsland({
   const ticker = writing && showDelta && data.deltaCountKey ? { countKey: data.deltaCountKey, label: "本段 Token", sub: `${running} 个会话写入中` } : null
 
   const focused = pinRing ?? focusRing
-  const focusWindow = focused !== null ? ringWindows[focused] : undefined
+  const focusWindow = focused !== null ? ringWindows[focused]?.window : undefined
   const display: [string, string, string?] | null = focusWindow && focusWindow.usedPercent !== null
     ? [`${Math.round(focusWindow.usedPercent)}%`, windowLabel(focusWindow), resetText(focusWindow) ? `${resetText(focusWindow)} 后重置` : undefined]
     : null
@@ -339,26 +393,41 @@ export function CapsuleIsland({
   const driftVisible = view !== "card" && view !== "mini" && drifted > 0
 
   // ---------- 内容 ----------
+  // 收缩态那一行的归属（连接归因）：后端能确定「哪条已存连接在跑」时写连接名，
+  // 归不出唯一一条（platform 档 / 缺数据）就还是平台名。`mapped` 是推出来的结论，
+  // 用现有弱化样式 `.cap-plat.cap-dim` 与 `exact` 区分——不新增颜色变量、不改尺寸与动效。
+  const attributed = data.activeConnection ?? null
   const plat = (
-    <span className="cap-plat">
+    <span
+      className={cn("cap-plat", attributed?.confidence === "mapped" && "cap-dim")}
+      data-cap-attribution={attributed?.confidence ?? "platform"}
+      title={attributed ? `${data.platformName} · ${attributed.name}` : undefined}
+    >
       <PlatformLogo platform={data.platform} size={13} />
-      {data.platformName}
+      {attributed ? attributed.name : data.platformName}
     </span>
   )
   // 收缩层内容严格按原型 app.js 的 collapsedHTML() / quotaHTML() 拼：
-  // 平台 + 额度窗口芯片（5h 10% / 7d 59%，≥80% 转橙、满格换红字「x 后重置」）+ 绿色增量。
-  // 拿不到额度时只给破折号芯片，绝不写「剩余额度 —」这种卡片句式 —— 那会把胶囊读成压扁的卡片。
-  const fullQuota = quotaRows.find((q) => q.usedPercent !== null && q.usedPercent >= 100)
-  const quotaChips = fullQuota
-    ? <span className="cap-r cap-num cap-mono text-xs">{resetText(fullQuota) ?? "额度已用尽"} 后重置</span>
-    : quotaRows.map((q) => (
-      <span key={q.key} className="cap-q">
-        <i>{q.key}</i>
-        <b className={cn("cap-num", q.usedPercent !== null && q.usedPercent >= 80 && "cap-o")} title={q.usedText ?? undefined}>
-          {q.usedPercent === null ? "—" : `${Math.round(q.usedPercent)}%`}
-        </b>
-      </span>
-    ))
+  // 平台 + 额度窗口芯片（一个窗口一个芯片：弱化色窗口名 + 数值）+ 绿色增量。
+  // 芯片只表达「这个窗口用了多少」：有百分比就 `GLM-5.3 0%`，没有就压缩的 `已用/总量`
+  // （`GLM-5.3 0/3.0M`），再没有才 `-`（未知）。不放「剩余额度」「剩余 N token」这类整句——
+  // 那会把胶囊读成压扁的卡片，实测能撑到 568px。≥80% 橙、100% 红复用 .cap-o / .cap-r。
+  // 宽度：单芯片 96px、名字 56px 处省略号；超过 2 个窗口只显最紧的一个 + `+N`。
+  const quotaChips = quotaChipList.length > 0
+    ? (
+      <>
+        {quotaChipList.map((chip) => (
+          <span key={chip.key} className="cap-q" title={chip.title}>
+            <i style={{ maxWidth: CHIP_NAME_MAX_WIDTH, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chip.name}</i>
+            <b className={cn("cap-num", chip.tone === "warn" && "cap-o", chip.tone === "danger" && "cap-r")}>{chip.value}</b>
+          </span>
+        ))}
+        {quotaChipMore > 0 && (
+          <span className="cap-t3" title={`另有 ${quotaChipMore} 个额度窗口，展开卡片查看`}>+{quotaChipMore}</span>
+        )}
+      </>
+    )
+    : null
   // 没有任何额度窗口时的最窄形态：一个破折号，13px text-3（原型 inside-note 的写法）
   const dashOnly = <span className="cap-num cap-t3 text-[13px]">—</span>
 
@@ -372,16 +441,12 @@ export function CapsuleIsland({
   ) : data.queryFailed && showQuotas ? (
     <>{plat}<span className="cap-r text-xs font-semibold">查询失败 · 双击查看</span></>
   ) : data.remainingMetrics ? (
-    <>
-      {plat}
-      {data.remainingMetrics.rows.length > 0
-        ? data.remainingMetrics.rows.slice(0, 2).map((row, i) => <span key={`${row.label}:${i}`} className="cap-q"><i>{row.label}</i><b className="cap-num">{row.value}</b></span>)
-        : data.quotas?.length ? quotaChips : dashOnly}
-    </>
+    // 有结构化额度窗口就只画芯片（窗口名 + 数值）；行式整句只留给展开卡片。
+    <>{plat}{quotaChipList.length > 0 ? quotaChips : dashOnly}</>
   ) : data.localMetrics ? (
     <>{plat}<span className="cap-q"><i>本机今日</i><b className="cap-num">{data.localMetrics.token ?? "—"}</b></span></>
   ) : showQuotas ? (
-    <>{plat}{quotaRows.length > 0 ? quotaChips : dashOnly}</>
+    <>{plat}{quotaChipList.length > 0 ? quotaChips : dashOnly}</>
   ) : (
     <>
       {plat}
@@ -401,8 +466,10 @@ export function CapsuleIsland({
   const legend = data.unavailable ? (
     <p className="cap-note">{data.unavailable.hint}</p>
   ) : showQuotas ? (
-    [...quotaRows].map((q) => {
-      const index = ringWindows.findIndex((w) => w.key === q.key)
+    // 图例逐环列出：环是什么、外圈还是内圈、水位与重置时间。未知（无环）的窗口不出现在这里——
+    // 它本来就没有环可指，数值在收缩态芯片与 `quotaMessage` 里照常说明。
+    ringWindows.map((ring, index) => {
+      const q = ring.window
       const on = focused === index
       const reset = resetText(q)
       return (
@@ -419,7 +486,7 @@ export function CapsuleIsland({
           onClick={() => togglePin(index)}
           onDoubleClick={(event) => event.stopPropagation()}
         >
-          <span className="cap-sw" style={{ background: ringColor(q) }} />
+          <span className="cap-sw" style={{ background: ringColor(q, data.platform) }} />
           <span className="cap-t">
             <span className="cap-w">{windowLabel(q)} · {index === 0 ? "外圈" : "内圈"}</span>
             <span className="cap-p cap-num">{q.usedPercent === null ? "—" : Math.round(q.usedPercent)}<small>{q.usedPercent === null ? "" : "%"}</small></span>
@@ -503,7 +570,7 @@ export function CapsuleIsland({
               role="button"
               tabIndex={open ? -1 : 0}
               aria-expanded={false}
-              aria-label={`${data.platformName}，${BOT_NAMES[expr]}。${view === "mini" ? "悬停展开，双击打开卡片" : "按 Enter 展开"}`}
+              aria-label={`${data.platformName}${attributed ? `（${attributed.name}）` : ""}，${BOT_NAMES[expr]}。${view === "mini" ? "悬停展开，双击打开卡片" : "按 Enter 展开"}`}
               inert={open}
               onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenChange(true) } }}
             >
@@ -520,15 +587,16 @@ export function CapsuleIsland({
               <span ref={mainRef} className="cap-main">
                 {collapsedMain}
                 {/* 常驻增量段：绿色脉冲点 + `+12.8K`。段宽一并计入 mainW，胶囊宽度照旧按内容测量 */}
-                {liveVisible && (
+                {segment.visible && (
                   <>
                     <span className="cap-hair" />
                     <LiveTokens
                       // 只在进行中订阅追数键：结束后不再跑逐帧动画，停在最后读数
                       countKey={writing ? data.carriedCountKey : undefined}
-                      tokens={carried}
+                      tokens={segment.value}
                       text={data.deltaText ?? null}
-                      source={carriedSource}
+                      source={segment.source}
+                      unknown={segment.unknown}
                     />
                   </>
                 )}
@@ -570,7 +638,7 @@ export function CapsuleIsland({
                     <em>
                       {/* 进行中追本轮实时值（本段 Token）；结束后停到常驻的今日累计，不再跑逐帧动画 */}
                       <AnimatedTokens
-                        tokens={writing ? (data.liveDelta ?? data.deltaTokens) : carried}
+                        tokens={writing ? (data.liveDelta ?? data.deltaTokens) : segment.value}
                         text={data.deltaText}
                         countKey={writing ? data.deltaCountKey : undefined}
                         className="!text-[11px] !text-[var(--pn-capsule-green)]"

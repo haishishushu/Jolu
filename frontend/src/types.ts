@@ -70,6 +70,8 @@ export interface QuotaWindow {
   usedPercent: number | null
   /** 已用 / 总量的文字描述，缺失时为 null */
   usedText: string | null
+  /** 来源直接返回的精确剩余量（如「剩余 3000000 token」）；缺失时为 null，不推断 */
+  remainingText?: string | null
   /** 重置倒计时，未提供时为 null（显示「—」，不推测） */
   resetCountdown: string | null
   /** 标签配色：5h 淡紫、7d 淡绿，表示窗口身份，不随水位变化 */

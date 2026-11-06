@@ -40,6 +40,63 @@ fn cache_key(settings: &crate::settings::Settings) -> Option<String> {
     })
 }
 
+/// 托盘读额度缓存前要校验的身份来源。只决定「用哪套身份函数」，取值时才去读本机登录。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IdentitySource<'a> {
+    /// `zcode_quota::account_identity`：家族 + 令牌种类 + 令牌的 SHA-256 摘要
+    ZcodeAccount,
+    Trae(&'a str),
+    Workbuddy(&'a str),
+    Qoder(&'a str),
+    /// 写入方仍走裸 `cached_query`，`identities` 里没有记录：没有可比对的基准
+    Unchecked,
+}
+
+/// 缓存键 → 身份函数。只有写入路径确实绑定了身份的键才校验：
+/// - `local-zcode`：写入方 `local_zcode_quota` 用 `zcode_quota::account_identity`；
+/// - `monitor:native:*` 原生账号连接：写入方 `connection_quota` 用各自的
+///   `source_identity(monitor_id(id))`，来源 id 直接取自缓存键，重算方式与它一致；
+/// - `local-codex` / `local-grok` 及其余连接 id：写入走裸 `cached_query`，`identities` 无记录，
+///   退化为不校验（本次只补读取路径的身份校验，不扩展写入路径的身份绑定）。
+fn identity_source(key: &str) -> IdentitySource<'_> {
+    if key == "local-zcode" || key == "monitor:native:zcode:account" {
+        return IdentitySource::ZcodeAccount;
+    }
+    let Some(source) = crate::native_sources::monitor_id(key) else { return IdentitySource::Unchecked };
+    match source {
+        "native:trae:cn" | "native:trae:ide" => IdentitySource::Trae(source),
+        "native:workbuddy:main" | "native:workbuddy:ai" => IdentitySource::Workbuddy(source),
+        "native:qoder:cn" => IdentitySource::Qoder(source),
+        _ => IdentitySource::Unchecked,
+    }
+}
+
+/// 取当前身份：只读本机登录文件，不发网络请求。`None` = 这个键写入时没有绑定身份。
+/// `Err` = 未登录 / 已注销 / 身份不可得，与「身份不一致」同样按无缓存处理。
+fn quota_identity(key: &str) -> Option<Result<String, crate::quota::QuotaState>> {
+    Some(match identity_source(key) {
+        IdentitySource::Unchecked => return None,
+        IdentitySource::ZcodeAccount => crate::zcode_quota::account_identity(),
+        IdentitySource::Trae(source) => crate::trae_quota::source_identity(source),
+        IdentitySource::Workbuddy(source) => crate::workbuddy_quota::source_identity(source),
+        IdentitySource::Qoder(source) => crate::qoder_desktop::source_identity(source),
+    })
+}
+
+/// 托盘唯一的缓存读取入口：先按身份校验，再返回条目（值、过期时刻、退避种类、取得时刻）。
+/// 身份不一致 / 身份不可得 → 按无缓存返回；这条路径纯展示、只读，不删条目、不写缓存、
+/// 不发网络请求，也不改刷新节奏。
+fn cached_entry<T: Clone>(
+    cache: &crate::QueryCache<T>,
+    key: &str,
+    identity: Option<Result<String, crate::quota::QuotaState>>,
+) -> Option<(T, std::time::Instant, crate::CacheBackoff, std::time::Instant)> {
+    match identity {
+        Some(identity) => crate::current_for_identity(cache, key, move || identity),
+        None => crate::cached_value(cache, key),
+    }
+}
+
 fn remaining_percent(used: Option<f64>) -> Option<String> {
     let used = used.filter(|value| value.is_finite())?;
     let remaining = ((100.0 - used.clamp(0.0, 100.0)) * 10.0).round() / 10.0;
@@ -58,10 +115,11 @@ fn native_remaining_reason(platform: &str) -> &'static str {
 }
 
 /// 托盘图标当前所属连接的额度状态（取自额度缓存）；没有数据时为「尚无额度数据」。
+/// 读缓存前先按当前登录身份校验：换账号 / 换令牌后到下一次额度命令之前，
+/// 图标也不能继续用上一个账号的额度判断颜色。
 pub fn current_state(app: &tauri::AppHandle) -> crate::quota::QuotaState {
     let cfg = app.state::<crate::Cfg>().0.get();
-    cache_key(&cfg).and_then(|key| crate::QUOTA_CACHE.state.lock().ok()
-        .and_then(|cache| cache.entries.get(&key).map(|entry| entry.0.clone())))
+    cache_key(&cfg).and_then(|key| cached_entry(&crate::QUOTA_CACHE, &key, quota_identity(&key)).map(|entry| entry.0))
         .unwrap_or(crate::quota::QuotaState::Unsupported { reason: "尚无额度数据".into() })
 }
 
@@ -96,12 +154,14 @@ fn fill_api_key_usage(
     quota_expires: std::time::Instant,
 ) {
     let mut latest = quota_expires;
-    let org_usage = crate::API_USAGE_CACHE.state.lock().ok()
-        .and_then(|cache| {
-            cache.entries.get(key).and_then(|(value, expires, _, _)| match value {
-                crate::quota::ApiUsageState::Ok { total_tokens, .. } => Some((thousands(*total_tokens), *expires)),
-                _ => None,
-            })
+    // 这两类缓存的写入方仍是裸 `cached_query`（`API_USAGE_CACHE` / `BALANCE_CACHE` 没有
+    // 身份绑定），传同一个身份函数不改变现有展示；将来这些键开始绑定身份时，这条只读
+    // 路径自动开始校验，不需要再改这里。
+    let identity = quota_identity(key);
+    let org_usage = cached_entry(&crate::API_USAGE_CACHE, key, identity.clone())
+        .and_then(|(value, expires, _, _)| match value {
+            crate::quota::ApiUsageState::Ok { total_tokens, .. } => Some((thousands(total_tokens), expires)),
+            _ => None,
         });
     let today_text = match org_usage {
         Some((text, expires)) => { if expires > latest { latest = expires; } format!("{text} Token") }
@@ -111,12 +171,10 @@ fn fill_api_key_usage(
     };
     summary.quotas.push(Quota { key: "今日Token".into(), value: today_text });
 
-    let balance = crate::BALANCE_CACHE.state.lock().ok()
-        .and_then(|cache| {
-            cache.entries.get(key).and_then(|(value, expires, _, _)| match value {
-                crate::quota::BalanceState::Ok { balance, currency, .. } => Some((format!("{balance:.2} {currency}"), *expires)),
-                _ => None,
-            })
+    let balance = cached_entry(&crate::BALANCE_CACHE, key, identity)
+        .and_then(|(value, expires, _, _)| match value {
+            crate::quota::BalanceState::Ok { balance, currency, .. } => Some((format!("{balance:.2} {currency}"), expires)),
+            _ => None,
         });
     summary.quotas.push(Quota {
         key: "剩余金额".into(),
@@ -157,67 +215,67 @@ fn summary(app: &tauri::AppHandle) -> Summary {
         return summary;
     }
     if let Some(key) = cache_key(&cfg) {
-        if let Ok(cache) = crate::QUOTA_CACHE.state.lock() {
-            if let Some((state, expires, _, _)) = cache.entries.get(&key) {
-                match state {
-                    crate::quota::QuotaState::Ok { windows, .. } => {
-                        if cfg.island_platform == "grok" {
-                            summary.quotas = windows.iter().map(|window| Quota {
-                                key: "SuperGrok 剩余".into(),
-                                value: remaining_percent(window.used_percent).unwrap_or("—".into()),
-                            }).collect();
-                            let captured = *expires - std::time::Duration::from_secs(300);
-                            summary.updated_at = Some(chrono::Utc::now().timestamp_millis() - captured.elapsed().as_millis() as i64);
-                            summary.message = if summary.quotas.is_empty() { "来源未提供额度" } else { "" }.into();
-                            return summary;
-                        }
-                        if cfg.island_platform == "zcode" && cfg.island_kind == "auth" {
-                            summary.quotas = windows.iter().map(|window| Quota {
-                                key: if window.key == "5h" { "5 小时剩余" } else { "周剩余" }.into(),
-                                value: window.remaining_text.clone()
-                                    .or_else(|| remaining_percent(window.used_percent))
-                                    .unwrap_or("—".into()),
-                            }).collect();
-                            let captured = *expires - std::time::Duration::from_secs(300);
-                            summary.updated_at = Some(chrono::Utc::now().timestamp_millis() - captured.elapsed().as_millis() as i64);
-                            summary.message = if summary.quotas.is_empty() { "来源未提供额度" } else { "" }.into();
-                            return summary;
-                        }
-                        // API Key 且确认无 5h/7d 套餐窗口：改显「今日Token + 剩余金额」
-                        //（2026-09-19 鼠鼠定版）。查询失败/凭证失效不算无套餐，仍按原样说明原因。
-                        if cfg.island_kind == "api" && !has_plan_windows(windows) {
-                            fill_api_key_usage(app, &mut summary, &key, &cfg.island_platform, *expires);
-                        } else {
-                            // 口径统一为「剩余」（与 grok/zcode 分支及前端灵动岛一致）
-                            summary.quotas = windows.iter().map(|window| Quota {
-                                key: format!("{} 剩余", window.key),
-                                value: remaining_percent(window.used_percent)
-                                    .or_else(|| window.amount_text.clone()).unwrap_or("—".into()),
-                            }).collect();
-                            // 成功缓存 TTL 固定 5 分钟；由写入时刻计算，命中缓存不伪装为刚更新。
-                            let captured = *expires - std::time::Duration::from_secs(300);
-                            summary.updated_at = Some(chrono::Utc::now().timestamp_millis() - captured.elapsed().as_millis() as i64);
-                            summary.message = if windows.is_empty() { "来源未提供额度窗口" } else { "" }.into();
-                        }
+        // 读数前先按当前登录身份校验：身份不一致或已注销就当没有缓存，不删条目、不写缓存、
+        // 不发请求，等下一次额度命令自己清理并重查（纯展示路径）。
+        if let Some((state, expires, _, _)) = cached_entry(&crate::QUOTA_CACHE, &key, quota_identity(&key)) {
+            match state {
+                crate::quota::QuotaState::Ok { windows, .. } => {
+                    if cfg.island_platform == "grok" {
+                        summary.quotas = windows.iter().map(|window| Quota {
+                            key: "SuperGrok 剩余".into(),
+                            value: remaining_percent(window.used_percent).unwrap_or("—".into()),
+                        }).collect();
+                        let captured = expires - std::time::Duration::from_secs(300);
+                        summary.updated_at = Some(chrono::Utc::now().timestamp_millis() - captured.elapsed().as_millis() as i64);
+                        summary.message = if summary.quotas.is_empty() { "来源未提供额度" } else { "" }.into();
+                        return summary;
                     }
-                    crate::quota::QuotaState::Unsupported { reason }
-                    | crate::quota::QuotaState::Unauthorized { reason }
-                    | crate::quota::QuotaState::Forbidden { reason }
-                    | crate::quota::QuotaState::RateLimited { reason }
-                    | crate::quota::QuotaState::Failed { reason }
-                        if cfg.island_platform == "zcode" && cfg.island_kind == "auth" => {
-                        summary.message = reason.clone();
+                    if cfg.island_platform == "zcode" && cfg.island_kind == "auth" {
+                        summary.quotas = windows.iter().map(|window| Quota {
+                            key: if window.key == "5h" { "5 小时剩余" } else { "周剩余" }.into(),
+                            value: window.remaining_text.clone()
+                                .or_else(|| remaining_percent(window.used_percent))
+                                .unwrap_or("—".into()),
+                        }).collect();
+                        let captured = expires - std::time::Duration::from_secs(300);
+                        summary.updated_at = Some(chrono::Utc::now().timestamp_millis() - captured.elapsed().as_millis() as i64);
+                        summary.message = if summary.quotas.is_empty() { "来源未提供额度" } else { "" }.into();
+                        return summary;
                     }
-                    crate::quota::QuotaState::Unsupported { .. } if cfg.island_kind == "api" => {
-                        // 明确不提供订阅额度 = API Key 无套餐的确定性结论
-                        fill_api_key_usage(app, &mut summary, &key, &cfg.island_platform, *expires);
+                    // API Key 且确认无 5h/7d 套餐窗口：改显「今日Token + 剩余金额」
+                    //（2026-09-19 鼠鼠定版）。查询失败/凭证失效不算无套餐，仍按原样说明原因。
+                    if cfg.island_kind == "api" && !has_plan_windows(&windows) {
+                        fill_api_key_usage(app, &mut summary, &key, &cfg.island_platform, expires);
+                    } else {
+                        // 口径统一为「剩余」（与 grok/zcode 分支及前端灵动岛一致）
+                        summary.quotas = windows.iter().map(|window| Quota {
+                            key: format!("{} 剩余", window.key),
+                            value: remaining_percent(window.used_percent)
+                                .or_else(|| window.amount_text.clone()).unwrap_or("—".into()),
+                        }).collect();
+                        // 成功缓存 TTL 固定 5 分钟；由写入时刻计算，命中缓存不伪装为刚更新。
+                        let captured = expires - std::time::Duration::from_secs(300);
+                        summary.updated_at = Some(chrono::Utc::now().timestamp_millis() - captured.elapsed().as_millis() as i64);
+                        summary.message = if windows.is_empty() { "来源未提供额度窗口" } else { "" }.into();
                     }
-                    crate::quota::QuotaState::Unsupported { .. } => summary.message = "此连接不提供订阅额度".into(),
-                    crate::quota::QuotaState::Unauthorized { .. } => summary.message = "凭证已失效，请重新授权".into(),
-                    crate::quota::QuotaState::Forbidden { .. } => summary.message = "无额度查询权限".into(),
-                    crate::quota::QuotaState::RateLimited { .. } => summary.message = "查询限流，稍后重试".into(),
-                    crate::quota::QuotaState::Failed { .. } => summary.message = "额度更新失败".into(),
                 }
+                crate::quota::QuotaState::Unsupported { reason }
+                | crate::quota::QuotaState::Unauthorized { reason }
+                | crate::quota::QuotaState::Forbidden { reason }
+                | crate::quota::QuotaState::RateLimited { reason }
+                | crate::quota::QuotaState::Failed { reason }
+                    if cfg.island_platform == "zcode" && cfg.island_kind == "auth" => {
+                    summary.message = reason;
+                }
+                crate::quota::QuotaState::Unsupported { .. } if cfg.island_kind == "api" => {
+                    // 明确不提供订阅额度 = API Key 无套餐的确定性结论
+                    fill_api_key_usage(app, &mut summary, &key, &cfg.island_platform, expires);
+                }
+                crate::quota::QuotaState::Unsupported { .. } => summary.message = "此连接不提供订阅额度".into(),
+                crate::quota::QuotaState::Unauthorized { .. } => summary.message = "凭证已失效，请重新授权".into(),
+                crate::quota::QuotaState::Forbidden { .. } => summary.message = "无额度查询权限".into(),
+                crate::quota::QuotaState::RateLimited { .. } => summary.message = "查询限流，稍后重试".into(),
+                crate::quota::QuotaState::Failed { .. } => summary.message = "额度更新失败".into(),
             }
         }
     }
@@ -422,5 +480,53 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
         assert_eq!(thousands(12_345_678), "12,345,678");
+    }
+
+    /// 托盘读取入口：缓存里是 A 身份的额度时，当前身份换成 B 必须当作无数据（不是 A 的数字）；
+    /// 身份相同才正常返回。这条路径只读，不删条目、不写缓存。
+    #[test]
+    fn tray_reads_cache_only_for_the_current_identity() {
+        use std::time::{Duration, Instant};
+        let cache = crate::QueryCache::<crate::quota::QuotaState>::default();
+        let value = crate::quota::QuotaState::Ok {
+            windows: vec![crate::quota::QuotaWindow {
+                key: "5h".into(), window_name: "5 小时".into(), used_percent: Some(42.0),
+                amount_text: None, remaining_text: None, resets_at: None,
+            }],
+            plan: Some("BigModel".into()), account: None,
+        };
+        {
+            let mut state = cache.state.lock().unwrap();
+            let now = Instant::now();
+            state.entries.insert("local-zcode".into(), (value, now + Duration::from_secs(300), crate::CacheBackoff::None, now));
+            state.identities.insert("local-zcode".into(), "identity-a".into());
+        }
+        // 身份相同：正常返回，托盘照旧显示
+        let same = cached_entry(&cache, "local-zcode", Some(Ok("identity-a".into())));
+        assert!(matches!(same, Some((crate::quota::QuotaState::Ok { .. }, ..))));
+        // 换成 B（额度命令还没跑）：按无缓存返回，不能给出 A 的数字
+        assert!(cached_entry(&cache, "local-zcode", Some(Ok("identity-b".into()))).is_none());
+        // 注销 / 身份不可得：同样按无缓存返回
+        assert!(cached_entry(&cache, "local-zcode",
+            Some(Err(crate::quota::QuotaState::Unauthorized { reason: "已退出登录".into() }))).is_none());
+        // 只读：条目与身份绑定都没被这条展示路径删掉
+        let state = cache.state.lock().unwrap();
+        assert!(state.entries.contains_key("local-zcode"), "托盘读取不得删条目");
+        assert_eq!(state.identities.get("local-zcode").map(String::as_str), Some("identity-a"));
+    }
+
+    /// 托盘读到的键各自用哪套身份：只有写入路径绑定过身份的键才校验，其余退化为不校验。
+    #[test]
+    fn only_identity_bound_cache_keys_are_checked() {
+        assert_eq!(identity_source("local-zcode"), IdentitySource::ZcodeAccount);
+        assert_eq!(identity_source("monitor:native:zcode:account"), IdentitySource::ZcodeAccount);
+        assert_eq!(identity_source("monitor:native:trae:cn"), IdentitySource::Trae("native:trae:cn"));
+        assert_eq!(identity_source("monitor:native:workbuddy:ai"), IdentitySource::Workbuddy("native:workbuddy:ai"));
+        assert_eq!(identity_source("monitor:native:qoder:cn"), IdentitySource::Qoder("native:qoder:cn"));
+        // 写入走裸 `cached_query`，`identities` 里没有记录，没有可比对的基准
+        for key in ["local-codex", "local-grok", "some-connection-id", "monitor:native:opencode:openai"] {
+            assert_eq!(identity_source(key), IdentitySource::Unchecked, "{key}");
+            assert!(quota_identity(key).is_none(), "{key}");
+        }
     }
 }

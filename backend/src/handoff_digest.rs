@@ -219,7 +219,7 @@ pub(crate) mod tests {
     }
 
     fn msgs(n: usize) -> Vec<Message> {
-        (0..n).map(|i| Message { role: "user".into(), ts: None, text: format!("消息 {i}"), tools: vec![] }).collect()
+        (0..n).map(|i| Message { role: "user".into(), ts: None, text: format!("消息 {i}"), tools: vec![], ..Message::default() }).collect()
     }
 
     #[test]

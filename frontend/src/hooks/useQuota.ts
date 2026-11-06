@@ -16,6 +16,7 @@ import {
   type QuotaStateDto,
 } from "@/lib/api"
 import { onUsageChanged } from "@/lib/usageChanges"
+import type { LocalQuotaMode } from "@/lib/providers/types"
 
 /**
  * 定时刷新的新鲜度：后端缓存比刷新间隔略新就复用。灵动岛、总览与设置预览各自按间隔轮询
@@ -59,9 +60,10 @@ export interface QuotaResult {
 }
 
 /**
- * 本地直查模式：`true` = Codex，`"grok"` = Grok，`"zcode"` = ZCode BigModel Key。
+ * 本地直查模式：`"codex"` = Codex，`"grok"` = Grok，`"zcode"` = ZCode BigModel Key；
+ * `false` = 按连接查。模式枚举来自 `lib/providers/types.ts`，不再在这里写平台联合类型。
  */
-export function useQuota(connectionId: string | null, local: boolean | "grok" | "zcode" = false, enabled = true): QuotaResult {
+export function useQuota(connectionId: string | null, local: LocalQuotaMode | false = false, enabled = true): QuotaResult {
   const interval = refreshDelay(useSettings().settings.refresh_minutes)
   const requestId = useRef(0)
   const queryKey = `${connectionId}:${local}`
@@ -77,7 +79,7 @@ export function useQuota(connectionId: string | null, local: boolean | "grok" | 
     const current = ++requestId.current
     setLoading(true)
     try {
-      const r = local === true
+      const r = local === "codex"
         ? await localCodexQuota(force)
         : local === "grok"
           ? await localGrokQuota(force)

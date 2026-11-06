@@ -148,6 +148,10 @@ struct Req {
     first_token_ms: Option<i64>,
     status_code: Option<i64>,
     failed: bool,
+    /// 网关 / 本地代理写入的精确归属；非代理路径为 None
+    connection_id: Option<String>,
+    /// ZCode 库的 `provider_id`（端点事实，归因层用）；其他来源为 None
+    provider_key: Option<String>,
 }
 
 fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec<Req>> {
@@ -157,7 +161,7 @@ fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec
                 r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.total_tokens,
                 r.input_known, r.output_known, r.cache_read_known, r.cache_write_known, r.total_known,
                 r.input_semantics, r.effort, r.duration_ms, r.first_token_ms, r.status_code, r.native_outcome,
-                m.reasoning, m.tool
+                m.reasoning, m.tool, r.connection_id, r.provider_key
          FROM requests r LEFT JOIN request_metrics m ON m.request_id = r.id
          WHERE {clause}
          ORDER BY r.ts DESC, r.id DESC"
@@ -231,6 +235,8 @@ fn load(conn: &Connection, f: &StatsFilter, calls: bool) -> rusqlite::Result<Vec
             duration_ms: r.get(18)?,
             first_token_ms: r.get(19)?,
             status_code,
+            connection_id: r.get(24)?,
+            provider_key: r.get(25)?,
         })
     })?;
     rows.collect()
@@ -709,6 +715,9 @@ pub struct CallRow {
     pub first_token_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub failed: bool,
+    /// 这条调用归到的已存连接（`exact` / `mapped`）；归不出唯一结论时是 `platform` 档。
+    /// 归因只影响展示，不参与费用计算，也不改写 `requests.connection_id`。
+    pub attribution: crate::attribution::AttributionView,
 }
 
 impl From<Req> for CallRow {
@@ -732,6 +741,8 @@ impl From<Req> for CallRow {
             first_token_ms: r.first_token_ms,
             status_code: r.status_code,
             failed: r.failed,
+            // 归因需要连接清单与 provider 规则，由 calls() 统一解析后覆盖（见 calls）。
+            attribution: crate::attribution::AttributionView::platform(),
         }
     }
 }
@@ -756,11 +767,27 @@ pub fn calls(conn: &Connection, f: &StatsFilter, page: u32) -> rusqlite::Result<
     let page_count = (reqs.len() as u32).div_ceil(CALL_PAGE_SIZE).max(1);
     let page = page.clamp(1, page_count);
     let unpriced_count = reqs.iter().filter(|r| r.cost.is_none()).count() as i64;
+    // 归因只为当页这十来行解析一次连接快照；读不到连接表时整页按平台档展示。
+    let snapshot = crate::attribution::Snapshot::load(conn).ok();
     let rows = reqs
         .into_iter()
         .skip(((page - 1) * CALL_PAGE_SIZE) as usize)
         .take(CALL_PAGE_SIZE as usize)
-        .map(CallRow::from)
+        .map(|req| {
+            let attribution = snapshot
+                .as_ref()
+                .map_or_else(crate::attribution::AttributionView::platform, |snapshot| {
+                    snapshot.resolve(
+                        &req.platform,
+                        req.connection_id.as_deref(),
+                        req.provider_key.as_deref(),
+                        req.model.as_deref(),
+                    )
+                });
+            let mut row = CallRow::from(req);
+            row.attribution = attribution;
+            row
+        })
         .collect();
     let (clause, args) = where_clause(&StatsFilter { model: None, status: None, search: None, ..f.clone() }, true);
     let mut stmt = conn.prepare(&format!("SELECT DISTINCT r.model FROM requests r WHERE {clause} AND r.model IS NOT NULL ORDER BY r.model"))?;

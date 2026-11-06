@@ -27,6 +27,25 @@ export function islandActiveConnection(
   return connections.find((c) => c.platformId === platform && c.status === "connected") ?? null
 }
 
+/**
+ * 收缩态那一行「在跑的是哪条已存连接」（P0 连接归因）。
+ *
+ * 只有确定档才替换平台名：
+ * - `exact`：本应用请求路径写入的连接；
+ * - `mapped`：由 provider 端点地址或模型清单**唯一**推出（展示上弱化，与 exact 区分）。
+ * `platform` 档、缺 id、缺名字一律返回 null —— 界面继续显示平台名，绝不显示
+ * 「未命名连接」这种假归属。三档的语义由后端给出，前端不再二次推断。
+ */
+export function islandAttribution(
+  attribution: { connection_id: string | null; name: string | null; confidence: "exact" | "mapped" | "platform" } | null | undefined,
+): { id: string; name: string; confidence: "exact" | "mapped" } | null {
+  if (!attribution || attribution.confidence === "platform") return null
+  const id = attribution.connection_id?.trim()
+  const name = attribution.name?.trim()
+  if (!id || !name) return null
+  return { id, name, confidence: attribution.confidence }
+}
+
 /** 复用真实连接状态；未知选择不能伪装成绿色成功。 */
 export function islandConnectionStatus(
   status: Connection["status"] | null,

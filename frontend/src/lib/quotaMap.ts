@@ -1,20 +1,14 @@
 import type { QuotaWindowDto } from "./api"
 import type { QuotaWindow } from "@/types"
+import { windowBadgeTone } from "./providers/registry.ts"
 
 /**
  * 后端额度窗口 → 界面额度窗口（§7.4）
  *
- * 窗口标签配色表示**窗口身份**，不随水位变化：5h 淡紫、7d 淡绿，其余中性。
+ * 窗口标签配色表示**窗口身份**，不随水位变化：5h 淡紫、7d 淡绿、日 / 月淡蓝，其余中性。
+ * 配色表在 `lib/providers/registry.ts` 的窗口条目里，这里只查表。
  * 重置倒计时来源未提供时保持 null，界面显示「—」而不推测。
  */
-const TONE: Record<string, QuotaWindow["badgeTone"]> = {
-  "5h": "purple",
-  "7d": "green",
-  "7d-opus": "green",
-  "7d-sonnet": "green",
-  "1d": "blue",
-  "30d": "blue",
-}
 
 /** 把 ISO 重置时刻换成「还剩 2h 15m」这类倒计时。 */
 export function formatQuotaCountdown(iso: string | null, now = Date.now()): string | null {
@@ -40,7 +34,8 @@ export function toQuotaWindows(dto: QuotaWindowDto[], now = Date.now()): QuotaWi
     // null 一路传下去：界面据此不画进度条，而不是当成 0%
     usedPercent: w.used_percent,
     usedText: w.amount_text,
+    remainingText: w.remaining_text ?? null,
     resetCountdown: formatQuotaCountdown(w.resets_at, now),
-    badgeTone: TONE[w.key] ?? "neutral",
+    badgeTone: windowBadgeTone(w.key),
   }))
 }

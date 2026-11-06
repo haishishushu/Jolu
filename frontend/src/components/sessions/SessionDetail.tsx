@@ -154,6 +154,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
             />
           ) : (
             <div className="flex flex-col gap-3">
+              {page.note && <p className="rounded-lg bg-jolu-stage px-2.5 py-1.5 text-[10px] leading-relaxed text-jolu-muted">{page.note}</p>}
               {page.offset > 0 && (
                 <button type="button" onClick={loadEarlier} disabled={loadingMore} className="flex h-6 items-center justify-center gap-1 text-[10px] text-jolu-muted outline-none hover:text-jolu-text focus-visible:outline-2 focus-visible:outline-jolu-accent">
                   <ChevronsUp aria-hidden className="size-3" />
@@ -180,7 +181,7 @@ export function SessionDetail({ session, connections, onDrillUsage, onContinue, 
         <button type="button" onClick={onCompress} className="inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-jolu-selected px-3 text-xs font-medium text-jolu-on outline-none hover:bg-jolu-pressed focus-visible:outline-2 focus-visible:outline-jolu-accent"><FileDown aria-hidden className="size-4"/>压缩会话</button>
         {canContinue(session.platform) && session.has_source
           ? continueButton
-          : <Tip label={session.has_source ? `${name} 暂无可靠的继续入口` : "没有可读的源文件，无法定位会话"}><span className="flex">{continueButton}</span></Tip>}
+          : <Tip label={!canContinue(session.platform) ? `${name} 暂无可靠的继续入口` : "没有可读的源文件，无法定位会话"}><span className="flex">{continueButton}</span></Tip>}
       </div>
     </section>
   )
@@ -241,8 +242,16 @@ function MessageView({ message, platform, name }: { message: MessageDto; platfor
       <div className="flex items-center gap-[7px]">
         <PlatformLogo platform={platform} size={17} />
         <span className="text-xs font-semibold text-jolu-text">{name}</span>
+        {message.model && <span className="min-w-0 truncate text-[10px] text-jolu-muted" title={message.model}>{message.model}</span>}
         <span className="tnum text-[10px] text-jolu-muted">{clock(message.ts)}</span>
       </div>
+      {/* ZCode 这类库型来源保留推理片段；源文件来源没有，不占位 */}
+      {message.reasoning && (
+        <details className="rounded-[7px] bg-jolu-side px-2.5 py-2">
+          <summary className="cursor-default text-[10px] text-jolu-muted">推理过程 · {message.reasoning.length} 字</summary>
+          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-jolu-muted">{message.reasoning}</pre>
+        </details>
+      )}
       {message.text && <MessageMarkdown text={message.text} />}
       {message.tools.map((tool, index) => <ToolRow key={index} tool={tool} />)}
     </div>
@@ -294,7 +303,7 @@ function InfoPanel({ session, page, accountText, onCopy, onDrillUsage }: {
       <div className="flex flex-col gap-[9px] rounded-[9px] border border-jolu-border p-3">
         {row("会话 ID", <span title={session.session_id}>{middleEllipsis(session.session_id)}</span>, session.session_id, "会话 ID")}
         {row("项目目录", session.cwd ?? "未识别", session.cwd ?? undefined, "项目目录")}
-        {row("数据来源", session.has_source ? `本机 ${providerName(session.platform)} 记录` : `本机 ${providerName(session.platform)} 用量记录（无正文）`)}
+        {row("数据来源", session.has_source || page?.available ? `本机 ${providerName(session.platform)} 记录` : `本机 ${providerName(session.platform)} 用量记录（无正文）`)}
         {row("模型", models.length ? (
           <span className="flex items-center gap-1.5"><PlatformLogo platform={session.platform as PlatformId} size={16} />{models.map(modelDisplayName).join("、")}</span>
         ) : "—")}

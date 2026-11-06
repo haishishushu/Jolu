@@ -8,7 +8,9 @@
  * B · 今日累计兜底：内存态锁存丢失（应用重启）或当天第一笔请求还没落库时，
  *     显示 `today_tokens`（今天已落库请求的新鲜 Token 合计）。
  *
- * 显示优先级：**锁存值 ?? 今日累计**。两者都不可显示（未知 / 0）时整段不渲染。
+ * 显示优先级：**锁存值 ?? 今日累计**。两者都不可显示（未知 / 0）时：
+ * - 仍在写入（`writing`）→ 段照常渲染，数值位置显示 `+—`（未知，§5.8）；
+ * - 否则整段不渲染。
  * 清空只由「今日累计归 0 / 未知」（跨天重置、切换平台、重启后的初始快照）与手动刷新触发，
  * 前端不自己判日期，也不在前端累加 Token。
  */
@@ -63,6 +65,50 @@ export function carriedDeltaView(args: {
   if (args.latched != null && args.latched > 0) return { value: args.latched, source: "session" }
   if (args.todayTokens != null && args.todayTokens > 0) return { value: args.todayTokens, source: "today" }
   return { value: null, source: null }
+}
+
+/** 增量段一次渲染的判定结果 */
+export interface CarriedDeltaSegment {
+  /** 是否渲染这一段（含分格线 + 绿色读数） */
+  visible: boolean
+  value: number | null
+  source: CarriedDeltaSource | null
+  /** 未知但仍在写入：显示 `+—`，不写假的 0、也不整段吞掉 */
+  unknown: boolean
+}
+
+/**
+ * 收缩胶囊尾部增量段的显示判定（§5.8 定的优先级，纯函数）：
+ *
+ *   1. 有锁存 / 今日累计（> 0）→ 显示这个数；
+ *   2. 有预览文案（`deltaText`，只有浏览器预览的示例数据有）→ 显示文案；
+ *   3. 否则仍在写入 → **照常渲染这一段**，数值未知显示 `+—`；
+ *   4. 三者都没有 → 不渲染。
+ *
+ * 1 与 2 的先后是 §5.6 的既有行为（`carried != null ? carried !== 0 : Boolean(deltaText)`）：
+ * 示例数据里 `carried` 恒为 null，文案分支永远走 2。
+ */
+export function carriedDeltaSegment(args: {
+  /** `carriedDeltaView` 的结果值（锁存 ?? 今日累计） */
+  value: number | null
+  source: CarriedDeltaSource | null
+  /** 浏览器预览的示例文案 */
+  text: string | null
+  /** 会话 / 请求正在写入（`islandWriting` 的 `working`） */
+  writing: boolean
+  /** 连接不可用 */
+  unavailable: boolean
+  /** 被网关转发路线占位 */
+  relay: boolean
+}): CarriedDeltaSegment {
+  const hidden: CarriedDeltaSegment = { visible: false, value: null, source: null, unknown: false }
+  if (args.unavailable || args.relay) return hidden
+  if (args.value != null && args.value > 0) {
+    return { visible: true, value: args.value, source: args.source, unknown: false }
+  }
+  if (args.text) return { visible: true, value: null, source: null, unknown: false }
+  if (args.writing) return { visible: true, value: null, source: null, unknown: true }
+  return hidden
 }
 
 /**

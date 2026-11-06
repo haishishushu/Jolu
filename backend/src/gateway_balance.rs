@@ -15,6 +15,42 @@ use serde_json::Value;
 /// one-api 对不限额度令牌返回的 hard_limit_usd
 const UNLIMITED_USD: f64 = 100_000_000.0;
 
+/// 一次网关 GET 拿到的 HTTP 结果：状态码，以及按 `quota::read` 解读出来的响应。
+/// 404 要单独当成「不是这类网关」，所以状态码不能丢。
+struct GatewayReply {
+    status: u16,
+    outcome: HttpOutcome,
+}
+
+/// 没拿到 HTTP 响应的两类原因，分别对应抽取前那两条不同的文案。
+enum GatewayError {
+    /// 建不出 HTTP 客户端
+    Client,
+    /// 连接被拒、读超时、TLS 握手失败等：请求没有走到 HTTP 响应
+    Transport,
+}
+
+/// 唯一碰 socket 的边界。生产实现是 `ReqwestGateway`；测试注入假实现，
+/// 不再为一条断言起本地 TCP 服务器。
+trait GatewayHttp {
+    /// 发一次 GET，固定带 `Accept: application/json`；`key` 为 `None` 时不发凭据。
+    fn get(&self, url: &str, key: Option<&str>) -> Result<GatewayReply, GatewayError>;
+}
+
+/// 生产实现：与抽取前同一串 reqwest 调用，失败按「建不出客户端」与「请求失败」两类返回。
+struct ReqwestGateway;
+
+impl GatewayHttp for ReqwestGateway {
+    fn get(&self, url: &str, key: Option<&str>) -> Result<GatewayReply, GatewayError> {
+        let client = quota::client().map_err(|_| GatewayError::Client)?;
+        let mut request = client.get(url).header("Accept", "application/json");
+        if let Some(key) = key { request = request.bearer_auth(key); }
+        let response = request.send().map_err(|_| GatewayError::Transport)?;
+        let status = response.status().as_u16();
+        Ok(GatewayReply { status, outcome: quota::read(response) })
+    }
+}
+
 /// 去掉用户填写地址末尾的 `/v1…`，得到网关根地址
 fn root(base: &str) -> String {
     let base = base.trim().trim_end_matches('/');
@@ -31,17 +67,14 @@ enum Fetched {
     Done(BalanceState),
 }
 
-fn get(url: &str, key: Option<&str>) -> Fetched {
-    let Ok(client) = quota::client() else {
-        return Fetched::Done(BalanceState::Failed { reason: "无法创建网关查询客户端".into() });
+fn get(gateway: &impl GatewayHttp, url: &str, key: Option<&str>) -> Fetched {
+    let reply = match gateway.get(url, key) {
+        Ok(reply) => reply,
+        Err(GatewayError::Client) => return Fetched::Done(BalanceState::Failed { reason: "无法创建网关查询客户端".into() }),
+        Err(GatewayError::Transport) => return Fetched::Done(BalanceState::Failed { reason: "网关余额查询失败，请检查网络后刷新".into() }),
     };
-    let mut request = client.get(url).header("Accept", "application/json");
-    if let Some(key) = key { request = request.bearer_auth(key); }
-    let Ok(response) = request.send() else {
-        return Fetched::Done(BalanceState::Failed { reason: "网关余额查询失败，请检查网络后刷新".into() });
-    };
-    if response.status().as_u16() == 404 { return Fetched::Missing; }
-    match quota::read(response) {
+    if reply.status == 404 { return Fetched::Missing; }
+    match reply.outcome {
         HttpOutcome::Body(body) => serde_json::from_str(&body).map_or(Fetched::Missing, Fetched::Json),
         HttpOutcome::Unauthorized(reason) => Fetched::Done(BalanceState::Unauthorized { reason }),
         HttpOutcome::Forbidden(reason) => Fetched::Done(BalanceState::Forbidden { reason }),
@@ -120,13 +153,19 @@ fn parse_dashboard(subscription: &Value, usage: &Value) -> Option<BalanceState> 
 
 /// 依次尝试 new-api 与 one-api；都不像时返回 None，调用方保留原来的「不支持」原因
 pub(crate) fn gateway_billing_balance(base: &str, key: &str) -> Option<BalanceState> {
+    gateway_billing_balance_with(&ReqwestGateway, base, key)
+}
+
+/// 与 `gateway_billing_balance` 完全同一条流程，只是网络层由调用方注入：
+/// 生产传 `ReqwestGateway`，测试传假网关。
+fn gateway_billing_balance_with(gateway: &impl GatewayHttp, base: &str, key: &str) -> Option<BalanceState> {
     let root = root(base);
-    match get(&format!("{root}/api/usage/token/"), Some(key)) {
+    match get(gateway, &format!("{root}/api/usage/token/"), Some(key)) {
         Fetched::Done(state) => return Some(state),
         Fetched::Json(body) => {
             let status = if body.get("code").and_then(Value::as_bool) == Some(true) {
                 // 公开站点配置无需认证，绝不附带用户的 API Key。
-                match get(&format!("{root}/api/status"), None) {
+                match get(gateway, &format!("{root}/api/status"), None) {
                     Fetched::Json(status) => Some(status),
                     Fetched::Done(state) => return Some(state),
                     Fetched::Missing => None,
@@ -136,12 +175,12 @@ pub(crate) fn gateway_billing_balance(base: &str, key: &str) -> Option<BalanceSt
         },
         Fetched::Missing => {}
     }
-    let subscription = match get(&format!("{root}/v1/dashboard/billing/subscription"), Some(key)) {
+    let subscription = match get(gateway, &format!("{root}/v1/dashboard/billing/subscription"), Some(key)) {
         Fetched::Json(body) => body,
         Fetched::Done(state) => return Some(state),
         Fetched::Missing => return None,
     };
-    match get(&format!("{root}/v1/dashboard/billing/usage"), Some(key)) {
+    match get(gateway, &format!("{root}/v1/dashboard/billing/usage"), Some(key)) {
         Fetched::Json(usage) => parse_dashboard(&subscription, &usage),
         Fetched::Done(state) => Some(state),
         Fetched::Missing => None,
@@ -152,6 +191,7 @@ pub(crate) fn gateway_billing_balance(base: &str, key: &str) -> Option<BalanceSt
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io;
 
     #[test]
     #[ignore = "需要鼠鼠授权：读取本机 Claude API 配置，仅向已配置服务发 GET，只输出状态、币种与字段是否存在"]
@@ -332,32 +372,212 @@ mod tests {
         }
     }
 
-    #[test]
-    fn server_failure_is_not_a_missing_gateway_and_public_status_has_no_credentials() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
-                        let mut bytes = [0; 4096];
-                        let length = stream.read(&mut bytes).unwrap();
-                        stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                        return String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
-                    Err(error) => panic!("local test server: {error}"),
-                }
+    /// 假网关返回给注入点的一条结果。
+    enum FakeReply {
+        /// 拿到了 HTTP 响应：状态码 + `quota::read` 会给出的解读结果
+        Reply(u16, HttpOutcome),
+        /// 没拿到响应（连接被拒、读超时、TLS 失败）
+        Transport(io::ErrorKind),
+    }
+
+    impl FakeReply {
+        /// 200 + JSON 正文
+        fn json(body: &str) -> Self {
+            FakeReply::Reply(200, HttpOutcome::Body(body.to_string()))
+        }
+
+        /// 服务端错误：`quota::read` 对 5xx 给出的就是 `Failed`，上游正文不会进入这个模块
+        fn server_error(detail: &str) -> Self {
+            FakeReply::Reply(500, HttpOutcome::Failed(detail.to_string()))
+        }
+    }
+
+    /// 一次注入调用：URL、是否携带凭据、以及假网关这次模拟的传输失败种类。
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FakeCall {
+        url: String,
+        key: bool,
+        transport: Option<io::ErrorKind>,
+    }
+
+    /// 注入用的网关边界：`reply` 决定每次返回什么，`calls` 记下真实发生过的请求。
+    struct FakeGateway<F> {
+        reply: F,
+        calls: std::sync::Mutex<Vec<FakeCall>>,
+    }
+
+    impl<F: Fn(&str) -> FakeReply> FakeGateway<F> {
+        fn new(reply: F) -> Self {
+            Self { reply, calls: std::sync::Mutex::new(Vec::new()) }
+        }
+
+        fn calls(&self) -> Vec<FakeCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl<F: Fn(&str) -> FakeReply> GatewayHttp for FakeGateway<F> {
+        fn get(&self, url: &str, key: Option<&str>) -> Result<GatewayReply, GatewayError> {
+            let reply = (self.reply)(url);
+            let transport = match &reply {
+                FakeReply::Transport(kind) => Some(*kind),
+                FakeReply::Reply(..) => None,
+            };
+            self.calls.lock().unwrap().push(FakeCall { url: url.to_string(), key: key.is_some(), transport });
+            match reply {
+                FakeReply::Reply(status, outcome) => Ok(GatewayReply { status, outcome }),
+                FakeReply::Transport(_) => Err(GatewayError::Transport),
             }
+        }
+    }
+
+    /// 断言是「服务器失败」：文案固定，且不回显给定原文。
+    fn assert_server_failure(state: &BalanceState, expected_reason: &str, leaked: &[&str]) {
+        assert!(matches!(state, BalanceState::Failed { .. }), "应判成服务器失败，实际 {state:?}");
+        let json = serde_json::to_string(state).expect("序列化状态");
+        assert!(json.contains(expected_reason), "文案不对: {json}");
+        for text in leaked {
+            assert!(!json.contains(text), "输出回显了上游原文 `{text}`: {json}");
+        }
+    }
+
+    #[test]
+    fn refused_connection_is_a_server_failure_not_a_missing_gateway() {
+        // reqwest 把 WSAECONNREFUSED 报成 send 失败；这里注入同一类传输失败。
+        let gateway = FakeGateway::new(|_: &str| FakeReply::Transport(io::ErrorKind::ConnectionRefused));
+        let state = gateway_billing_balance_with(&gateway, "https://gw.example.test/v1", "sk-live-fixture")
+            .expect("连接被拒必须报成服务器失败，不能退化成「缺少网关」");
+        assert_server_failure(&state, "网关余额查询失败，请检查网络后刷新", &["sk-live-fixture"]);
+        assert_eq!(gateway.calls(), vec![FakeCall {
+            url: "https://gw.example.test/api/usage/token/".into(),
+            key: true,
+            transport: Some(io::ErrorKind::ConnectionRefused),
+        }]);
+    }
+
+    #[test]
+    fn read_timeout_is_a_server_failure_not_a_missing_gateway() {
+        // 网关在超时时间内没回包，reqwest 同样只能报 send 失败；不能被当成「不是这类网关」。
+        let gateway = FakeGateway::new(|_: &str| FakeReply::Transport(io::ErrorKind::TimedOut));
+        let state = gateway_billing_balance_with(&gateway, "https://gw.example.test/v1", "sk-live-fixture")
+            .expect("读超时必须报成服务器失败，不能退化成「缺少网关」");
+        assert_server_failure(&state, "网关余额查询失败，请检查网络后刷新", &["sk-live-fixture"]);
+        assert_eq!(gateway.calls(), vec![FakeCall {
+            url: "https://gw.example.test/api/usage/token/".into(),
+            key: true,
+            transport: Some(io::ErrorKind::TimedOut),
+        }]);
+    }
+
+    #[test]
+    fn http_500_with_an_error_body_is_a_server_failure_and_hides_the_upstream_text() {
+        let gateway = FakeGateway::new(|_: &str| FakeReply::server_error("服务端错误（HTTP 500）: upstream secret-fixture"));
+        let state = gateway_billing_balance_with(&gateway, "https://gw.example.test/v1", "sk-live-fixture")
+            .expect("500 必须报成服务器失败，不能退化成「缺少网关」");
+        assert_server_failure(&state, "网关余额接口查询失败", &["secret-fixture", "HTTP 500", "sk-live-fixture"]);
+        assert_eq!(gateway.calls().len(), 1, "首个端点就失败，不该再查 one-api");
+    }
+
+    #[test]
+    fn healthy_gateway_parses_and_the_public_status_request_carries_no_credentials() {
+        let gateway = FakeGateway::new(|url: &str| match url {
+            url if url.ends_with("/api/usage/token/") => FakeReply::json(
+                r#"{"code":true,"data":{"total_available":1000000,"total_used":250000,"unlimited_quota":false}}"#,
+            ),
+            url if url.ends_with("/api/status") => FakeReply::json(r#"{"data":{"quota_per_unit":100000}}"#),
+            other => panic!("未预期的网关地址: {other}"),
         });
-        let result = get(&format!("http://{address}/api/status"), None);
-        let request = server.join().unwrap();
-        assert!(request.starts_with("get /api/status "));
-        assert!(!request.contains("authorization:"));
-        assert!(matches!(result, Fetched::Done(BalanceState::Failed { .. })));
+        let state = gateway_billing_balance_with(&gateway, "https://gw.example.test/v1", "sk-live-fixture")
+            .expect("正常的 new-api 响应应解析出余额");
+        let json = serde_json::to_string(&state).expect("序列化状态");
+        assert!(!json.contains("sk-live-fixture"), "输出回显了 API Key: {json}");
+        match &state {
+            BalanceState::Ok { balance, used, currency } => {
+                assert_eq!((*balance, *used, currency.as_str()), (10.0, Some(2.5), "USD"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let calls = gateway.calls();
+        let urls: Vec<&str> = calls.iter().map(|call| call.url.as_str()).collect();
+        assert_eq!(urls, ["https://gw.example.test/api/usage/token/", "https://gw.example.test/api/status"]);
+        assert!(calls[0].key, "令牌端点需要带凭据");
+        assert!(!calls[1].key, "公开站点配置绝不能带用户的 API Key");
+    }
+
+    /// 真实 socket 的端到端用例，只在手动运行时执行：注入测试覆盖不到 reqwest 那条链路。
+    /// Windows 上 `accept` 出来的 socket 会继承 listener 的非阻塞模式，必须显式切回阻塞，
+    /// 否则 `read` 立刻返回 `WouldBlock(10035)`；这里把超时放宽到 10 秒，且只在这个用例里放宽。
+    #[test]
+    #[ignore = "真实 socket 端到端：手动运行 cargo test gateway_balance -- --ignored"]
+    fn real_socket_gateway_still_works_end_to_end() {
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+
+        const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let address = listener.local_addr().expect("读取本地端口");
+        listener.set_nonblocking(true).expect("监听改为非阻塞");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let server = std::thread::spawn(move || {
+            let mut requests: Vec<String> = Vec::new();
+            while requests.len() < 2 && Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("本地测试服务器 accept 失败: {error}"),
+                };
+                stream.set_nonblocking(false).expect("连接切回阻塞模式");
+                stream.set_read_timeout(Some(SOCKET_TIMEOUT)).expect("设置读超时");
+                stream.set_write_timeout(Some(SOCKET_TIMEOUT)).expect("设置写超时");
+                let request = read_request_headers(&mut stream);
+                let body = if request.starts_with("get /api/usage/token/ ") {
+                    r#"{"code":true,"data":{"total_available":1000000,"total_used":250000,"unlimited_quota":false}}"#
+                } else if request.starts_with("get /api/status ") {
+                    r#"{"data":{"quota_per_unit":100000}}"#
+                } else {
+                    ""
+                };
+                let status = if body.is_empty() { "404 Not Found" } else { "200 OK" };
+                write!(
+                    &mut stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("写响应");
+                stream.flush().expect("刷新响应");
+                requests.push(request);
+            }
+            requests
+        });
+        let state = gateway_billing_balance(&format!("http://{address}/v1"), "sk-real-socket-fixture")
+            .expect("真实 socket 路径把本地 200 判成了缺少网关");
+        let requests = server.join().expect("本地测试服务器线程");
+        assert_eq!(requests.len(), 2, "应依次请求令牌端点与公开状态端点");
+        assert!(requests[0].starts_with("get /api/usage/token/ "), "{}", requests[0]);
+        assert!(requests[0].contains("authorization:"), "令牌请求没带凭据: {}", requests[0]);
+        assert!(requests[1].starts_with("get /api/status "), "{}", requests[1]);
+        assert!(!requests[1].contains("authorization:"), "公开状态请求带了凭据: {}", requests[1]);
+        match &state {
+            BalanceState::Ok { balance, used, .. } => assert_eq!((*balance, *used), (10.0, Some(2.5))),
+            other => panic!("真实 socket 路径未解析出余额: {other:?}"),
+        }
+    }
+
+    /// 读到请求头结束（`\r\n\r\n`）为止，返回小写文本，便于按路径与头名匹配。
+    fn read_request_headers(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 2048];
+        while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(length) => bytes.extend_from_slice(&chunk[..length]),
+                Err(error) => panic!("本地测试服务器读取请求失败: {error}"),
+            }
+        }
+        String::from_utf8_lossy(&bytes).to_ascii_lowercase()
     }
 }

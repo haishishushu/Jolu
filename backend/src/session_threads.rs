@@ -3,6 +3,8 @@
 //! - 会话来自统计库里带 session_id 的请求；标题与生命周期来自 sessions 表；
 //! - 源文件位置来自采集器的 scan_state（path ↔ parser_session_id），项目目录从源文件里读 `cwd`；
 //! - 消息只读解析源文件，不改写、不删除；来源没保留正文时如实返回「仅用量」，不拼造对话；
+//! - ZCode 是库型来源：正文在 `~/.zcode/cli/db/db.sqlite` 的 `message` / `part` 表里，
+//!   以 `mode=ro` 等价方式（`SQLITE_OPEN_READ_ONLY`）打开，结构漂移就降级为「无正文」；
 //! - 继续会话只对有可靠命令行入口的来源开放（Claude Code `claude --resume`、Codex `codex resume`）。
 
 use std::collections::{HashMap, HashSet};
@@ -10,7 +12,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use rusqlite::{types::Value, Connection};
+use rusqlite::{types::Value, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
@@ -159,6 +161,9 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
     }
     sql.push_str(" GROUP BY r.platform, r.session_id");
     let files = source_files(conn)?;
+    // ZCode 的子代理会话不当作主会话展示（规则见 `zcode_child_sessions`）；
+    // 库不可读时不加这层过滤，宁可多显示也不要吞掉真实会话
+    let zcode_children = zcode_child_sessions();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
         let known = |sum: usize, flag: usize| -> rusqlite::Result<Option<i64>> {
@@ -195,6 +200,9 @@ pub fn list(conn: &Connection, f: &SessionFilter) -> rusqlite::Result<SessionLis
     let mut sessions = Vec::new();
     for row in rows {
         let (mut item, activity) = row?;
+        if zcode_child_session(zcode_children.as_ref(), &item.platform, &item.session_id) {
+            continue;
+        }
         if f.since.is_some_and(|since| item.last_ts < since) {
             continue;
         }
@@ -257,16 +265,42 @@ pub struct ToolCall {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// 库型来源（ZCode）记录的单条 token 用量：缺哪个字段就是 None，不补 0
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct TokenUsage {
+    pub total: Option<i64>,
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub reasoning: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Message {
     /// "user" | "assistant"
     pub role: String,
     pub ts: Option<i64>,
     pub text: String,
     pub tools: Vec<ToolCall>,
+    /// 库型来源（ZCode）的推理片段；源文件来源的解析器不填
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// 库型来源记录的 `modelId`；源文件来源不填
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 库型来源记录的 `providerId`（如 `account:zai-start-plan`）；源文件来源不填
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// 本条消息的 token 用量；只有库型来源提供
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenUsage>,
+    /// 本条消息的费用（来源原样透传）；只有库型来源提供
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct MessagePage {
     /// false：没有可读源文件（仅用量记录）
     pub available: bool,
@@ -279,6 +313,9 @@ pub struct MessagePage {
     pub cost: f64,
     pub priced_requests: i64,
     pub requests: i64,
+    /// 正文不完整时给界面的说明（截断 / 有坏记录被跳过）；完整时为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -443,7 +480,7 @@ fn is_injected(text: &str) -> bool {
 fn push_assistant(out: &mut Vec<Message>, ts: Option<i64>, text: Option<String>, tool: Option<ToolCall>, limit: usize) {
     let reuse = out.last().is_some_and(|m| m.role == "assistant");
     if !reuse {
-        out.push(Message { role: "assistant".into(), ts, text: String::new(), tools: Vec::new() });
+        out.push(Message { role: "assistant".into(), ts, text: String::new(), tools: Vec::new(), ..Message::default() });
     }
     let last = out.last_mut().expect("刚放入");
     if let Some(t) = text.filter(|t| !t.trim().is_empty()) {
@@ -499,7 +536,7 @@ fn parse_claude_with<I: IntoIterator<Item = String>>(lines: I, limits: Limits) -
         let Some(content) = v.get("message").and_then(|m| m.get("content")) else { continue };
         if kind == "user" {
             match content {
-                Json::String(s) if !is_injected(s) => out.push(Message { role: "user".into(), ts, text: clip(s.trim(), limits.text), tools: Vec::new() }),
+                Json::String(s) if !is_injected(s) => out.push(Message { role: "user".into(), ts, text: clip(s.trim(), limits.text), tools: Vec::new(), ..Message::default() }),
                 Json::Array(blocks) => {
                     let mut texts = Vec::new();
                     for b in blocks {
@@ -518,7 +555,7 @@ fn parse_claude_with<I: IntoIterator<Item = String>>(lines: I, limits: Limits) -
                         }
                     }
                     if !texts.is_empty() {
-                        out.push(Message { role: "user".into(), ts, text: clip(&texts.join("\n\n"), limits.text), tools: Vec::new() });
+                        out.push(Message { role: "user".into(), ts, text: clip(&texts.join("\n\n"), limits.text), tools: Vec::new(), ..Message::default() });
                     }
                 }
                 _ => {}
@@ -625,7 +662,7 @@ fn parse_codex_with<I: IntoIterator<Item = String>>(lines: I, limits: Limits) ->
                     .map(|blocks| blocks.iter().filter_map(|b| b.get("text").and_then(Json::as_str)).collect::<Vec<_>>().join("\n"))
                     .unwrap_or_default();
                 match role {
-                    "user" if !is_injected(&text) => out.push(Message { role: "user".into(), ts, text: clip(text.trim(), limits.text), tools: Vec::new() }),
+                    "user" if !is_injected(&text) => out.push(Message { role: "user".into(), ts, text: clip(text.trim(), limits.text), tools: Vec::new(), ..Message::default() }),
                     "assistant" => push_assistant(&mut out, ts, Some(text), None, limits.text),
                     _ => {}
                 }
@@ -679,8 +716,295 @@ pub(crate) fn parse_detail(platform: &str, lines: &[String]) -> Vec<Message> {
     }
 }
 
+/* ------------------------------ ZCode 库型来源 ------------------------------ */
+
+/// 单会话最多解析的 part 条数。本机 477 MB 的库里单个会话最多有 14,404 条 part，
+/// 一次读全会把整个会话 JSON 拉进内存；超出后只解析最近的部分，并在页面上标注截断。
+const ZCODE_PART_LIMIT: usize = 2_000;
+/// 库型来源的等待上限：原工具可能正在写 WAL，宁可稍等也不认为会话正文不可读
+const ZCODE_BUSY_MS: u64 = 400;
+
+/// ZCode 会话库：`~/.zcode/cli/db/db.sqlite`。缺失时返回 None，由调用方降级。
+fn zcode_db_path() -> Option<PathBuf> {
+    if crate::validation::isolated() { return None; }
+    Some(crate::creds::home()?.join(".zcode").join("cli").join("db").join("db.sqlite"))
+}
+
+/// 只读打开 ZCode 库。`SQLITE_OPEN_READ_ONLY` 与 `mode=ro` 等价：连接不持有写锁、
+/// 不会创建或修改 `.zcode` 下任何文件（WAL 的 `-shm` 已由原工具创建，只读取用）。
+fn open_zcode_db() -> Option<Connection> {
+    let path = zcode_db_path().filter(|p| p.is_file())?;
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(ZCODE_BUSY_MS));
+    Some(conn)
+}
+
+/// 结构探测：原工具升级会让列漂移，探测不到就当作「没有正文」，绝不猜列名或 mock 数据。
+fn zcode_schema_ok(conn: &Connection) -> bool {
+    conn.prepare("SELECT id, session_id, sequence, time_created, data FROM message LIMIT 0").is_ok()
+        && conn.prepare("SELECT id, message_id, sequence, time_created, data FROM part LIMIT 0").is_ok()
+}
+
+/// 子会话 id 集合（`parent_id` 非空）。ZCode 把子代理会话也写进同一张 `session` 表：
+/// 171 条里 146 条 `parent_id` 非空（workflow_child 100 / subagent_child 41 / fork 2 /
+/// selection_side_chat 3），只有 25 条是用户真正打开的根会话。
+///
+/// 列表规则：只把根会话当主会话展示（子会话不进列表，因此也不会刷屏）；子会话不折叠展示，
+/// 因为它的正文只是父会话里一次 Agent 调用的展开，父会话正文已包含该调用的结果。
+/// 子会话自己的正文仍可按 id 只读查询（例如从别处拿到 id），只是不会出现在列表里。
+fn zcode_child_sessions() -> Option<HashSet<String>> {
+    let conn = open_zcode_db()?;
+    let mut stmt = conn.prepare("SELECT id FROM session WHERE parent_id IS NOT NULL AND parent_id <> ''").ok()?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).ok()?;
+    let out: HashSet<String> = rows.filter_map(Result::ok).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Jolu 的请求表把 ZCode 会话记成 `{来源 id}:{原始会话 id}`，例如
+/// `native:zcode:main:sess_0a15…`；查原库前必须还原成裸 id，否则一条 message 都匹配不上。
+/// 没有 `native:` 前缀（含直接传裸 id）时按原样使用。
+fn zcode_raw_session_id(session_id: &str) -> &str {
+    if session_id.starts_with("native:") {
+        session_id.rsplit(':').next().filter(|id| !id.is_empty()).unwrap_or(session_id)
+    } else {
+        session_id
+    }
+}
+
+/// 列表里的这一条是否是 ZCode 子代理会话（不在主列表展示）。子会话集合不可用时一律当作根会话。
+fn zcode_child_session(children: Option<&HashSet<String>>, platform: &str, session_id: &str) -> bool {
+    platform == "zcode" && children.is_some_and(|children| children.contains(zcode_raw_session_id(session_id)))
+}
+
+/// 一条消息的重建结果：`Ok(None)` 表示这条不该展示（系统注入 / 模型专用），`Err(())` 表示 data 坏了
+fn zcode_message(data: &str, parts: &[String], limits: Limits) -> Result<Option<Message>, ()> {
+    let Ok(meta) = serde_json::from_str::<Json>(data) else { return Err(()) };
+    // 注入给模型、没写进用户可见记录的内容不显示（与 Claude 的 isMeta / isInjected 同一口径）
+    let hidden = meta.get("synthetic").and_then(Json::as_bool) == Some(true)
+        || meta.pointer("/metadata/visibility").and_then(Json::as_str) == Some("model-only")
+        || matches!(meta.pointer("/semantics/uiVisibility").and_then(Json::as_str), Some("hidden"))
+        || matches!(meta.pointer("/semantics/transcriptVisibility").and_then(Json::as_str), Some("hidden"));
+    if hidden { return Ok(None); }
+    let role = meta.get("role").and_then(Json::as_str).unwrap_or("");
+    if !matches!(role, "user" | "assistant") { return Ok(None); }
+
+    let ts = meta.pointer("/time/created").and_then(Json::as_i64);
+    let mut texts: Vec<String> = Vec::new();
+    let mut thoughts: Vec<String> = Vec::new();
+    let mut tools: Vec<ToolCall> = Vec::new();
+    // step-finish 是每条模型调用的结算节点，消息级 tokens 缺失时用它累计
+    let mut step_tokens = TokenUsage::default();
+    let mut step_cost = 0.0f64;
+    let mut step_seen = false;
+    for raw in parts {
+        let Ok(part) = serde_json::from_str::<Json>(raw) else { continue };
+        match part.get("type").and_then(Json::as_str).unwrap_or("") {
+            "text" => {
+                if let Some(text) = part.get("text").and_then(Json::as_str).map(str::trim).filter(|t| !t.is_empty()) {
+                    texts.push(text.to_string());
+                }
+            }
+            "reasoning" => {
+                if let Some(text) = part.get("text").and_then(Json::as_str).map(str::trim).filter(|t| !t.is_empty()) {
+                    thoughts.push(text.to_string());
+                }
+            }
+            "tool" => {
+                if let Some(tool) = zcode_tool(&part, limits) { tools.push(tool); }
+            }
+            "step-finish" => {
+                step_seen = true;
+                step_cost += part.get("cost").and_then(Json::as_f64).unwrap_or(0.0);
+                zcode_add_tokens(&mut step_tokens, part.get("tokens"));
+            }
+            // step-start：只有计时，没有内容；file / timeline / compaction：附件与分隔标记，
+            // 不属于消息正文（附件路径已在工具调用摘要里出现），不拼进对话
+            _ => {}
+        }
+    }
+
+    let text = clip(&texts.join("\n\n"), limits.text);
+    let tokens = zcode_tokens(meta.get("tokens")).or(step_seen.then(|| step_tokens.clone()));
+    let cost = meta.get("cost").and_then(Json::as_f64).or(step_seen.then_some(step_cost));
+    let reasoning = (!thoughts.is_empty()).then(|| clip(&thoughts.join("\n\n"), limits.text));
+    if text.is_empty() && tools.is_empty() && reasoning.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Message {
+        role: role.into(),
+        ts,
+        text,
+        tools,
+        reasoning,
+        model: meta.get("modelId").and_then(Json::as_str).map(String::from),
+        provider: meta.get("providerId").and_then(Json::as_str).map(String::from),
+        tokens,
+        cost,
+    }))
+}
+
+/// `part.type == "tool"`：摘要、输出、状态都在 `state` 里，调用与结果是同一条记录
+fn zcode_tool(part: &Json, limits: Limits) -> Option<ToolCall> {
+    let state = part.get("state")?;
+    let input = state.get("input").cloned().unwrap_or(Json::Null);
+    let summary = {
+        let from_input = tool_summary(&input, limits);
+        if from_input.is_empty() {
+            state.get("title").and_then(Json::as_str).map(|t| limits.summary(t)).unwrap_or_default()
+        } else {
+            from_input
+        }
+    };
+    // `state.output` 只在工具结束时才有；运行中没有输出就返回 None，不补写结果
+    let output = state.get("output").and_then(output_text).map(|t| limits.output(&t));
+    let failed = match state.get("status").and_then(Json::as_str) {
+        Some("error") => Some(true),
+        Some("completed") => Some(false),
+        _ => None,
+    };
+    Some(ToolCall {
+        name: part.get("tool").and_then(Json::as_str).unwrap_or("工具").to_string(),
+        summary,
+        output,
+        failed,
+        // ZCode 不单独记退出码，输出文本里也不保证有；不推断
+        exit_code: None,
+        paths: tool_paths(&input),
+    })
+}
+
+fn zcode_tokens(value: Option<&Json>) -> Option<TokenUsage> {
+    let value = value?;
+    let number = |v: Option<&Json>| v.and_then(Json::as_i64);
+    let usage = TokenUsage {
+        total: number(value.get("total")),
+        input: number(value.get("input")),
+        output: number(value.get("output")),
+        reasoning: number(value.get("reasoning")),
+        cache_read: number(value.pointer("/cache/read")),
+        cache_write: number(value.pointer("/cache/write")),
+    };
+    (usage.total.is_some() || usage.input.is_some() || usage.output.is_some()).then_some(usage)
+}
+
+fn zcode_add_tokens(into: &mut TokenUsage, value: Option<&Json>) {
+    let Some(usage) = zcode_tokens(value) else { return };
+    let acc = |slot: &mut Option<i64>, add: Option<i64>| {
+        if let Some(add) = add { *slot = Some(slot.unwrap_or(0) + add); }
+    };
+    acc(&mut into.total, usage.total);
+    acc(&mut into.input, usage.input);
+    acc(&mut into.output, usage.output);
+    acc(&mut into.reasoning, usage.reasoning);
+    acc(&mut into.cache_read, usage.cache_read);
+    acc(&mut into.cache_write, usage.cache_write);
+}
+
+#[derive(Default)]
+struct ZcodeStream {
+    messages: Vec<Message>,
+    /// 达到 part 上限、只解析了最近的部分
+    truncated: bool,
+    /// `data` 坏了被跳过的消息条数
+    skipped: usize,
+}
+
+/// 按会话 id 走索引重建消息流。
+///
+/// 索引：`message(session_id, sequence, ...)`（`message_session_sequence_idx`）与
+/// `part(message_id, sequence, ...)`（`part_message_sequence_idx`），不使用全表扫描。
+/// 方向：先按 `sequence` 倒序取消息、再倒序还原，保证被截断时留下的是最近的对话；
+/// `sequence` 可能为 NULL（旧记录），用最大值兜底让它排在末尾。
+fn zcode_load(conn: &Connection, session_id: &str, limits: Limits, part_budget: usize) -> Result<ZcodeStream, String> {
+    let mut messages = conn.prepare(
+        "SELECT id, data FROM message WHERE session_id = ?1
+         ORDER BY COALESCE(sequence, 9223372036854775807) DESC, time_created DESC, id DESC",
+    ).map_err(|error| error.to_string())?;
+    let mut parts = conn.prepare(
+        "SELECT data FROM part WHERE message_id = ?1
+         ORDER BY COALESCE(sequence, 9223372036854775807), time_created, id",
+    ).map_err(|error| error.to_string())?;
+    let rows = messages.query_map([session_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?;
+    let mut out = ZcodeStream::default();
+    let mut used = 0usize;
+    for row in rows {
+        let (message_id, data) = row.map_err(|error| error.to_string())?;
+        if used >= part_budget {
+            out.truncated = true;
+            break;
+        }
+        let rows: Vec<String> = parts.query_map([&message_id], |r| r.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        // 单条消息自己就超过上限时也要留下内容（否则最新一次对话会整段消失）：
+        // 只保留它最近的 `part_budget` 条 part，并标记截断
+        let rows = if rows.len() > part_budget && out.messages.is_empty() {
+            out.truncated = true;
+            rows[rows.len() - part_budget..].to_vec()
+        } else {
+            rows
+        };
+        if used + rows.len() > part_budget {
+            out.truncated = true;
+            break;
+        }
+        used += rows.len();
+        match zcode_message(&data, &rows, limits) {
+            Ok(Some(message)) => out.messages.push(message),
+            Ok(None) => {}
+            // 单条 data 解析失败只跳过该条，不牵连整页
+            Err(()) => out.skipped += 1,
+        }
+    }
+    out.messages.reverse();
+    Ok(out)
+}
+
+/// 库型来源的分页：正文来自 ZCode 库，`models` / 费用仍来自 Jolu 自己的请求表
+fn zcode_page(conn: &Connection, zdb: Option<&Connection>, session_id: &str, before: Option<usize>, limit: usize) -> Result<MessagePage, String> {
+    zcode_page_with(conn, zdb, session_id, before, limit, ZCODE_PART_LIMIT)
+}
+
+fn zcode_page_with(conn: &Connection, zdb: Option<&Connection>, session_id: &str, before: Option<usize>, limit: usize, part_budget: usize) -> Result<MessagePage, String> {
+    // 费用与模型来自 Jolu 自己的请求表（用带前缀的原始 session_id），正文来自 ZCode 的裸 id
+    let (cost, priced_requests, requests, models) = session_cost(conn, "zcode", session_id).map_err(|error| error.to_string())?;
+    let raw_id = zcode_raw_session_id(session_id);
+    let (stream, available) = match zdb {
+        Some(zdb) if zcode_schema_ok(zdb) => (zcode_load(zdb, raw_id, VIEW, part_budget)?, true),
+        _ => (ZcodeStream::default(), false),
+    };
+    let mut note = Vec::new();
+    if stream.truncated {
+        note.push(format!("只解析了本会话最近 {ZCODE_PART_LIMIT} 条记录，更早的正文请在原工具查看"));
+    }
+    if stream.skipped > 0 {
+        note.push(format!("{} 条记录格式无法解析，已跳过", stream.skipped));
+    }
+    let total = stream.messages.len();
+    let end = before.unwrap_or(total).min(total);
+    let start = end.saturating_sub(limit);
+    Ok(MessagePage {
+        available,
+        total,
+        offset: start,
+        messages: stream.messages[start..end].to_vec(),
+        models,
+        cost,
+        priced_requests,
+        requests,
+        note: (!note.is_empty()).then(|| note.join("；")),
+    })
+}
+
 /// 消息分页：`before` 为 None 取最后 `limit` 条，否则取序号 `before` 之前的 `limit` 条
 pub fn messages(conn: &Connection, platform: &str, session_id: &str, before: Option<usize>, limit: usize) -> Result<MessagePage, String> {
+    // 库型来源：正文在 ZCode 自己的 sqlite 里，打不开/结构不符时照常返回「仅用量」，不报错
+    if platform == "zcode" {
+        let zdb = open_zcode_db();
+        return zcode_page(conn, zdb.as_ref(), session_id, before, limit);
+    }
     let files = source_files(conn).map_err(|error| error.to_string())?;
     let file = files.get(&(platform.to_string(), session_id.to_string())).filter(|p| p.exists()).cloned();
     let all = match (&file, platform) {
@@ -701,6 +1025,7 @@ pub fn messages(conn: &Connection, platform: &str, session_id: &str, before: Opt
         cost,
         priced_requests,
         requests,
+        note: None,
     })
 }
 
@@ -924,5 +1249,208 @@ mod tests {
         assert!(safe_id("0f8e2c5a-1b2c-4d5e-8f90-123456789abc"));
         assert!(!safe_id("x & calc"));
         assert!(!safe_id(""));
+    }
+
+    /* ------------------------------ ZCode 库型来源 ------------------------------ */
+
+    const ZSESSION: &str = "session_fixture";
+
+    /// 内存里的小 sqlite：只建 ZCode 的 session / message / part 三张表和两条索引，
+    /// 断言不依赖本机那份 477 MB 的库。
+    fn zcode_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT NOT NULL DEFAULT '', directory TEXT NOT NULL DEFAULT '');
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
+             CREATE INDEX message_session_sequence_idx ON message(session_id, sequence, time_created, id);
+             CREATE INDEX part_message_sequence_idx ON part(message_id, sequence, time_created, id);",
+        ).unwrap();
+        conn
+    }
+
+    fn zcode_message_row(conn: &Connection, id: &str, sequence: i64, ts: i64, data: &str) {
+        conn.execute(
+            "INSERT INTO message(id, session_id, time_created, time_updated, data, sequence) VALUES(?1, ?2, ?3, ?3, ?4, ?5)",
+            rusqlite::params![id, ZSESSION, ts, data, sequence],
+        ).unwrap();
+    }
+
+    fn zcode_part_row(conn: &Connection, id: &str, message: &str, sequence: i64, data: &str) {
+        conn.execute(
+            "INSERT INTO part(id, message_id, session_id, time_created, time_updated, data, sequence) VALUES(?1, ?2, ?3, 0, 0, ?4, ?5)",
+            rusqlite::params![id, message, ZSESSION, data, sequence],
+        ).unwrap();
+    }
+
+    fn jolu_store() -> Connection {
+        crate::db::open(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn zcode_stream_keeps_text_reasoning_tools_and_hides_injected_messages() {
+        let zdb = zcode_fixture();
+        zcode_message_row(&zdb, "m1", 0, 1_000, r#"{"role":"user","time":{"created":1000},"semantics":{"uiVisibility":"visible","transcriptVisibility":"visible"}}"#);
+        zcode_part_row(&zdb, "m1p1", "m1", 0, r#"{"type":"text","text":"把列表和详情放在同一页"}"#);
+        // 系统提醒：模型可见、记录里不可见，不显示
+        zcode_message_row(&zdb, "m2", 1, 1_100, r#"{"role":"user","time":{"created":1100},"synthetic":true,"metadata":{"visibility":"model-only"},"semantics":{"uiVisibility":"hidden","transcriptVisibility":"hidden"}}"#);
+        zcode_part_row(&zdb, "m2p1", "m2", 0, r#"{"type":"text","text":"agent_listing_delta"}"#);
+        zcode_message_row(&zdb, "m3", 2, 1_200, r#"{"role":"assistant","time":{"created":1200,"completed":1500},"modelId":"GLM-5.3","providerId":"account:zai-start-plan","cost":0.5,"tokens":{"total":120,"input":100,"output":20,"reasoning":5,"cache":{"read":30,"write":0}}}"#);
+        zcode_part_row(&zdb, "m3p1", "m3", 0, r#"{"type":"step-start"}"#);
+        zcode_part_row(&zdb, "m3p2", "m3", 1, r#"{"type":"reasoning","text":"先看现状再改"}"#);
+        zcode_part_row(&zdb, "m3p3", "m3", 2, r#"{"type":"text","text":"已整理为左右分栏"}"#);
+        zcode_part_row(&zdb, "m3p4", "m3", 3, r#"{"type":"tool","callID":"call_1","tool":"Bash","state":{"status":"completed","input":{"command":"rg SessionList"},"output":"3 matches"}}"#);
+        zcode_part_row(&zdb, "m3p5", "m3", 4, r#"{"type":"tool","callID":"call_2","tool":"Read","state":{"status":"error","input":{"file_path":"src/a.ts"},"output":"ENOENT"}}"#);
+
+        let stream = zcode_load(&zdb, ZSESSION, VIEW, ZCODE_PART_LIMIT).unwrap();
+        assert!(!stream.truncated);
+        assert_eq!(stream.skipped, 0);
+        assert_eq!(stream.messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["user", "assistant"]);
+        assert_eq!(stream.messages[0].text, "把列表和详情放在同一页");
+        let assistant = &stream.messages[1];
+        assert_eq!(assistant.ts, Some(1_200));
+        assert_eq!(assistant.text, "已整理为左右分栏");
+        assert_eq!(assistant.reasoning.as_deref(), Some("先看现状再改"));
+        assert_eq!(assistant.model.as_deref(), Some("GLM-5.3"));
+        assert_eq!(assistant.provider.as_deref(), Some("account:zai-start-plan"));
+        assert_eq!(assistant.cost, Some(0.5));
+        let tokens = assistant.tokens.as_ref().unwrap();
+        assert_eq!((tokens.total, tokens.input, tokens.cache_read), (Some(120), Some(100), Some(30)));
+        let tools = &assistant.tools;
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Bash", "Read"]);
+        assert_eq!((tools[0].summary.as_str(), tools[0].output.as_deref(), tools[0].failed), ("rg SessionList", Some("3 matches"), Some(false)));
+        assert_eq!((tools[1].failed, tools[1].output.as_deref()), (Some(true), Some("ENOENT")));
+        assert_eq!(tools[1].paths, vec!["src/a.ts".to_string()]);
+    }
+
+    #[test]
+    fn zcode_tokens_fall_back_to_step_finish_parts() {
+        let zdb = zcode_fixture();
+        // 消息级没有 tokens / cost 时用 step-finish 结算节点累加，仍缺失就是 None
+        zcode_message_row(&zdb, "m1", 0, 1_000, r#"{"role":"assistant","modelId":"GLM-5.3"}"#);
+        zcode_part_row(&zdb, "m1p1", "m1", 0, r#"{"type":"text","text":"第一段"}"#);
+        zcode_part_row(&zdb, "m1p2", "m1", 1, r#"{"type":"step-finish","cost":0.25,"tokens":{"total":10,"input":8,"output":2,"cache":{"read":4,"write":0}}}"#);
+        zcode_part_row(&zdb, "m1p3", "m1", 2, r#"{"type":"step-finish","cost":0.75,"tokens":{"total":20,"input":16,"output":4,"cache":{"read":0,"write":0}}}"#);
+        let stream = zcode_load(&zdb, ZSESSION, VIEW, ZCODE_PART_LIMIT).unwrap();
+        let message = &stream.messages[0];
+        let tokens = message.tokens.as_ref().expect("step-finish 应能累加 tokens");
+        assert_eq!((tokens.total, tokens.input, tokens.output, tokens.cache_read), (Some(30), Some(24), Some(6), Some(4)));
+        assert_eq!(message.cost, Some(1.0));
+    }
+
+    #[test]
+    fn zcode_part_budget_keeps_the_newest_messages_and_flags_truncation() {
+        let zdb = zcode_fixture();
+        for i in 0..3i64 {
+            let id = format!("m{i}");
+            zcode_message_row(&zdb, &id, i, 1_000 + i, r#"{"role":"user"}"#);
+            zcode_part_row(&zdb, &format!("{id}p0"), &id, 0, &format!(r#"{{"type":"text","text":"消息 {i} 前半"}}"#));
+            zcode_part_row(&zdb, &format!("{id}p1"), &id, 1, &format!(r#"{{"type":"text","text":"消息 {i} 后半"}}"#));
+        }
+        let stream = zcode_load(&zdb, ZSESSION, VIEW, 2).unwrap();
+        assert!(stream.truncated, "超过 part 上限要标记截断");
+        assert_eq!(stream.messages.len(), 1, "截断时保留最近的会话尾巴");
+        assert_eq!(stream.messages[0].text, "消息 2 前半\n\n消息 2 后半");
+
+        let jolu = jolu_store();
+        let page = zcode_page_with(&jolu, Some(&zdb), ZSESSION, None, 40, 2).unwrap();
+        assert!(page.available);
+        assert_eq!(page.messages.len(), 1);
+        assert!(page.note.as_deref().is_some_and(|note| note.contains("只解析了本会话最近")), "截断必须在页面上标注");
+    }
+
+    #[test]
+    fn zcode_single_oversized_message_still_shows_its_latest_parts() {
+        let zdb = zcode_fixture();
+        // 一条消息自己就超过上限：留下它最近的 part，而不是让最新一次对话整段消失
+        zcode_message_row(&zdb, "m1", 0, 1_000, r#"{"role":"user"}"#);
+        for i in 0..4i64 {
+            zcode_part_row(&zdb, &format!("p{i}"), "m1", i, &format!(r#"{{"type":"text","text":"段 {i}"}}"#));
+        }
+        let stream = zcode_load(&zdb, ZSESSION, VIEW, 2).unwrap();
+        assert!(stream.truncated);
+        assert_eq!(stream.messages.len(), 1);
+        assert_eq!(stream.messages[0].text, "段 2\n\n段 3");
+    }
+
+    #[test]
+    fn zcode_malformed_rows_degrade_instead_of_failing_the_page() {
+        let zdb = zcode_fixture();
+        zcode_message_row(&zdb, "bad", 0, 1_000, "{not json");
+        zcode_message_row(&zdb, "m1", 1, 1_100, r#"{"role":"user"}"#);
+        zcode_part_row(&zdb, "m1p1", "m1", 0, r#"{"type":"text","text":"还能打开"}"#);
+        zcode_message_row(&zdb, "m2", 2, 1_200, r#"{"role":"user"}"#);
+        // 单条 part 坏掉只丢这一条，不影响同一条消息的其他内容和整页
+        zcode_part_row(&zdb, "m2p1", "m2", 0, "not json either");
+        zcode_part_row(&zdb, "m2p2", "m2", 1, r#"{"type":"text","text":"好的"}"#);
+
+        let jolu = jolu_store();
+        let page = zcode_page_with(&jolu, Some(&zdb), ZSESSION, None, 40, ZCODE_PART_LIMIT).unwrap();
+        assert!(page.available);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.messages[0].text, "还能打开");
+        assert_eq!(page.messages[1].text, "好的");
+        assert!(page.note.as_deref().is_some_and(|note| note.contains("格式无法解析")));
+    }
+
+    #[test]
+    fn zcode_without_a_readable_database_reports_usage_only() {
+        let jolu = jolu_store();
+        // 库不存在（未安装 / 已删除）：降级为「仅用量」，不是错误页
+        let page = zcode_page(&jolu, None, "session_missing", None, 40).unwrap();
+        assert!(!page.available);
+        assert_eq!(page.total, 0);
+        assert!(page.messages.is_empty());
+        assert!(page.note.is_none());
+        // 结构漂移（旧版本库缺少列）：同样降级，不 panic、不猜列名
+        let odd = Connection::open_in_memory().unwrap();
+        odd.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY)").unwrap();
+        let page = zcode_page(&jolu, Some(&odd), "session_missing", None, 40).unwrap();
+        assert!(!page.available);
+    }
+
+    /// 真实库的只读冒烟：只在显式执行时跑，断言不依赖具体对话内容，也不写任何文件
+    #[test]
+    #[ignore = "需要本机 ZCode 会话库；仅显式只读执行"]
+    fn zcode_local_database_readonly_smoke() {
+        assert!(zcode_db_path().is_some_and(|path| path.is_file()), "未找到 ZCode 会话库");
+        let zdb = open_zcode_db().expect("ZCode 会话库应能以只读方式打开");
+        assert!(zcode_schema_ok(&zdb), "本机库结构应与探测一致");
+        let raw: String = zdb
+            .query_row("SELECT id FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC LIMIT 1", [], |r| r.get(0))
+            .expect("本机应有根会话");
+        // 走真实入口：Jolu 的 session_id 带 `native:zcode:main:` 前缀，必须能还原成原库的裸 id
+        let jolu = jolu_store();
+        let session_id = format!("native:zcode:main:{raw}");
+        let started = std::time::Instant::now();
+        let page = messages(&jolu, "zcode", &session_id, None, 40).unwrap();
+        let elapsed = started.elapsed().as_millis();
+        println!("zcode read-only: available={} total={} page={} note={} elapsed_ms={elapsed}",
+            page.available, page.total, page.messages.len(), page.note.is_some());
+        assert!(page.available, "本机库应可只读解析");
+        assert!(!page.messages.is_empty(), "最近的根会话应有可读正文");
+        // 477 MB 的库单会话最多 14,404 条 part；按会话 id 走索引解析必须远低于一次全量扫描
+        assert!(elapsed < 5_000, "单会话解析耗时过长：{elapsed} ms");
+    }
+
+    #[test]
+    fn zcode_session_ids_keep_the_collector_prefix_but_query_by_raw_id() {
+        assert_eq!(zcode_raw_session_id("native:zcode:main:sess_0a15"), "sess_0a15");
+        assert_eq!(zcode_raw_session_id("native:zcode:ai:session_6b90"), "session_6b90");
+        // 已经是裸 id 时不改动
+        assert_eq!(zcode_raw_session_id("sess_0a15"), "sess_0a15");
+        let children: HashSet<String> = ["sess_child".to_string()].into_iter().collect();
+        assert!(zcode_child_session(Some(&children), "zcode", "native:zcode:main:sess_child"));
+    }
+
+    #[test]
+    fn zcode_child_sessions_are_not_listed_as_main_sessions() {
+        let children: HashSet<String> = ["session_child".to_string()].into_iter().collect();
+        assert!(zcode_child_session(Some(&children), "zcode", "session_child"));
+        assert!(!zcode_child_session(Some(&children), "zcode", "session_root"));
+        // 只按平台过滤，其他来源的同名 id 不受影响
+        assert!(!zcode_child_session(Some(&children), "claude", "session_child"));
+        // 库不可读时不过滤，宁可多显示也不要吞掉真实会话
+        assert!(!zcode_child_session(None, "zcode", "session_child"));
     }
 }

@@ -8,6 +8,7 @@
 //! | MiniMax 中/国际 | GET {api.minimaxi.com\|api.minimax.io}/v1/api/openplatform/coding_plan/remains | Bearer | 5h + 周(激活时) |
 //! | ZenMux | GET {base_url}（base 即用量端点） | Bearer | 5h + 7d（带美元） |
 //! | OpenCode Go | GET opencode.ai/zen/go/v1/usage | Bearer | rolling(5h) + 周 + 月 |
+//! | ZCode 账号额度 | GET zcode.z.ai/api/v1/zcode-plan/billing/balance | Bearer（ZCode 客户端 JWT）+ `X-Device-Mid` | 来源 `data.balances[]` 的每个 bucket 一个窗口 |
 //! | 火山方舟 | 需要控制面 AK/SK，Jolu 不保存此类凭证 | — | 不支持查询 |
 //!
 //! 纪律与 [`crate::quota`] 一致：只读、15 秒超时、禁止重定向、五态区分。
@@ -21,7 +22,7 @@ pub(crate) const W7D: (&str, &str) = ("7d", "周额度");
 pub(crate) const W30D: (&str, &str) = ("30d", "月额度");
 pub(crate) const WCREDITS: (&str, &str) = ("credits", "Grok 积分额度");
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlanProvider {
     Kimi,
     ZhipuCn,
@@ -189,12 +190,12 @@ pub(crate) fn parse_zhipu_windows(data: &serde_json::Value) -> (Vec<QuotaWindow>
     (windows, level)
 }
 
-fn business_code(value: Option<&serde_json::Value>) -> Option<i64> {
+pub(crate) fn business_code(value: Option<&serde_json::Value>) -> Option<i64> {
     value.and_then(|value| value.as_i64().or_else(|| value.as_str()?.trim().parse().ok()))
 }
 
 /// 上游错误文本可能回显凭证，只向界面返回固定文案和安全的数字业务码。
-fn business_failure(provider: &str, code: Option<&serde_json::Value>) -> QuotaState {
+pub(crate) fn business_failure(provider: &str, code: Option<&serde_json::Value>) -> QuotaState {
     let reason = match business_code(code) {
         Some(code) => format!("{provider} 套餐接口错误（业务码 {code}）"),
         None => format!("{provider} 套餐接口返回业务错误"),
@@ -244,6 +245,173 @@ fn query_zhipu(base_url: &str, api_key: &str) -> QuotaState {
         Err(e) if e.is_timeout() => QuotaState::Failed { reason: "智谱套餐查询超时（15 秒）".into() },
         Err(_) => QuotaState::Failed { reason: "智谱套餐查询失败，请检查网络后刷新".into() },
     }
+}
+
+/* ─────────────────────── ZCode 账号额度 ─────────────────────── */
+
+/// ZCode 账号额度（`GET https://zcode.z.ai/api/v1/zcode-plan/billing/balance`）。
+///
+/// **一个 bucket 就是一个额度窗口**：同一个 plan 下可能并存多个按模型分开的 bucket
+/// （实测 `GLM-5.3` 约 300 万 token/日、`GLM-5.3-Flash` 约 500 万 token/日），
+/// 所以去重键必须落在 `bucket_id` / `entitlement_id` 上，不能按 plan 或按窗口名合并。
+#[derive(Debug, Default)]
+pub(crate) struct ZcodePlanBalance {
+    pub(crate) windows: Vec<QuotaWindow>,
+    /// `plans[].name` 原样透传（如 `ZCode Start Plan`），不由用量推断档位。
+    pub(crate) plan: Option<String>,
+    /// `plans[].status` 原样（active / expired / …），界面口径由调用方映射。
+    pub(crate) plan_status: Option<String>,
+    /// `plans[].ends_at`（unix 秒）→ RFC3339。
+    pub(crate) plan_ends_at: Option<String>,
+    /// `data.server_time`（unix 秒）→ RFC3339，作为观测时间。
+    pub(crate) observed_at: Option<String>,
+}
+
+/// `code 0` 之后的三种情形必须分开，任何两种都不能合并：
+/// 有额度 / 成功但没有额度数据 / 形态不认识（算查询失败）。
+#[derive(Debug)]
+pub(crate) enum ZcodePlanBalanceOutcome {
+    Parsed(ZcodePlanBalance),
+    /// `data` 缺失、为 `null` 或为空对象：查询成功，但来源没有给额度数据。
+    /// 这既不是查询失败，也不是真实用量的 0%。
+    NoQuotaData,
+    /// `data` / `plans` / `balances` 的类型不是约定形态：按查询失败上报。
+    Malformed(String),
+}
+
+/// 数值字段既可能是数字，也可能是数字字符串；非有限值一律当未提供。
+fn json_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+    let number = match value? {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }?;
+    (number.is_finite() && number >= 0.0).then_some(number)
+}
+
+/// 秒 / 毫秒时间戳（数字或数字字符串）→ RFC3339；≤0 或不可解析视为未提供。
+fn unix_time_iso(value: Option<&serde_json::Value>) -> Option<String> {
+    let number = match value? {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }?;
+    if !number.is_finite() || number <= 0.0 {
+        return None;
+    }
+    let millis = if number < 1_000_000_000_000.0 { (number * 1000.0).round() } else { number.round() };
+    millis_to_iso(millis as i64)
+}
+
+/// 取一个非空字符串字段（去首尾空白）；空串等同缺失。
+fn text_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key).and_then(|value| value.as_str()).map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned)
+}
+
+/// 数值文案：整数不带小数点，小数最多两位且不留尾随 0。
+fn quantity(value: f64) -> String {
+    if (value.fract()).abs() < 1e-9 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}").trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// `plans[].entitlements[]` 按 `entitlement_id` 建索引：balance 条目本身没有
+/// `show_name` / `unit_type` 时回填，避免窗口标题退化成编号。
+fn entitlement_index(plans: Option<&serde_json::Value>) -> std::collections::HashMap<&str, &serde_json::Value> {
+    let mut index = std::collections::HashMap::new();
+    for plan in plans.and_then(|value| value.as_array()).into_iter().flatten() {
+        for entitlement in plan.get("entitlements").and_then(|value| value.as_array()).into_iter().flatten() {
+            if let Some(id) = entitlement.get("entitlement_id").and_then(|value| value.as_str()) {
+                index.entry(id).or_insert(entitlement);
+            }
+        }
+    }
+    index
+}
+
+/// 解析 ZCode 账号额度响应体（已通过业务码校验的 `code 0` 响应）。
+pub(crate) fn parse_zcode_plan_balance(body: &serde_json::Value) -> ZcodePlanBalanceOutcome {
+    let Some(data) = body.get("data").filter(|value| !value.is_null()) else {
+        return ZcodePlanBalanceOutcome::NoQuotaData;
+    };
+    let Some(data) = data.as_object() else {
+        return ZcodePlanBalanceOutcome::Malformed("ZCode 额度响应的 data 不是对象".into());
+    };
+    let mut balance = ZcodePlanBalance::default();
+    if let Some(plans) = data.get("plans") {
+        let Some(plans) = plans.as_array() else {
+            return ZcodePlanBalanceOutcome::Malformed("ZCode 额度响应的 plans 不是数组".into());
+        };
+        // 多条 plan 时优先 active，其次第一条；不按名称或优先级猜档位。
+        let chosen = plans
+            .iter()
+            .find(|plan| plan.get("status").and_then(|value| value.as_str()).is_some_and(|status| status.eq_ignore_ascii_case("active")))
+            .or_else(|| plans.first());
+        if let Some(plan) = chosen.filter(|plan| plan.is_object()) {
+            balance.plan = text_field(plan, "name");
+            balance.plan_status = text_field(plan, "status");
+            balance.plan_ends_at = unix_time_iso(plan.get("ends_at"));
+        }
+    }
+    balance.observed_at = unix_time_iso(data.get("server_time"));
+    // 有 plans 没有 balances：套餐在、额度窗口不在，仍是「有额度数据」的一种，交给调用方表达。
+    let Some(balances) = data.get("balances") else { return ZcodePlanBalanceOutcome::Parsed(balance) };
+    let Some(balances) = balances.as_array() else {
+        return ZcodePlanBalanceOutcome::Malformed("ZCode 额度响应的 balances 不是数组".into());
+    };
+    let entitlements = entitlement_index(data.get("plans"));
+    let mut seen = std::collections::HashSet::new();
+    for (index, bucket) in balances.iter().enumerate() {
+        if !bucket.is_object() {
+            continue;
+        }
+        // 去重键：bucket_id 优先，其次 entitlement_id；都缺失时用序号，避免把不同桶并成一行。
+        let key = ["bucket_id", "entitlement_id"]
+            .iter()
+            .find_map(|name| text_field(bucket, *name))
+            .unwrap_or_else(|| format!("bucket-{index}"));
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let entitlement = text_field(bucket, "entitlement_id").as_deref().and_then(|id| entitlements.get(id)).copied();
+        let window_name = text_field(bucket, "show_name")
+            .or_else(|| entitlement.and_then(|value| text_field(value, "show_name")))
+            .unwrap_or_else(|| format!("额度窗口 {}", index + 1));
+        let unit = text_field(bucket, "unit_type")
+            .or_else(|| entitlement.and_then(|value| text_field(value, "unit_type")));
+        let suffix = unit.map(|unit| format!(" {unit}")).unwrap_or_default();
+        let used = json_f64(bucket.get("used_units"));
+        let total = json_f64(bucket.get("total_units"));
+        // total_units 为 0 或缺总量时百分比是「未知」，不能 clamp 成 0%（那不是真实用量）。
+        let used_percent = match (used, total) {
+            (Some(used), Some(total)) if total > 0.0 => Some(used / total * 100.0),
+            _ => None,
+        };
+        let amount_text = match (used, total) {
+            (Some(used), Some(total)) if total > 0.0 => Some(format!("{} / {}{suffix}", quantity(used), quantity(total))),
+            _ => None,
+        };
+        let remaining_text = match (json_f64(bucket.get("remaining_units")), json_f64(bucket.get("available_units"))) {
+            // 剩余与可用不同时两个都给，界面才不用在两者之间二选一。
+            (Some(remaining), Some(available)) if (remaining - available).abs() > f64::EPSILON => {
+                Some(format!("剩余 {}{suffix}（可用 {}）", quantity(remaining), quantity(available)))
+            }
+            (Some(remaining), _) => Some(format!("剩余 {}{suffix}", quantity(remaining))),
+            (None, Some(available)) => Some(format!("可用 {}{suffix}", quantity(available))),
+            _ => None,
+        };
+        balance.windows.push(QuotaWindow {
+            key,
+            window_name,
+            used_percent,
+            amount_text,
+            remaining_text,
+            resets_at: unix_time_iso(bucket.get("period_end")),
+        });
+    }
+    ZcodePlanBalanceOutcome::Parsed(balance)
 }
 
 /* ─────────────────────── Kimi For Coding ─────────────────────── */
@@ -838,5 +1006,158 @@ mod tests {
             }
             println!("plan={plan:?}");
         }
+    }
+
+    /* ------------------- ZCode 账号额度（离线夹具） ------------------- */
+
+    fn iso(seconds: i64) -> String {
+        chrono::DateTime::from_timestamp(seconds, 0).unwrap().to_rfc3339()
+    }
+
+    /// 实测形态（2026-11-05）：`GLM-5.3` 300 万 token/日已用 0、`GLM-5.3-Flash`
+    /// 500 万 token/日已用 100 万，两条 bucket 属于同一个 plan。
+    fn zcode_balance_body() -> serde_json::Value {
+        serde_json::json!({
+            "code": 0,
+            "msg": "ok",
+            "logid": "fixture-logid",
+            "data": {
+                "server_time": 1_762_339_200i64,
+                "plans": [{
+                    "user_plan_id": "up-1",
+                    "plan_id": "zcode-v3-start-plan-0817",
+                    "name": "ZCode Start Plan",
+                    "description": "fixture",
+                    "priority": 1,
+                    "status": "active",
+                    "starts_at": 1_762_000_000i64,
+                    "ends_at": 1_762_372_799i64,
+                    "entitlements": [
+                        {"entitlement_id": "ent-1", "show_name": "GLM-5.3", "meter": "model_usage",
+                         "unit_type": "token", "period": "daily", "grant_units": 3_000_000i64, "capabilities": []},
+                        {"entitlement_id": "ent-2", "show_name": "GLM-5.3-Flash", "meter": "model_usage",
+                         "unit_type": "token", "period": "daily", "grant_units": 5_000_000i64, "capabilities": []}
+                    ]
+                }],
+                "balances": [
+                    {"bucket_id": "bkt-1", "user_plan_id": "up-1", "plan_id": "zcode-v3-start-plan-0817",
+                     "entitlement_id": "ent-1", "show_name": "GLM-5.3", "meter": "model_usage", "unit_type": "token",
+                     "priority": 1, "plan_priority": 1, "entitlement_priority": 1,
+                     "total_units": 3_000_000i64, "used_units": 0, "remaining_units": 3_000_000i64,
+                     "available_units": 3_000_000i64,
+                     "period_start": 1_762_300_000i64, "period_end": 1_762_339_199i64},
+                    {"bucket_id": "bkt-2", "user_plan_id": "up-1", "plan_id": "zcode-v3-start-plan-0817",
+                     "entitlement_id": "ent-2", "show_name": "GLM-5.3-Flash", "meter": "model_usage", "unit_type": "token",
+                     "priority": 2, "plan_priority": 1, "entitlement_priority": 2,
+                     "total_units": 5_000_000i64, "used_units": 1_000_000i64, "remaining_units": 4_000_000i64,
+                     "available_units": 3_500_000i64,
+                     "period_start": 1_762_300_000i64, "period_end": 1_762_339_199i64}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn zcode_balance_maps_every_bucket_with_plan_and_reset() {
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&zcode_balance_body()) else {
+            panic!("实测形态必须解析成功");
+        };
+        assert_eq!(balance.plan.as_deref(), Some("ZCode Start Plan"));
+        assert_eq!(balance.plan_status.as_deref(), Some("active"));
+        assert_eq!(balance.plan_ends_at.as_deref(), Some(iso(1_762_372_799).as_str()));
+        assert_eq!(balance.observed_at.as_deref(), Some(iso(1_762_339_200).as_str()));
+        assert_eq!(balance.windows.len(), 2, "两个 bucket 不能被合并成一个窗口");
+        // 真实 0：已用 0 不等于未知，进度条要能画在 0%
+        assert_eq!(balance.windows[0].key, "bkt-1");
+        assert_eq!(balance.windows[0].window_name, "GLM-5.3");
+        assert_eq!(balance.windows[0].used_percent, Some(0.0));
+        assert_eq!(balance.windows[0].amount_text.as_deref(), Some("0 / 3000000 token"));
+        assert_eq!(balance.windows[0].remaining_text.as_deref(), Some("剩余 3000000 token"));
+        assert_eq!(balance.windows[0].resets_at.as_deref(), Some(iso(1_762_339_199).as_str()));
+        assert_eq!(balance.windows[1].key, "bkt-2");
+        assert_eq!(balance.windows[1].used_percent, Some(20.0));
+        // 剩余与可用不同时两个都写出来，界面不用二选一
+        assert_eq!(balance.windows[1].remaining_text.as_deref(), Some("剩余 4000000 token（可用 3500000）"));
+    }
+
+    #[test]
+    fn zcode_balance_zero_total_is_unknown_not_zero_percent() {
+        let body = serde_json::json!({"code":0,"data":{"balances":[
+            {"bucket_id":"bkt-zero","show_name":"GLM-5.3","unit_type":"token",
+             "total_units":0,"used_units":0,"remaining_units":0,"available_units":0}
+        ]}});
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&body) else { panic!("应解析成功") };
+        assert_eq!(balance.windows.len(), 1);
+        // total_units=0 → 未知（不画条），既不是 0% 也不是满格
+        assert_eq!(balance.windows[0].used_percent, None);
+        assert_eq!(balance.windows[0].amount_text, None);
+        assert_eq!(balance.windows[0].remaining_text.as_deref(), Some("剩余 0 token"));
+        // 总量缺失同样是未知
+        let body = serde_json::json!({"code":0,"data":{"balances":[{"bucket_id":"bkt-x","used_units":10}]}});
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&body) else { panic!("应解析成功") };
+        assert_eq!(balance.windows[0].used_percent, None);
+        assert_eq!(balance.windows[0].window_name, "额度窗口 1", "无名称时用序号，不退化成空标题");
+    }
+
+    #[test]
+    fn zcode_balance_keeps_sibling_buckets_and_dedupes_repeats() {
+        let body = serde_json::json!({"code":0,"data":{"balances":[
+            {"bucket_id":"bkt-a","entitlement_id":"ent-shared","show_name":"GLM-5.3","total_units":100,"used_units":10},
+            {"bucket_id":"bkt-b","entitlement_id":"ent-shared","show_name":"GLM-5.3","total_units":200,"used_units":50},
+            {"bucket_id":"bkt-a","entitlement_id":"ent-shared","show_name":"GLM-5.3","total_units":999,"used_units":999},
+            {"entitlement_id":"ent-only","show_name":"GLM-5.3-Flash","total_units":10,"used_units":1}
+        ]}});
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&body) else { panic!("应解析成功") };
+        let keys: Vec<&str> = balance.windows.iter().map(|window| window.key.as_str()).collect();
+        // 同一 entitlement 的两个 bucket 各成一行；重复的 bucket_id 只留第一条；缺 bucket_id 时退回 entitlement_id
+        assert_eq!(keys, vec!["bkt-a", "bkt-b", "ent-only"]);
+        assert_eq!(balance.windows[0].used_percent, Some(10.0));
+        assert_eq!(balance.windows[1].used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn zcode_balance_separates_no_data_from_unrecognised_shape() {
+        // data 缺失 / null：成功但没有额度数据
+        assert!(matches!(parse_zcode_plan_balance(&serde_json::json!({"code":0})), ZcodePlanBalanceOutcome::NoQuotaData));
+        assert!(matches!(parse_zcode_plan_balance(&serde_json::json!({"code":0,"data":null})), ZcodePlanBalanceOutcome::NoQuotaData));
+        // data 是空对象：也不是失败，只是没有窗口
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&serde_json::json!({"code":0,"data":{}})) else {
+            panic!("空 data 不应算查询失败");
+        };
+        assert!(balance.windows.is_empty());
+        assert!(balance.plan.is_none() && balance.observed_at.is_none(), "没有数据就不编造套餐与观测时间");
+        // 形态不认识 → 查询失败
+        for body in [
+            serde_json::json!({"code":0,"data":[]}),
+            serde_json::json!({"code":0,"data":{"balances":"nope"}}),
+            serde_json::json!({"code":0,"data":{"plans":"nope"}}),
+        ] {
+            assert!(matches!(parse_zcode_plan_balance(&body), ZcodePlanBalanceOutcome::Malformed(_)), "应判为形态不认识：{body}");
+        }
+        // 数组里的非对象条目跳过，不影响其他桶
+        let body = serde_json::json!({"code":0,"data":{"balances":[null,"x",{"bucket_id":"bkt-ok"}]}});
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&body) else { panic!("应解析成功") };
+        assert_eq!(balance.windows.len(), 1);
+    }
+
+    #[test]
+    fn zcode_balance_falls_back_to_entitlement_metadata_and_string_numbers() {
+        let body = serde_json::json!({"code":0,"data":{
+            "plans":[{"name":"ZCode Start Plan","status":"expired","entitlements":[
+                {"entitlement_id":"ent-1","show_name":"GLM-5.3 日额度","unit_type":"token"}
+            ]}],
+            "balances":[{"bucket_id":"bkt-1","entitlement_id":"ent-1",
+                "total_units":"1000000","used_units":"250000","remaining_units":"750000",
+                "period_end":"1762339199"}]
+        }});
+        let ZcodePlanBalanceOutcome::Parsed(balance) = parse_zcode_plan_balance(&body) else { panic!("应解析成功") };
+        // balance 条目没有 show_name / unit_type 时回填 entitlement 的定义
+        assert_eq!(balance.windows[0].window_name, "GLM-5.3 日额度");
+        assert_eq!(balance.windows[0].used_percent, Some(25.0));
+        assert_eq!(balance.windows[0].amount_text.as_deref(), Some("250000 / 1000000 token"));
+        assert_eq!(balance.windows[0].resets_at.as_deref(), Some(iso(1_762_339_199).as_str()));
+        // 数字字符串与匹配 active 之外的 plan：只透传状态，不猜档位
+        assert_eq!(balance.plan_status.as_deref(), Some("expired"));
+        assert_eq!(balance.plan.as_deref(), Some("ZCode Start Plan"));
     }
 }

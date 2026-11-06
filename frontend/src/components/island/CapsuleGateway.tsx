@@ -3,21 +3,18 @@ import { api, isTauri } from "@/lib/api"
 import { agentLabel } from "@/lib/gatewayPage"
 import { formatDuration, rejectReason, type ActiveRelay, type ActivityState } from "@/lib/gatewayActivity"
 import type { GatewayStatusDto, WiringStatusDto } from "@/lib/gatewayApi"
+import { AGENT_PLATFORMS } from "@/lib/providers/registry"
 import { cn } from "@/lib/utils"
-import type { PlatformId } from "@/types"
 
 /**
  * 胶囊灵动岛的模型入口部分（Jolu.pen A3-7 / A3-8，设计说明 §8.2）。
  * 只在转发模式且监听已启动时出现；观测模式或关闭时一个元素都不画。
+ *
+ * Agent → 平台的标识映射在 `lib/providers/registry.ts`：组件里不再写平台字面量。
  */
 
-/** Agent → 平台标识；没有官方标识的用首字母 */
-const AGENT_LOGO: Record<string, PlatformId> = {
-  "claude-code": "claude", codex: "codex", gemini: "gemini", opencode: "opencode", zcode: "zcode",
-}
-
 export function AgentAvatar({ agent, size, className, dot }: { agent: string | null; size: number; className?: string; dot?: boolean }) {
-  const platform = agent ? AGENT_LOGO[agent] : undefined
+  const platform = agent ? AGENT_PLATFORMS[agent] : undefined
   return (
     <span className={cn("cap-av", className)} title={agent ? agentLabel(agent) : "未知 Agent"}>
       {platform ? <PlatformLogo platform={platform} size={size} /> : <span className="cap-av-letter" style={{ fontSize: size * 0.75 }}>{agent ? agent.charAt(0).toUpperCase() : "?"}</span>}

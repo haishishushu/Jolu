@@ -4,13 +4,19 @@ import { compactTokens } from "@/lib/api"
 import { useLiveCount } from "@/lib/liveCounts"
 import { useGaze } from "@/hooks/useGaze"
 import { gazeAmp, gazeBase } from "@/lib/botGaze"
+import { tickRingMarker, tickRingSegments } from "@/lib/quotaRings"
 import { formatShort, tickerNext, tickerStart, type TickerFace } from "@/lib/tokenTicker"
 import type { BotExpr } from "@/lib/botExpression"
+import type { RingGeometry } from "@/lib/providers/types"
 
 /**
  * 胶囊灵动岛的 bot：脸、眼睛、额度环（Jolu.pen A3-5 / A3-6，设计说明 §6）。
  * props 只收数据，不读全局状态；眼睛跟随与 Token 轮播都在内部直接改 DOM / 定时器，
  * 不让灵动岛每帧重渲染。
+ *
+ * 额度环有两种几何，由环自己带 `geometry`（`lib/quotaRings.ts` 按窗口声明给出）：
+ * `arc` 弧段环（5h / 7d）、`ticks` 24 段刻度环（日额度 / 积分桶，A3-13 / A3-14）。
+ * 弧段环的半径、线宽、颜色、起点、方向与改造前逐字一致，刻度环只是多出来的分支。
  */
 const W = "#FFFFFF"
 interface EyeStyle { k: string; c: string; g: string; R?: string; h?: number; s?: number; dy?: number; cls?: string }
@@ -90,6 +96,48 @@ function Eye({ kind, cx, cy, F, e, flip }: { kind: string; cx: number; cy: numbe
   return null
 }
 
+/**
+ * 24 段刻度环（Jolu.pen A3-13 / A3-14）：24 段矩形、每段 15°、放射状摆放，
+ * 12 点方向的起点标记点标出填充方向。几何参数全部在 `lib/quotaRings.ts`：
+ * 32px 外径 + 环宽 2 时是「半径 15、线宽 1.44、段长 2.6、标记 1.6」，与画板一致。
+ *
+ * 0% 画成全轨道（24 段轨道色 + 起点标记），100% 整圈点亮——两者可区分，
+ * 未知（没有百分比）由上游直接不给环，不会落到这里冒充 0%。
+ */
+function TickRing({ size, radius, ringWidth, percent, color, warn, dimmed }: {
+  size: number
+  /** 段中心所在半径（与弧段环同一套公式，最内侧就是最内圈） */
+  radius: number
+  /** 该环的线宽，聚光时已按 1.35 放大 */
+  ringWidth: number
+  percent: number | null
+  color: string
+  warn: boolean
+  dimmed: boolean
+}) {
+  const segments = tickRingSegments({ size, radius, ringWidth, percent })
+  const marker = tickRingMarker({ size, radius, ringWidth })
+  const ticks = segments.map((segment, index) => ({ segment, index }))
+  return (
+    <>
+      {ticks.filter(({ segment }) => !segment.on).map(({ segment, index }) => (
+        <rect key={`off-${index}`} x={n(segment.x)} y={n(segment.y)} width={n(segment.width)} height={n(segment.height)}
+          rx={n(segment.width / 2)} fill="var(--pn-capsule-track)" style={{ opacity: dimmed ? 0.5 : 1 }}
+          transform={`rotate(${n(segment.angle)} ${n(segment.cx)} ${n(segment.cy)})`} />
+      ))}
+      {/* 点亮段合成一组：≥80% 的呼吸动画（.cbot-breathe .cbot-warn-ring）只作用在一个元素上 */}
+      <g className={cn(warn && "cbot-warn-ring")} style={{ opacity: dimmed ? 0.3 : 1 }}>
+        {ticks.filter(({ segment }) => segment.on).map(({ segment, index }) => (
+          <rect key={`on-${index}`} x={n(segment.x)} y={n(segment.y)} width={n(segment.width)} height={n(segment.height)}
+            rx={n(segment.width / 2)} fill={color}
+            transform={`rotate(${n(segment.angle)} ${n(segment.cx)} ${n(segment.cy)})`} />
+        ))}
+      </g>
+      <circle cx={n(marker.cx)} cy={n(marker.cy)} r={n(marker.r)} fill="var(--pn-capsule-text-3)" style={{ opacity: dimmed ? 0.5 : 1 }} />
+    </>
+  )
+}
+
 /** 逐帧 Token 数：叶子组件订阅，追数时只有这里重渲染 */
 function LiveText({ countKey, short, ...rest }: { countKey: string; short: boolean } & React.SVGProps<SVGTextElement>) {
   const value = useLiveCount(countKey) ?? 0
@@ -99,6 +147,8 @@ function LiveText({ countKey, short, ...rest }: { countKey: string; short: boole
 export interface BotRing {
   /** 已用百分比；未知为 null，只画空轨道 */
   p: number | null
+  /** 环几何：弧段环 / 刻度环（由 `lib/quotaRings.ts` 按窗口声明给出，不再按平台） */
+  geometry: RingGeometry
   /** CSS 颜色，如 var(--pn-capsule-green) */
   color: string
   warn?: boolean
@@ -198,6 +248,8 @@ export function Bot({
     const p = ring.p === null ? 0 : Math.max(0, Math.min(100, ring.p)) / 100
     const dimmed = focus != null && focus !== i
     const w = focus === i ? ringWidth * 1.35 : ringWidth
+    // 几何只看环自己的声明：弧段环走改造前的 ellipse，刻度环走 A3-13 的 24 段
+    const ticks = ring.geometry === "ticks"
     return (
       <g
         key={i}
@@ -213,11 +265,19 @@ export function Bot({
           },
         } : {})}
       >
-        <circle className="cbot-ring-track" cx={c} cy={c} r={n(r)} fill="none" stroke="var(--pn-capsule-track)" strokeWidth={w} style={{ opacity: dimmed ? 0.5 : 1 }} />
-        <circle className={cn("cbot-ring-arc", ring.warn && "cbot-warn-ring")} cx={c} cy={c} r={n(r)} fill="none" stroke={ring.color} strokeWidth={w}
-          strokeLinecap="round" strokeDasharray={n(C)} strokeDashoffset={n(C * (1 - p))} transform={`rotate(-90 ${c} ${c})`}
-          style={{ opacity: p <= 0 ? 0 : dimmed ? 0.3 : 1 }} />
-        {i === 0 && (
+        {ticks ? (
+          <TickRing size={size} radius={r} ringWidth={w} percent={ring.p} color={ring.color}
+            warn={Boolean(ring.warn)} dimmed={dimmed} />
+        ) : (
+          <>
+            <circle className="cbot-ring-track" cx={c} cy={c} r={n(r)} fill="none" stroke="var(--pn-capsule-track)" strokeWidth={w} style={{ opacity: dimmed ? 0.5 : 1 }} />
+            <circle className={cn("cbot-ring-arc", ring.warn && "cbot-warn-ring")} cx={c} cy={c} r={n(r)} fill="none" stroke={ring.color} strokeWidth={w}
+              strokeLinecap="round" strokeDasharray={n(C)} strokeDashoffset={n(C * (1 - p))} transform={`rotate(-90 ${c} ${c})`}
+              style={{ opacity: p <= 0 ? 0 : dimmed ? 0.3 : 1 }} />
+          </>
+        )}
+        {/* 完成时的外圈高光只属于弧段环：刻度环没有「一圈走完」的轨迹可扫 */}
+        {i === 0 && !ticks && (
           <circle className="cbot-sweep" cx={c} cy={c} r={n(r)} fill="none" stroke="#FFFFFF" strokeWidth={ringWidth} strokeLinecap="round"
             strokeDasharray={`${n(C * 0.1)} ${n(C)}`} transform={`rotate(-90 ${c} ${c})`} style={{ ["--c" as string]: n(C) }} />
         )}

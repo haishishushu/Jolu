@@ -24,6 +24,10 @@ mod tray_icon;
 mod connections;
 mod creds;
 mod cli_switch;
+// 连接归因：把请求指到已存连接上（exact / mapped / platform 三档），见模块头注释
+mod attribution;
+// 连接目录自动回填：把 ZCode provider 规则的 baseUrl / 模型补进已存连接
+mod catalog_backfill;
 mod db;
 mod data_files;
 mod dock;
@@ -387,6 +391,286 @@ mod responsiveness_tests {
     }
 
     #[test]
+    fn native_quota_cache_never_reuses_previous_identity_result() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let identity_now = Mutex::new("identity-a".to_string());
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok(identity_now.lock().unwrap().clone());
+        let query = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: identity_now.lock().unwrap().clone().into(), account: None }
+        };
+        // 本机 ZCode 登录换账号：`local-zcode` 固定 key 也必须跟着身份换结果
+        let first = cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached, identity, query);
+        assert!(matches!(first, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "identity-a"));
+        *identity_now.lock().unwrap() = "identity-b".into();
+        let second = cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached, identity, query);
+        assert!(matches!(second, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "identity-b"), "换身份后不能返回上一个账号的额度");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn native_quota_cache_hits_for_the_same_identity_without_a_second_query() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok("identity-a".to_string());
+        let query = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: Some("identity-a".into()), account: None }
+        };
+        for _ in 0..3 {
+            let state = cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached, identity, query);
+            assert!(matches!(state, quota::QuotaState::Ok { .. }));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "身份相同必须命中缓存，不重复打上游");
+        // 身份相同但显式刷新：仍然重查
+        let forced = cached_native_quota(&cache, "local-zcode".into(), Refresh::Force, identity, query);
+        assert!(matches!(forced, quota::QuotaState::Ok { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn identity_switch_clears_cached_failure_and_backoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let identity_now = Mutex::new("identity-a".to_string());
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok(identity_now.lock().unwrap().clone());
+        let failed = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Failed { reason: "网络失败".into() }
+        };
+        let first = cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached, identity, failed);
+        assert!(matches!(first, quota::QuotaState::Failed { .. }));
+        assert_eq!(cache.state.lock().unwrap().failures.get("local-zcode").copied(), Some(1));
+        // 换身份后：上一个账号的失败结果与退避计数都作废，新账号立刻查询
+        *identity_now.lock().unwrap() = "identity-b".into();
+        let second = cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached, identity, failed);
+        assert!(matches!(second, quota::QuotaState::Failed { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "换身份必须重新查询，不复用上一个账号的失败结果");
+        assert_eq!(cache.state.lock().unwrap().failures.get("local-zcode").copied(), Some(1), "换身份时失败计数一并重置");
+    }
+
+    /// 展示路径（托盘）读缓存前必须校验身份：换账号后到下一次额度命令之前（≤5 分钟 TTL），
+    /// 托盘不能继续显示上一个账号的数字。
+    #[test]
+    fn display_read_requires_the_identity_bound_at_write_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::<quota::QuotaState>::default();
+        let calls = AtomicUsize::new(0);
+        let state = cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached,
+            || Ok("identity-a".into()),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                quota::QuotaState::Ok { windows: vec![], plan: Some("identity-a".into()), account: None }
+            });
+        assert!(matches!(state, quota::QuotaState::Ok { .. }));
+
+        // 身份相同：展示路径照常读到缓存，且不触发查询
+        let same = current_for_identity(&cache, "local-zcode", || Ok("identity-a".into()));
+        assert!(matches!(same, Some((quota::QuotaState::Ok { .. }, ..))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 当前身份换成 B，但额度命令还没跑：展示路径按「无缓存」返回，不能给出 A 的数字
+        assert!(current_for_identity(&cache, "local-zcode", || Ok("identity-b".into())).is_none());
+
+        // 只读：条目与身份绑定都还在，等下一次额度命令自己清理并重查
+        let state = cache.state.lock().unwrap();
+        assert!(state.entries.contains_key("local-zcode"), "展示路径只读，不得删条目");
+        assert_eq!(state.identities.get("local-zcode").map(String::as_str), Some("identity-a"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "展示路径不得触发网络查询");
+    }
+
+    /// 身份不可得（未登录 / 已注销）同样按无缓存处理；没有身份记录的键没有基准，沿用原口径。
+    #[test]
+    fn display_read_treats_unavailable_identity_as_no_cache() {
+        let cache = QueryCache::<quota::QuotaState>::default();
+        cached_native_quota(&cache, "local-zcode".into(), Refresh::Cached,
+            || Ok("identity-a".into()),
+            || quota::QuotaState::Ok { windows: vec![], plan: None, account: None });
+        assert!(current_for_identity(&cache, "local-zcode",
+            || Err(quota::QuotaState::Unauthorized { reason: "已退出登录".into() })).is_none());
+        // 未绑定身份的键（写入走裸 `cached_query`）：沿用原口径读取，不伪造校验
+        assert!(cached_value(&cache, "local-zcode").is_some());
+        assert!(cached_value(&cache, "local-codex").is_none());
+    }
+
+    /* -------- 普通 zcode auth 连接（`connection_quota` 那一支）的缓存与退避 -------- */
+
+    /// 上限：同一条路径的缓存键只能是这一个常量形态，不拼连接 id、不拼账号标识。
+    #[test]
+    fn zcode_connection_cache_key_is_stable_and_separate_from_the_local_command() {
+        assert_eq!(ZCODE_CONNECTION_CACHE_KEY, "zcode-connection:local-login");
+        assert_ne!(ZCODE_CONNECTION_CACHE_KEY, "local-zcode", "两支查询口径不同，不能共用条目");
+        // 键里不能出现会随连接行或账号变化的部分：连接 id 以 `monitor:` 开头，账号标识是十六进制摘要
+        assert!(!ZCODE_CONNECTION_CACHE_KEY.starts_with("monitor:"), "不拼连接 id");
+        assert!(!ZCODE_CONNECTION_CACHE_KEY.starts_with("native:"), "不拼来源 id");
+    }
+
+    /// 1. 同一身份连续两次调用：第二次命中缓存，不发第二次上游。
+    #[test]
+    fn zcode_connection_quota_hits_cache_for_the_same_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok("zcode-identity-a".to_string());
+        let query = || {
+            let nth = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            quota::QuotaState::Ok { windows: vec![], plan: Some(format!("nth-{nth}")), account: None }
+        };
+        let first = cached_zcode_connection_quota(&cache, Refresh::Cached, identity, query);
+        assert!(matches!(first, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "nth-1"));
+        let second = cached_zcode_connection_quota(&cache, Refresh::Cached, identity, query);
+        assert!(matches!(second, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "nth-1"), "第二次必须命中缓存");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "同一身份不得发第二次上游请求");
+        let state = cache.state.lock().unwrap();
+        assert!(state.entries.contains_key(ZCODE_CONNECTION_CACHE_KEY), "条目落在固定键上");
+        assert!(!state.entries.contains_key("local-zcode"), "不得写进本机套餐命令的键");
+    }
+
+    /// 2. `Force`（用户点「立即刷新」）仍然重新查询。
+    #[test]
+    fn zcode_connection_quota_force_still_refetches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok("zcode-identity-a".to_string());
+        let query = || {
+            let nth = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            quota::QuotaState::Ok { windows: vec![], plan: Some(format!("nth-{nth}")), account: None }
+        };
+        cached_zcode_connection_quota(&cache, Refresh::Cached, identity, query);
+        // 入参 force = true 在 `connection_quota` 里被 `refresh_mode` 转成 Force（显式刷新优先于 max_age）
+        assert_eq!(refresh_mode(true, Some(60_000)), Refresh::Force);
+        let forced = cached_zcode_connection_quota(&cache, refresh_mode(true, None), identity, query);
+        assert!(matches!(forced, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "nth-2"), "Force 必须重新查询");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// 3. 失败退避期内：非 Force 命中退避（不发请求），Force 仍然查询。
+    #[test]
+    fn zcode_connection_quota_failure_backoff_blocks_automatic_refresh_but_not_force() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok("zcode-identity-a".to_string());
+        let failed = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Failed { reason: "网络失败".into() }
+        };
+        assert!(matches!(
+            cached_zcode_connection_quota(&cache, Refresh::Cached, identity, failed),
+            quota::QuotaState::Failed { .. }
+        ));
+        assert_eq!(cache.state.lock().unwrap().failures.get(ZCODE_CONNECTION_CACHE_KEY).copied(), Some(1));
+        // 自动刷新与定时刷新（MaxAge）在退避期内都复用失败结果，不再打上游
+        let settled = cached_zcode_connection_quota(&cache, Refresh::Cached, identity, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: None, account: None }
+        });
+        assert!(matches!(settled, quota::QuotaState::Failed { .. }), "退避期内不能伪装成成功");
+        let periodic = cached_zcode_connection_quota(&cache, refresh_mode(false, Some(60_000)), identity, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: None, account: None }
+        });
+        assert!(matches!(periodic, quota::QuotaState::Failed { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "退避期内不得发请求");
+        // Force 跳过失败退避：真的重查
+        let forced = cached_zcode_connection_quota(&cache, Refresh::Force, identity, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: Some("after-force".into()), account: None }
+        });
+        assert!(matches!(forced, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "after-force"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// 4. 限流态：返回 RateLimited 且不发请求（连 Force 也挡住，避免连点打爆上游）。
+    #[test]
+    fn zcode_connection_quota_returns_rate_limited_without_sending_a_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok("zcode-identity-a".to_string());
+        let limited = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::RateLimited { reason: "上游限流，请等待 45 秒后重试".into() }
+        };
+        assert!(matches!(
+            cached_zcode_connection_quota(&cache, Refresh::Cached, identity, limited),
+            quota::QuotaState::RateLimited { .. }
+        ));
+        let forced = cached_zcode_connection_quota(&cache, Refresh::Force, identity, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: None, account: None }
+        });
+        assert!(matches!(forced, quota::QuotaState::RateLimited { ref reason } if reason.contains("45")), "限流原样返回，不伪造成功");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "限流退避期内不得发请求");
+    }
+
+    /// 5. 身份变化：立即重新查询，不返回上一个账号的结果。
+    #[test]
+    fn zcode_connection_quota_never_reuses_the_previous_identity_result() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::default();
+        let identity_now = Mutex::new("intranet-account-a".to_string());
+        let calls = AtomicUsize::new(0);
+        let identity = || Ok(identity_now.lock().unwrap().clone());
+        let query = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            quota::QuotaState::Ok { windows: vec![], plan: identity_now.lock().unwrap().clone().into(), account: None }
+        };
+        let first = cached_zcode_connection_quota(&cache, Refresh::Cached, identity, query);
+        assert!(matches!(first, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "intranet-account-a"));
+        *identity_now.lock().unwrap() = "intranet-account-b".into();
+        let second = cached_zcode_connection_quota(&cache, Refresh::Cached, identity, query);
+        assert!(matches!(second, quota::QuotaState::Ok { plan: Some(ref plan), .. } if plan == "intranet-account-b"), "换身份后不能返回上一个账号的额度");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn forced_refresh_skips_failure_backoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::<usize>::default();
+        let calls = AtomicUsize::new(0);
+        let failed = cached_query(
+            &cache,
+            "flaky".into(),
+            false,
+            |_| CacheOutcome::Failed,
+            || { calls.fetch_add(1, Ordering::SeqCst); 503 },
+        );
+        assert_eq!(failed, 503);
+        // 失败退避期内：非显式刷新复用缓存结果
+        cached_query(&cache, "flaky".into(), false, |_| CacheOutcome::Success, || { calls.fetch_add(1, Ordering::SeqCst); 200 });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // 显式刷新：跳过失败退避，真的重查
+        let forced = cached_query(&cache, "flaky".into(), true, |_| CacheOutcome::Success, || { calls.fetch_add(1, Ordering::SeqCst); 200 });
+        assert_eq!(forced, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn forced_refresh_still_returns_rate_limited_without_a_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = QueryCache::<usize>::default();
+        let calls = AtomicUsize::new(0);
+        let limited = cached_query(
+            &cache,
+            "limited".into(),
+            false,
+            |_| CacheOutcome::RateLimited(45),
+            || { calls.fetch_add(1, Ordering::SeqCst); 429 },
+        );
+        assert_eq!(limited, 429);
+        // 限流退避对显式刷新同样生效，且原样返回限流结果，不伪造成功
+        let forced = cached_query(&cache, "limited".into(), Refresh::Force, |_| CacheOutcome::Success, || { calls.fetch_add(1, Ordering::SeqCst); 200 });
+        assert_eq!(forced, 429);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn single_scan_failure_does_not_mark_collection_broken_but_persistent_does() {
         let errors = vec!["rollout-x.jsonl: boom".to_string()];
         // 首次失败：可能是写入竞争的瞬时错误，不置异常
@@ -449,9 +733,20 @@ enum MainIntent {
 
 static MAIN_INTENT: LazyLock<Mutex<Option<MainIntent>>> = LazyLock::new(|| Mutex::new(None));
 
+/// 缓存条目当前的退避种类。显式刷新只跳过网络失败退避，不跳过上游限流退避。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CacheBackoff {
+    /// 成功或稳定失败（不支持的形态等）：不构成退避，显式刷新照常重查
+    None,
+    /// 上游 429 / 限流：按 Retry-After 挡住所有刷新，显式刷新也一样
+    RateLimited,
+    /// 网络失败 / 抖动：15s×2ⁿ 的退避只挡自动与定时刷新
+    Failed,
+}
+
 struct QueryCacheState<T> {
-    /// 值、过期时刻、是否处于退避期、取得时刻
-    entries: HashMap<String, (T, Instant, bool, Instant)>,
+    /// 值、过期时刻、退避种类、取得时刻
+    entries: HashMap<String, (T, Instant, CacheBackoff, Instant)>,
     in_flight: HashSet<String>,
     failures: HashMap<String, u32>,
     generations: HashMap<String, u64>,
@@ -471,7 +766,7 @@ impl<T> Default for QueryCacheState<T> {
     }
 }
 
-struct QueryCache<T> {
+pub(crate) struct QueryCache<T> {
     state: Mutex<QueryCacheState<T>>,
     ready: Condvar,
 }
@@ -490,7 +785,7 @@ enum CacheOutcome { Success, RateLimited(u64), Failed, StableFailure }
 enum Refresh {
     /// 有效缓存即可
     Cached,
-    /// 用户显式刷新：跳过成功缓存
+    /// 用户显式刷新：跳过成功缓存与网络失败退避，但保留限流退避
     Force,
     /// 定时刷新：缓存取得不超过这么久就复用。多个窗口各自按刷新间隔轮询同一连接，
     /// 同一周期内只打一次上游，又不会因缓存把间隔拖长。
@@ -530,8 +825,14 @@ fn cached_query<T: Clone>(
                 Refresh::Force => true,
                 Refresh::MaxAge(age) => fetched.elapsed() >= age,
             };
-            // 显式刷新可以跳过成功缓存；限流和网络失败的退避期仍必须遵守。
-            if waited || (*expires > Instant::now() && (!wants_fresh || *backoff)) {
+            // Force 只跳过失败退避，不跳过限流退避：上游 429 或抖动时用户点「立即刷新」
+            // 要能立刻重查，但真被限流时仍按 Retry-After 挡住，否则连点会打爆上游。
+            let backoff_applies = match backoff {
+                CacheBackoff::Failed => refresh != Refresh::Force,
+                CacheBackoff::RateLimited => true,
+                CacheBackoff::None => false,
+            };
+            if waited || (*expires > Instant::now() && (!wants_fresh || backoff_applies)) {
                 return value.clone();
             }
         }
@@ -559,15 +860,14 @@ fn cached_query<T: Clone>(
                 0
             }
         };
-        let ttl = match outcome {
-            CacheOutcome::Success => Duration::from_secs(5 * 60),
-            CacheOutcome::RateLimited(seconds) => Duration::from_secs(seconds.clamp(1, 30 * 60)),
-            CacheOutcome::Failed => Duration::from_secs((15u64.saturating_mul(1u64 << failures.min(4))).min(5 * 60)),
-            CacheOutcome::StableFailure => Duration::from_secs(60),
+        let (ttl, backoff) = match outcome {
+            CacheOutcome::Success => (Duration::from_secs(5 * 60), CacheBackoff::None),
+            CacheOutcome::RateLimited(seconds) => (Duration::from_secs(seconds.clamp(1, 30 * 60)), CacheBackoff::RateLimited),
+            CacheOutcome::Failed => (Duration::from_secs((15u64.saturating_mul(1u64 << failures.min(4))).min(5 * 60)), CacheBackoff::Failed),
+            CacheOutcome::StableFailure => (Duration::from_secs(60), CacheBackoff::None),
         };
         // 凭证在查询期间被替换时，不把旧凭证的响应重新放回缓存。
         if state.generations.get(&key).copied().unwrap_or(0) == generation {
-            let backoff = matches!(outcome, CacheOutcome::RateLimited(_) | CacheOutcome::Failed);
             let now = Instant::now();
             state.entries.insert(key, (value.clone(), now + ttl, backoff, now));
         }
@@ -615,6 +915,34 @@ fn bind_native_identity(cache: &QueryCache<quota::QuotaState>, key: &str, identi
         let next = state.generations.get(key).copied().unwrap_or(0).wrapping_add(1);
         state.generations.insert(key.into(), next);
     }
+}
+
+/// 只读的身份校验读取，供展示路径（托盘图标、托盘摘要）使用：条目记录的写入身份与当前身份
+/// 不一致，或拿不到当前身份（未登录 / 已注销）时按「无缓存」返回，避免把上一个账号的数字
+/// 继续显示到下一次额度命令重查之前（成功缓存 TTL 最长 5 分钟）。
+///
+/// 这条路径**只读**：不删条目、不写缓存、不发网络请求。清理旧身份的结果与重新查询交给下一次
+/// 额度命令（`cached_native_quota`）；展示端只负责不显示错数据。
+/// `identities` 里没有记录的键（写入仍走裸 `cached_query`）没有可比对的基准，沿用原口径返回。
+fn current_for_identity<T: Clone>(
+    cache: &QueryCache<T>,
+    key: &str,
+    identity: impl FnOnce() -> Result<String, quota::QuotaState>,
+) -> Option<(T, Instant, CacheBackoff, Instant)> {
+    // 先取身份再拿锁：读凭据 / 磁盘期间不持有缓存锁，也不和查询线程互相等待。
+    let current = identity();
+    let state = cache.state.lock().ok()?;
+    let entry = state.entries.get(key)?.clone();
+    match (state.identities.get(key), current) {
+        (None, _) => Some(entry),
+        (Some(bound), Ok(current)) if *bound == current => Some(entry),
+        _ => None,
+    }
+}
+
+/// 只读读取缓存当前值（不校验身份）：展示路径读没有身份基准的键时使用。
+fn cached_value<T: Clone>(cache: &QueryCache<T>, key: &str) -> Option<(T, Instant, CacheBackoff, Instant)> {
+    cache.state.lock().ok()?.entries.get(key).cloned()
 }
 
 fn quota_cache_outcome(value: &quota::QuotaState) -> CacheOutcome {
@@ -737,14 +1065,20 @@ async fn local_grok_quota(force: bool, max_age_ms: Option<u64>) -> Result<quota:
 }
 
 /// 查询本机 ZCode BigModel Coding Plan API Key 的套餐额度。
+///
+/// 走 `cached_native_quota` 而不是裸 `cached_query`：本机 ZCode 登录可能在 5 分钟 TTL
+/// 内换账号或换令牌，固定 key 会把上一个账号的额度继续显示给新账号。身份由
+/// `zcode_quota::account_identity` 给出（家族 + 令牌种类 + 令牌的 SHA-256 摘要），
+/// 身份变化时 `bind_native_identity` 会连同成功缓存与失败退避记录一起清掉。
+/// 代价是每次查询多一次凭据读取与解密（毫秒级），缓存 key 里只有哈希，不含令牌或邮箱。
 #[tauri::command]
 async fn local_zcode_quota(force: bool, max_age_ms: Option<u64>) -> Result<quota::QuotaState, String> {
     let force = refresh_mode(force, max_age_ms);
-    tauri::async_runtime::spawn_blocking(move || cached_query(
+    tauri::async_runtime::spawn_blocking(move || cached_native_quota(
         &QUOTA_CACHE,
         "local-zcode".into(),
         force,
-        quota_cache_outcome,
+        zcode_quota::account_identity,
         zcode_quota::local_zcode_quota,
     ))
         .await.map_err(|error| error.to_string())
@@ -1293,6 +1627,38 @@ async fn cost_estimate(
 
 /* --------------------- 额度与余额查询（§2.5 / §7.4） --------------------- */
 
+/// `connection_quota` 里「普通 ZCode 本机登录连接」这一支的缓存键。
+///
+/// 稳定性：这是常量，不拼连接 id、也不拼账号标识。
+/// - 这条路径查的是**这台机器的 ZCode 登录**本身，不是某一行连接记录：同一个登录可能被
+///   登记成 `monitor:native:zcode:main` 之类的连接，重新保存 / 迁移后连接 id 会变，拼 id
+///   会让同一份数据落进不同键、各自再打一次上游；
+/// - 跨账号隔离不靠键里的 id，靠写入时绑定的身份（`zcode_quota::account_identity`）：
+///   换账号 / 换令牌时 `bind_native_identity` 会连同成功缓存与失败退避一起清掉条目；
+/// - 与 `local-zcode` 刻意分开：那是本机 BigModel 套餐命令（`local_zcode_quota`）的条目，
+///   两支入参与错误语义不同，共用键会把两边结果串起来。
+const ZCODE_CONNECTION_CACHE_KEY: &str = "zcode-connection:local-login";
+
+/// 普通 ZCode auth 连接（`platform = zcode`、`kind = auth`，且不是
+/// `monitor:native:zcode:account`）的额度查询：与 `local_zcode_quota` 命令、
+/// `monitor:native:zcode:account` 分支统一到同一套缓存与退避口径。
+///
+/// 统一的原因：这条分支原来每次调用都直连上游——供应商页、灵动岛、自动化（模块 E）与托盘
+/// 各自按自己的节奏问同一份本机登录，一次界面刷新就能打出好几发请求；上游 429 时用户连点
+/// 「立即刷新」更是把它打爆。走缓存后同一身份在 TTL 内只打一次，限流按 `Retry-After` 挡住。
+///
+/// TTL 与退避沿用 `cached_query` 里唯一那张表，不新加时长：Success 5 分钟、
+/// RateLimited clamp(1s, 30min)、Failed 15s×2ⁿ（上限 5 分钟）、StableFailure 60 秒。
+/// `Refresh::Force` 只跳过成功缓存与失败退避，不跳过限流退避。
+fn cached_zcode_connection_quota(
+    cache: &QueryCache<quota::QuotaState>,
+    refresh: Refresh,
+    identity: impl Fn() -> Result<String, quota::QuotaState>,
+    query: impl FnOnce() -> quota::QuotaState,
+) -> quota::QuotaState {
+    cached_native_quota(cache, ZCODE_CONNECTION_CACHE_KEY.to_string(), refresh, identity, query)
+}
+
 /// 查某个连接的额度。
 ///
 /// 路由规则：填了 `base_url` 时先按域名识别编程套餐供应商（智谱/Kimi/MiniMax/
@@ -1356,12 +1722,26 @@ async fn connection_quota(app: tauri::AppHandle, db: State<'_, Db>, id: String, 
             }).await.map_err(|e| e.to_string())?;
             return finish_quota_query(app, pool, id, expected, state).await;
         }
+        // ZCode 本机登录（`monitor:native:zcode:main` 等普通连接）：与 `local_zcode_quota`
+        // 命令、上面 `monitor:native:zcode:account` 分支同一套缓存与退避，见
+        // `cached_zcode_connection_quota`；`force` 原样透传，保持 `Refresh` 的语义
+        // （Force 重查、MaxAge 按周期复用、限流退避对所有刷新都生效）。
+        if c.platform == "zcode" && c.kind == "auth" {
+            let state = tauri::async_runtime::spawn_blocking(move || {
+                cached_zcode_connection_quota(
+                    &QUOTA_CACHE,
+                    force,
+                    zcode_quota::account_identity,
+                    zcode_quota::local_zcode_quota,
+                )
+            }).await.map_err(|e| e.to_string())?;
+            return finish_quota_query(app, pool, id, expected, state).await;
+        }
         // 本机登录的订阅账号：直接读原工具的登录状态查询（各模块只读、不写回凭证）
         let local: Option<fn() -> quota::QuotaState> = match (c.platform.as_str(), c.kind.as_str()) {
             ("grok", "auth") => Some(grok_quota::local_grok_quota),
             ("gemini", "auth") => Some(gemini_quota::local_gemini_quota),
             ("opencode", "auth") => Some(opencode::local_openai_quota),
-            ("zcode", "auth") => Some(zcode_quota::local_zcode_quota),
             _ => None,
         };
         if let Some(local) = local {

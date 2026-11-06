@@ -1281,11 +1281,11 @@ mod tests {
     use super::*;
 
     fn user(text: &str) -> Message {
-        Message { role: "user".into(), ts: None, text: text.into(), tools: vec![] }
+        Message { role: "user".into(), ts: None, text: text.into(), tools: vec![], ..Message::default() }
     }
 
     fn assistant(tools: Vec<ToolCall>) -> Message {
-        Message { role: "assistant".into(), ts: None, text: String::new(), tools }
+        Message { role: "assistant".into(), ts: None, text: String::new(), tools, ..Message::default() }
     }
 
     fn tool(name: &str, summary: &str) -> ToolCall {

@@ -325,11 +325,22 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     // 本地代理按凭证指纹把请求归到具体连接；未经代理的记录保持 NULL，统计默认仍按平台合并。
     let _ = conn.execute("ALTER TABLE requests ADD COLUMN connection_id TEXT", []);
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_requests_connection ON requests(connection_id, ts);")?;
+    // 归因用的端点事实：ZCode 库 `model_usage.provider_id`（本机 100% 覆盖）。它只是「这条
+    // 请求打的是哪个 provider」的原始标识，不是平台——平台是工具、provider 是端点，不能合并。
+    // 纯增列、可空：历史行保持 NULL（下一次 ZCode 库变动后的扫描自然补齐），
+    // 回滚方式 = 忽略该列，任何旧版本读它都不会报错。
+    let _ = conn.execute("ALTER TABLE requests ADD COLUMN provider_key TEXT", []);
     // 模型入口：持久化 slug（菜单 id 前缀）与账号指纹（去重 / 冷却 / 服务唯一性）。
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN slug TEXT", []);
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN account_fp TEXT", []);
     // 上次成功拉到的模型清单：来源暂停 / 失效或重启后，模型菜单里的 id 仍要保留。
     let _ = conn.execute("ALTER TABLE connections ADD COLUMN models_json TEXT", []);
+    // 连接目录自动回填（归因决定三）：记录哪些字段是自动补的（`baseUrlSource` /
+    // `modelsSource` = `auto:zcode`）、补进去的地址规范化键、自动加的模型与用户删过的模型。
+    // 纯增列、可空：旧库为 NULL，等价于「没有自动补过」，行为与升级前完全一致；
+    // 回滚 = 调 `catalog_backfill::rollback`（按 `autoModels` 移除模型并清掉自动补的地址），
+    // 也可直接丢掉这一列——没有任何代码在缺列时读它。
+    let _ = conn.execute("ALTER TABLE connections ADD COLUMN catalog_auto TEXT", []);
     // 身份迁移：开发期直接暴露问题；发布期只记诊断，不阻止应用启动。
     let migration = crate::gateway::identity::migrate(conn);
     #[cfg(debug_assertions)]
@@ -1164,6 +1175,9 @@ pub struct ActiveSession {
     pub running_tokens: Option<i64>,
     /// running / done / failed；没有可信生命周期的来源使用 recent。
     pub state: String,
+    /// 这条会话最近一条请求归到的已存连接（`exact` / `mapped`）；归不出唯一结论时是
+    /// `platform` 档，不带连接 id。见 `attribution` 模块。
+    pub attribution: crate::attribution::AttributionView,
 }
 
 #[derive(Debug, Serialize)]
@@ -1190,6 +1204,9 @@ pub struct LiveUsage {
     /// 本平台的统计数据自上次推送以来有变化。仅为续期运行中会话的心跳推送为 false，
     /// 主面板等统计视图据此跳过无意义的重查；主动查询的快照恒为 false。
     pub data_changed: bool,
+    /// 本平台正在跑的已存连接。`exact` / `mapped` 才带连接 id，`platform` 档表示
+    /// 「归不出唯一一条」——灵动岛收缩态那一行据此显示连接名或平台名，绝不用猜的。
+    pub attribution: crate::attribution::AttributionView,
 }
 
 /// 尚无可信生命周期来源的“最近活跃”窗口，不得将它显示成运行状态。
@@ -1211,25 +1228,45 @@ pub fn sum_running_tokens(sessions: &[ActiveSession]) -> Option<i64> {
 
 /// 本机今日 Token（新鲜口径）：Claude 取输入+输出，Codex 扣除缓存重读与缓存写入，
 /// 与灵动岛「本机今日 Token」同源（§2.1.2）；托盘摘要的 API Key 无套餐视图也复用。
-/// 区间内无记录是真实的 0；存在 total 未知的历史行则返回 None（界面显示「—」，不补零）。
+///
+/// 未知行（`total_known = 0`）只把自己排除在求和之外，不把整天打成未知：当天哪怕只有
+/// 一条失败请求、其余行都已知，也照样把已知行加起来（这是当天的下界）。只有当**一条已
+/// 知行都没有**时才返回 None（界面显示「—」，不补零）。真实零行照常参与求和，所以
+/// 「确实是 0」仍然是 `Some(0)`，与未知分开。
+///
+/// 旧写法用 `MIN(total_known) = 1` 做守卫，等于「一行未知污染全天」：一条抓不到用量的
+/// 失败请求就能让整天的合计变成 null（本机 zcode 就出现过当天有 2,025 万 Token、
+/// 却因为凌晨一条失败记录返回 null）。
 pub fn today_fresh_tokens(conn: &Connection, platform: &str) -> rusqlite::Result<Option<i64>> {
     if crate::platforms::native(platform) {
         let (start,end)=period_range(conn,platform,"today");
-        return conn.query_row("SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MIN(total_known)=1 THEN SUM(total_tokens) END FROM requests WHERE platform=?1 AND ts>=?2 AND ts<?3",params![platform,start,end],|r|r.get(0));
+        return conn.query_row(
+            "SELECT CASE WHEN COUNT(*) = 0 OR COALESCE(SUM(total_known), 0) = 0 THEN NULL
+                         ELSE SUM(CASE WHEN total_known = 1 THEN total_tokens END)
+                    END
+               FROM requests WHERE platform = ?1 AND ts >= ?2 AND ts < ?3",
+            params![platform, start, end],
+            |r| r.get(0),
+        );
     }
     let (today_start, today_end) = period_range(conn, platform, "today");
     let (tc, te) = platform_clause_n(platform, 3);
     // 灵动岛「本机今日 Token」与终端口径一致：新鲜 Token。
     // Claude 的缓存单列，Codex 的 input_tokens 已含缓存，因此 Codex 需要扣除缓存重读；
     // 主面板统计仍用 total_tokens（含缓存）并另行标注。
+    // 求和同样只取已知行；当天一条已知行都没有时才是未知（None），无记录沿用本机来源
+    // 之外的约定：非原生平台没有记录就是真实的 0。
     let today_sql = format!(
         "SELECT CASE WHEN COUNT(*) = 0 THEN 0
-                     WHEN MIN(total_known) = 1 THEN SUM(
-                         CASE WHEN platform = 'codex'
-                              THEN MAX(input_tokens - cache_read_tokens - cache_write_tokens, 0) + output_tokens
-                              ELSE input_tokens + output_tokens
+                     WHEN COALESCE(SUM(total_known), 0) = 0 THEN NULL
+                     ELSE SUM(
+                         CASE WHEN total_known = 1 THEN
+                             CASE WHEN platform = 'codex'
+                                  THEN MAX(input_tokens - cache_read_tokens - cache_write_tokens, 0) + output_tokens
+                                  ELSE input_tokens + output_tokens
+                             END
                          END)
-                     ELSE NULL END
+                     END
          FROM requests WHERE ts >= ?1 AND ts < ?2{EXCLUDE_DEGENERATE_SQL}{tc}"
     );
     if te.is_empty() {
@@ -1275,6 +1312,7 @@ pub fn live_usage(
                 started_at_ms: None,
                 running_tokens: None,
                 state: state.into(),
+                attribution: crate::attribution::AttributionView::platform(),
             })
         };
         let rows = if extra.is_empty() {
@@ -1319,6 +1357,7 @@ pub fn live_usage(
                     started_at_ms: None,
                 running_tokens: None,
                     state: "recent".into(),
+                    attribution: crate::attribution::AttributionView::platform(),
                 })
             };
             if platform == "all" {
@@ -1366,6 +1405,7 @@ pub fn live_usage(
                 started_at_ms: r.get(5)?,
                 running_tokens: None,
                 state: r.get(4)?,
+                attribution: crate::attribution::AttributionView::platform(),
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -1388,6 +1428,31 @@ pub fn live_usage(
     }
     let running_tokens = sum_running_tokens(&active_sessions);
 
+    // 归因：收缩态那一行要说出「哪条已存连接在跑」，指不出唯一一条就退回平台。
+    // 会话级与平台级共用同一份连接快照和同一次「每会话最近一条请求」查询；
+    // 连接表读不出来（或 platform = all）时一律平台档，不猜。
+    let (attribution, session_views) = if platform == "all" {
+        (crate::attribution::AttributionView::platform(), std::collections::HashMap::new())
+    } else {
+        let since = Local::now().timestamp_millis() - crate::attribution::SESSION_ATTRIBUTION_WINDOW_MS;
+        match crate::attribution::Snapshot::load(conn) {
+            Ok(snapshot) => {
+                let views = crate::attribution::session_attribution(conn, platform, since, &snapshot)
+                    .unwrap_or_default();
+                let total = crate::attribution::aggregate(&views);
+                (total, views)
+            }
+            Err(_) => (crate::attribution::AttributionView::platform(), std::collections::HashMap::new()),
+        }
+    };
+    for session in &mut active_sessions {
+        // 窗口内没有这条会话的请求（如思考中 / 等待输入）：归不出连接，按平台展示
+        session.attribution = session_views
+            .get(&session.session_id)
+            .cloned()
+            .unwrap_or_else(crate::attribution::AttributionView::platform);
+    }
+
     let today_tokens = today_fresh_tokens(conn, platform)?;
 
     Ok(LiveUsage {
@@ -1402,6 +1467,7 @@ pub fn live_usage(
         realtime_delta,
         initial: since.is_none(),
         data_changed: false,
+        attribution,
     })
 }
 
@@ -2292,6 +2358,52 @@ mod tests {
         assert_eq!(updated, 0);
     }
 
+    /// 收缩态那一行要说出「哪条已存连接在跑」：网关写了 `connection_id` 的行是精确档，
+    /// 会话级与平台级都指向同一条连接；窗口内没有请求时退回平台档，不猜。
+    #[test]
+    fn live_usage_reports_exact_attribution_from_gateway_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO connections(id,platform,kind,name,secret,base_url,masked,created_ms)
+             VALUES('gateway-conn','zcode','api','网关连接','synthetic-secret','https://relay.example.test','****',1)",
+            [],
+        ).unwrap();
+        let now = Local::now().timestamp_millis();
+        let record = |key: &str, session: &str| RequestRecord {
+            platform: "zcode".into(),
+            source: "native:zcode:main".into(),
+            dedup_key: key.into(),
+            session_id: Some(session.into()),
+            ts: now,
+            model: Some("GLM-5.3".into()),
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            total_tokens: Some(15),
+            effort: None,
+        };
+        insert_records(&mut conn, &[record("r1", "native:zcode:main:s1")]).unwrap();
+        conn.execute("UPDATE requests SET connection_id='gateway-conn' WHERE dedup_key='r1'", []).unwrap();
+
+        let live = live_usage(&conn, "zcode", None).unwrap();
+        assert_eq!(live.attribution.connection_id.as_deref(), Some("gateway-conn"));
+        assert_eq!(live.attribution.name.as_deref(), Some("网关连接"));
+        assert_eq!(live.attribution.confidence, crate::attribution::Confidence::Exact);
+        let session = live
+            .active_sessions
+            .iter()
+            .find(|s| s.session_id.ends_with(":s1"))
+            .expect("窗口内的会话应出现在实时快照里");
+        assert_eq!(session.attribution.connection_id.as_deref(), Some("gateway-conn"));
+
+        // 窗口内没有请求（换一个从没写过的平台）：平台档，不带任何连接
+        let empty = live_usage(&conn, "codex", None).unwrap();
+        assert_eq!(empty.attribution.confidence, crate::attribution::Confidence::Platform);
+        assert!(empty.attribution.connection_id.is_none());
+    }
+
     #[test]
     fn total_range_starts_at_the_selected_platform_first_record() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -2994,3 +3106,7 @@ mod tests {
 #[cfg(test)]
 #[path = "db_breakdown_tests.rs"]
 mod db_breakdown_tests;
+
+#[cfg(test)]
+#[path = "db_fresh_token_tests.rs"]
+mod db_fresh_token_tests;

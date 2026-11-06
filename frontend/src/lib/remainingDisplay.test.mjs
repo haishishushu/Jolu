@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { remainingDisplay } from "./remainingDisplay.ts"
+import { UNKNOWN_REMAINING, remainingDisplay } from "./remainingDisplay.ts"
 
 test("Grok 将真实已用百分比换算为剩余，保留重置时间", () => {
   const view = remainingDisplay("grok", "auth", {
@@ -44,4 +44,49 @@ test("ZCode 显示 BigModel API Key 返回的精确剩余积分", () => {
   assert.equal(view.rows[0].value, "8999 Credits")
   assert.equal(view.rows[1].value, "60000 Credits")
   assert.match(view.source, /API Key/)
+})
+
+test("ZCode 未知额度显示 -，不冒充 0 也不算查询失败", () => {
+  // 后端 login_state 兜底：窗口在，三个数值字段都为 None
+  const view = remainingDisplay("zcode", "auth", {
+    state: "ok", plan: null, windows: [
+      { key: "quota", window_name: "套餐额度", used_percent: null, amount_text: null, remaining_text: null, resets_at: null },
+    ],
+  })
+  assert.equal(view.rows.length, 1)
+  assert.equal(view.rows[0].value, UNKNOWN_REMAINING)
+  assert.equal(view.rows[0].value, "-")
+  assert.notEqual(view.rows[0].value, "0", "未知不等于用尽")
+  assert.equal(view.rows[0].usedText, null)
+  assert.equal(view.state, "ok", "查询成功但数值未知，不降级成不支持")
+})
+
+test("ZCode 真实 0 剩余仍显示 0，不被改写成 -", () => {
+  const exact = remainingDisplay("zcode", "auth", {
+    state: "ok", plan: null, windows: [
+      { key: "quota", window_name: "套餐额度", used_percent: 100, amount_text: "3M / 3M token", remaining_text: "0", resets_at: null },
+    ],
+  })
+  assert.equal(exact.rows[0].value, "0")
+  assert.equal(exact.state, "ok")
+  // 只给已用百分比时换算出的也是 0%，不是未知占位符
+  const computed = remainingDisplay("zcode", "auth", {
+    state: "ok", plan: null, windows: [
+      { key: "quota", window_name: "套餐额度", used_percent: 100, amount_text: null, remaining_text: null, resets_at: null },
+    ],
+  })
+  assert.equal(computed.rows[0].value, "0%")
+})
+
+test("ZCode 查询失败 / 未授权 / 需要重新登录保持各自表达，不变成 -", () => {
+  for (const state of ["failed", "unauthorized", "forbidden", "rate_limited"]) {
+    const view = remainingDisplay("zcode", "auth", { state, plan: null, windows: [], reason: "查询未完成" })
+    assert.equal(view.state, state)
+    assert.equal(view.rows.length, 0, `${state} 不伪造剩余行`)
+    assert.equal(view.reason, "查询未完成")
+  }
+  // 一条窗口都没有才是「不支持」，同样不是 -
+  const empty = remainingDisplay("zcode", "auth", { state: "ok", plan: null, windows: [] })
+  assert.equal(empty.state, "unsupported")
+  assert.equal(empty.rows.length, 0)
 })

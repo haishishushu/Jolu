@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { balanceSnapshotTime, islandActiveConnection, islandConnectionStatus, islandCost, connectionQueries } from "./islandPresentation.ts"
+import { balanceSnapshotTime, islandActiveConnection, islandAttribution, islandConnectionStatus, islandCost, connectionQueries } from "./islandPresentation.ts"
 
 const conn = (id, platformId, status) =>
   ({ id, platformId, kind: "api", name: id, baseName: id, label: "API Key", masked: null, status, lastSyncText: "", baseUrl: null })
@@ -72,4 +72,25 @@ test("余额快照标注获取时刻，没有时刻不编造", () => {
   assert.ok(text.startsWith("· "), text)
   assert.ok(text.endsWith(" 获取"), text)
   assert.match(text, /\d{1,2}:\d{2}:\d{2}/)
+})
+
+test("收缩态只在确定档显示连接名：exact 与 mapped 分开表达", () => {
+  assert.deepEqual(
+    islandAttribution({ connection_id: "c-1", name: "华龙", confidence: "exact" }),
+    { id: "c-1", name: "华龙", confidence: "exact" },
+  )
+  // mapped 保留自己的档位，界面据此用弱化样式，不冒充 exact
+  assert.deepEqual(
+    islandAttribution({ connection_id: "c-2", name: "华龙 2", confidence: "mapped" }),
+    { id: "c-2", name: "华龙 2", confidence: "mapped" },
+  )
+})
+
+test("platform 档、缺字段、旧后端无字段一律回落到平台名", () => {
+  assert.equal(islandAttribution({ connection_id: null, name: null, confidence: "platform" }), null)
+  assert.equal(islandAttribution({ connection_id: "c-1", name: null, confidence: "mapped" }), null)
+  assert.equal(islandAttribution({ connection_id: null, name: "华龙", confidence: "exact" }), null)
+  assert.equal(islandAttribution({ connection_id: "  ", name: "  ", confidence: "exact" }), null)
+  assert.equal(islandAttribution(null), null)
+  assert.equal(islandAttribution(undefined), null)
 })

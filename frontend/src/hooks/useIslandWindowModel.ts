@@ -16,9 +16,10 @@ import { platformConfig, isFetchOnlyPlatform, platformSupports } from "@/lib/pla
 import { remainingDisplay } from "@/lib/remainingDisplay"
 import { useSourceMetrics } from "@/hooks/useSourceMetrics"
 import { useCollectionStatus } from "@/hooks/useCollectionStatus"
-import { balanceSnapshotTime, connectionQueries, islandActiveConnection, islandConnectionStatus, islandCost } from "@/lib/islandPresentation"
+import { balanceSnapshotTime, connectionQueries, islandActiveConnection, islandAttribution, islandConnectionStatus, islandCost } from "@/lib/islandPresentation"
 import { dockQuotaView } from "@/lib/dockQuotaView"
 import { carriedDeltaCountKey, carriedDeltaView, latchSessionDelta } from "@/lib/carriedDelta"
+import { islandWriting } from "@/lib/islandWriting"
 import { onUsageChanged } from "@/lib/usageChanges"
 import { useGatewayActivity } from "@/hooks/useGatewayActivity"
 
@@ -70,6 +71,11 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
   // 灵动岛生效连接：明确选择优先；未选择时自动启用当前平台第一个连接成功的
   // 连接（2026-09-19 鼠鼠定版）。仍不回退到本机账号或唯一候选。
   const active = islandActiveConnection(profile.connection_id, connections, islandPlatform)
+  // 连接归因（P0）：收缩态那一行要说得出「哪条已存连接在跑」。它和上面的 `active`
+  // 不是一件事——`active` 是本岛选中/生效的连接（配置），这里是后端按请求事实归出来的
+  // 结论（exact / mapped / platform）。归不出唯一一条时给 null，界面保持平台名，
+  // 绝不拿配置里的选择去冒充「正在跑的那条」。
+  const activeConnection = islandAttribution(live.attribution)
   const islandKind = active?.kind ?? profile.kind
   const localQuotaPlatform = (islandPlatform === "grok" || islandPlatform === "zcode") && islandKind === "auth"
   const queries = localQuotaPlatform
@@ -167,13 +173,31 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
     collection.status && !collection.status.ok && collection.status.failed_sources.includes(islandPlatform),
   )
 
-  // 胶囊的「正在写入」与「本轮增量」：来源提供可信运行状态（running 会话）才算工作中；
-  // 采集源出错时状态不可判定，不当成工作中。增量取后端 running_tokens（只含 running 会话），
-  // 拿不到就是 null——胶囊显示未知，不补 0、不拿示例数字。
+  // 模型入口只在胶囊样式下订阅；经典样式不查询、不监听。
+  // 放在这里是因为 `working` 要把「网关请求在途」也算进去（§5.8），必须早于下面那次判定；
+  // hook 调用顺序在每次渲染里都一样，位置前移不影响规则。
+  const gateway = useGatewayActivity(capsule)
+
+  // 胶囊的「正在写入」：三个信号任一为真（纯逻辑在 `lib/islandWriting.ts`，测试见同名 .test.mjs）
+  //   1. 有 state === "running" 的会话（codex / claude 的生命周期来源）；
+  //   2. 网关转发有请求在途（只有 relay 模式才有事件，直连连接恒为 0）；
+  //   3. 来源只给「最近活跃」窗口时（zcode 等原生来源），窗口内仍有写入——
+  //      ZCode 的 model_usage 只在请求结束时落行，永远不会出现 running 行，这是它唯一的运行痕迹。
+  // 采集源出错（`sourceFailed`）只让展示的状态变「未知」，不再把「明明有请求在途」压成 false。
+  const writing = islandWriting({
+    sessions: live.sessions,
+    recentWindow: live.activityKind === "recent",
+    activeWindowSeconds: live.activeWindowSeconds,
+    inFlight: gateway.relay ? gateway.activity.inFlight.length : 0,
+    now: quotaNow,
+  })
+  const working = writing.working
+  // 会话状态展示仍按来源可信度收敛：采集源出错时状态不可判定，逐条标「未知」。
+  // 本轮增量取后端 running_tokens（只含 running 会话），拿不到就是 null——胶囊显示未知，
+  // 不补 0、不拿示例数字。
   const islandSessions = sourceFailed
     ? live.sessions.map((session) => ({ ...session, state: "unknown" as const }))
     : live.sessions
-  const working = !sourceFailed && live.sessions.some((session) => session.state === "running")
   const liveDelta = sourceFailed ? null : live.runningDelta
   /* 胶囊收缩态尾部增量段的 A + B 组合（§5.7）：锁存值 ?? 今日累计。
      A 本轮终值锁存：进行中记下 running_tokens 的最新非零读数，结束后停在这个读数上，不跳变、
@@ -236,6 +260,9 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
         quotaUnavailable: !quotaWindows,
         connected: localQuotaPlatform || Boolean(active && active.status !== "paused"),
         connectionId: active?.id ?? null,
+        // 收缩态那一行按置信度渲染：`exact` / `mapped` 显示连接名（mapped 用弱化样式），
+        // `platform` 或 null 保持现在的平台名。
+        activeConnection,
         // 只有真正发起了额度查询、且结果是失败类状态时才算查询失败；不支持与加载中不算
         queryFailed: (localQuotaPlatform || Boolean(queries.quota)) && !displayQuota.loading
           && Boolean(displayQuota.state) && !["ok", "unsupported"].includes(displayQuota.state!.state),
@@ -300,9 +327,7 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
         sourceText: `统计来源：${LOCAL_SOURCE.name}（${LOCAL_SOURCE.scope}）· 设计示例`,
       }
 
-  // 模型入口只在胶囊样式下订阅；经典样式不查询、不监听
-  const gateway = useGatewayActivity(capsule)
-
+  // 模型入口的数据在上面已经订阅（`working` 要读它的 inFlight），这里只把结果交给容器
   return {
     data,
     settings,
@@ -312,6 +337,7 @@ export function useIslandWindowModel({ capsule, mode, peek, dragging }: IslandWi
     connections,
     connectionsLoading,
     active,
+    activeConnection,
     refreshActive,
     refreshSerial,
     /** 刷新防重入闸门：右键菜单据此显示“正在刷新” */

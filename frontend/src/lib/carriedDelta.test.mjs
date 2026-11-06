@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   carriedDeltaCountKey,
+  carriedDeltaSegment,
   carriedDeltaView,
   latchSessionDelta,
   todayReset,
@@ -77,3 +78,49 @@ test("追数键：进行中才订阅，结束后静态读数不跑逐帧", () =>
   assert.equal(carriedDeltaCountKey("today", false), undefined)
   assert.equal(carriedDeltaCountKey(null, true), undefined)
 })
+
+/* ---------- §5.8：段是否渲染（锁存 → 今日累计 → 写入中未知 → 不渲染） ---------- */
+
+const segment = (overrides = {}) => carriedDeltaSegment({
+  value: null, source: null, text: null, writing: false, unavailable: false, relay: false, ...overrides,
+})
+
+test("段：有锁存值就显示锁存值，来源标记为 session", () => {
+  assert.deepEqual(segment({ value: 30_200, source: "session", writing: true }),
+    { visible: true, value: 30_200, source: "session", unknown: false })
+})
+
+test("段：没有锁存时显示今日累计，来源标记为 today", () => {
+  assert.deepEqual(segment({ value: 2_300_000, source: "today" }),
+    { visible: true, value: 2_300_000, source: "today", unknown: false })
+})
+
+test("段：两个来源都没有但仍在写入时照常渲染，数值标成未知（显示 +—）", () => {
+  assert.deepEqual(segment({ writing: true }),
+    { visible: true, value: null, source: null, unknown: true })
+})
+
+test("段：两个来源都没有且不在写入时整段不渲染（静止态不凭空出现 +—）", () => {
+  assert.deepEqual(segment({ writing: false }),
+    { visible: false, value: null, source: null, unknown: false })
+})
+
+test("段：数值为 0 与未知同处理——写入中显示 +—，静止时隐藏", () => {
+  assert.deepEqual(segment({ value: 0, writing: true }),
+    { visible: true, value: null, source: null, unknown: true })
+  assert.equal(segment({ value: 0 }).visible, false)
+})
+
+test("段：浏览器预览的示例文案优先于未知分支", () => {
+  assert.deepEqual(segment({ text: "+12.8K", writing: true }),
+    { visible: true, value: null, source: null, unknown: false })
+})
+
+test("段：连接不可用时不渲染，即使在写入", () => {
+  assert.equal(segment({ writing: true, unavailable: true }).visible, false)
+})
+
+test("段：被网关转发路线占位时不渲染，即使在写入", () => {
+  assert.equal(segment({ writing: true, relay: true }).visible, false)
+})
+

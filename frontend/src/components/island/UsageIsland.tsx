@@ -2,7 +2,7 @@ import { useId, useState } from "react"
 import { LazyConnectionSwitcher } from "./LazyConnectionSwitcher"
 import { cn } from "@/lib/utils"
 import { SHIMMER_CYCLE_MS, SHIMMER_MIN_CYCLES, useCycleExit } from "@/lib/motion"
-import { authQuotaRows } from "@/lib/authQuotaRows"
+import { quotaRowsFor } from "@/lib/authQuotaRows"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { ConnectionKindChip, Divider, StatusDot } from "@/components/ui/primitives"
 import { UsageRow } from "./UsageRow"
@@ -89,6 +89,12 @@ export interface IslandData {
   carriedCountKey?: string
   /** 胶囊样式用：生效连接的 id，切换连接时据此重置额度基线 */
   connectionId?: string | null
+  /**
+   * 胶囊样式用：本平台正在跑的那条**已存连接**（连接归因的 exact / mapped 两档）。
+   * `platform` 档或缺失时为 null —— 收缩态那一行继续显示平台名，绝不显示猜出来的连接。
+   * 经典样式不读这个字段。
+   */
+  activeConnection?: { id: string; name: string; confidence: "exact" | "mapped" } | null
 }
 
 function Shell({
@@ -157,7 +163,7 @@ export function IslandCollapsed({
   // Auth 与 API 布局由接入类型决定，额度缺失保留空态。
   // 编程套餐（api 连接）现在也能返回额度窗口，有窗口就按额度布局显示。
   const showQuotas = !data.remainingMetrics && (data.kind === "auth" || (data.quotas?.length ?? 0) > 0)
-  const quotaRows = data.platform === "grok" ? data.quotas ?? [] : authQuotaRows(data.quotas)
+  const quotaRows = quotaRowsFor(data.platform, data.quotas)
   return (
     <Shell onDoubleClick={onExpand} refreshKey={refreshKey} refreshing={refreshing}>
       <div className="flex w-full items-center justify-between">
@@ -290,7 +296,7 @@ export function IslandExpanded({
   const sessionTotal = data.sessions?.length ?? 0
   // 展开态与收缩态使用同一套额度规则：有额度窗口（auth 或编程套餐）即按额度布局。
   const showQuotas = !data.remainingMetrics && (data.kind === "auth" || (data.quotas?.length ?? 0) > 0)
-  const quotaRows = data.platform === "grok" ? data.quotas ?? [] : authQuotaRows(data.quotas)
+  const quotaRows = quotaRowsFor(data.platform, data.quotas)
   return (
     <Shell onDoubleClick={onCollapse} minHeight={connectionMenuOpen ? 240 : undefined} refreshKey={refreshKey} refreshing={refreshing}>
       <div className="flex w-full items-center justify-between">

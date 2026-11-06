@@ -614,11 +614,20 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
         .map(|count| count > 0)
         .unwrap_or(false);
     let directory_expr = if has_directory { "s.directory" } else { "NULL" };
+    // provider_id 是归因的关键端点事实（本机 model_usage 100% 有值）。旧版 Zcode 库可能没有
+    // 这一列：与 directory 同样的探测方式，缺列时用 NULL 占位，列序不变。
+    let has_provider: bool = input
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('model_usage') WHERE name = 'provider_id'")
+        .and_then(|mut s| s.query_row([], |r| r.get::<_, i64>(0)))
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    let provider_expr = if has_provider { "u.provider_id" } else { "NULL" };
     let mut stmt = input
         .prepare(&format!(
             "SELECT u.id,u.session_id,u.model_id,u.status,u.started_at,u.completed_at,
         u.input_tokens,u.output_tokens,u.cache_read_input_tokens,u.cache_creation_input_tokens,
-        u.provider_total_tokens,u.computed_total_tokens,u.reasoning_tokens,u.raw_usage_json,s.title,{directory_expr}
+        u.provider_total_tokens,u.computed_total_tokens,u.reasoning_tokens,u.raw_usage_json,s.title,{directory_expr},
+        {provider_expr}
         FROM model_usage u LEFT JOIN session s ON s.id=u.session_id",
         ))
         .map_err(|e| e.to_string())?;
@@ -691,6 +700,9 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
                 status,
                 row.get::<_, Option<String>>(14)?,
                 row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty()),
             ))
         })
         .map_err(|e| e.to_string())?
@@ -703,7 +715,7 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
     // 库型来源没有源文件可读 cwd，只能在这一步带出去落库，否则全归「未识别项目」。
     let mut sessions: HashMap<String, (&'static str, i64, Option<String>, Option<String>)> = HashMap::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    for (r, status, title, directory) in &rows {
+    for (r, status, title, directory, _) in &rows {
         let Some(id) = &r.request.session_id else { continue };
         let state = zcode_session_state(status, r.request.ts, now_ms);
         let entry = sessions.entry(id.clone()).or_insert((state, r.request.ts, None, None));
@@ -720,15 +732,26 @@ fn zcode(db: &mut impl Store, source: &Source) -> Result<usize, String> {
     }
     db.write(|conn| -> Result<usize, String> {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let records: Vec<Record> = rows.iter().map(|(r, _, _, _)| r.clone()).collect();
+        let records: Vec<Record> = rows.iter().map(|(r, _, _, _, _)| r.clone()).collect();
         let changed = source_store::write(&tx, &records).map_err(|e| e.to_string())?;
         let mut outcome = tx.prepare_cached("UPDATE requests SET native_outcome=?1 WHERE source=?2 AND dedup_key=?3 AND native_outcome IS NOT ?1")
             .map_err(|e| e.to_string())?;
-        for (r, status, _, _) in &rows {
+        for (r, status, _, _, _) in &rows {
             outcome.execute(params![match status.as_str() {"completed"=>"success","error"|"cancelled"=>"failed",_=>"unknown"},source.id,r.request.dedup_key])
                 .map_err(|e| e.to_string())?;
         }
         drop(outcome);
+        // provider 落独立列，不进 platform：归因层要拿它去查 provider_config 里的端点地址，
+        // 平台字段只回答「哪套工具」，两者不能合并。旧行下一次扫描自然补齐。
+        let mut provider = tx
+            .prepare_cached("UPDATE requests SET provider_key=?3 WHERE source=?1 AND dedup_key=?2 AND provider_key IS NOT ?3")
+            .map_err(|e| e.to_string())?;
+        for (r, _, _, _, provider_key) in &rows {
+            provider
+                .execute(params![source.id, r.request.dedup_key, provider_key])
+                .map_err(|e| e.to_string())?;
+        }
+        drop(provider);
         for (id, (state, ts, title, cwd)) in &sessions {
             if let Some(title) = title {
                 crate::db::upsert_session_title(&tx, "zcode", id, title).map_err(|e| e.to_string())?;
@@ -947,8 +970,10 @@ fn scan_sources(db: &mut impl Store, home: &Path, app: &Path, only: Option<&[Pat
             scan_files(db, &source, app)
         };
         result.files_scanned += 1;
+        let mut collected = false;
         match read {
             Ok((n, errors)) => {
+                collected = true;
                 result.records_inserted += n;
                 if !errors.is_empty() {
                     result.failed_sources.push(source.platform.clone());
@@ -961,6 +986,13 @@ fn scan_sources(db: &mut impl Store, home: &Path, app: &Path, only: Option<&[Pat
                 result.failed_sources.push(source.platform.clone());
                 result.errors.push(format!("{}：{reason}", source.name));
             }
+        }
+        // 归因决定三：ZCode 采集**成功**后顺手把 provider_config 里的端点地址与模型清单补进
+        // 已存连接（不新增定时器，也不在连接目录读取 / 每帧的读路径上写库，理由见
+        // `catalog_backfill` 模块头）。规则文件按 mtime + 长度缓存，只在变化时重读；
+        // 隔离验收模式下该函数是空操作（既不读真实配置，也不写连接）。
+        if collected && source.id == "native:zcode:main" {
+            let _ = db.write(|conn| crate::catalog_backfill::backfill_after_zcode_scan(conn));
         }
         match session_metadata(db, &source, app) {
             Ok(n) => result.records_inserted += n,
@@ -1117,6 +1149,42 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(states, expected, "残留行不在 90 秒窗口内，其余按真实状态输出");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    /// provider_id 必须以独立字段（`requests.provider_key`）落库：它是连接归因的端点事实。
+    /// 塞进 platform 会把「哪套工具」和「哪个端点」合并，归因层就再也分不开了。
+    #[test]
+    fn zcode_provider_id_lands_in_its_own_column() {
+        let root = fixture_dir("zcode-provider");
+        let folder = root.join(".zcode/cli/db");
+        std::fs::create_dir_all(&folder).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let input = Connection::open(folder.join("db.sqlite")).unwrap();
+            input.execute_batch(
+                "CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT);
+                CREATE TABLE model_usage(id TEXT PRIMARY KEY, session_id TEXT, model_id TEXT, status TEXT,
+                  started_at INTEGER, completed_at INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+                  cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, provider_total_tokens INTEGER,
+                  computed_total_tokens INTEGER, reasoning_tokens INTEGER, raw_usage_json TEXT,
+                  provider_id TEXT NOT NULL DEFAULT '');",
+            ).unwrap();
+            input.execute("INSERT INTO session VALUES('s1','会话')", []).unwrap();
+            input.execute(
+                "INSERT INTO model_usage VALUES('u1','s1','GLM-5.3','completed',?1,?2,100,20,0,0,120,120,5,'{}','new-provider')",
+                params![now - 5_000, now - 4_000],
+            ).unwrap();
+        }
+        let mut conn = crate::db::open(Path::new(":memory:")).unwrap();
+        let result = scan_at(&mut conn, &root, &root);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let (platform, provider): (String, Option<String>) = conn
+            .query_row("SELECT platform, provider_key FROM requests WHERE dedup_key='u1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(platform, "zcode", "平台仍是工具，provider 不并入 platform");
+        assert_eq!(provider.as_deref(), Some("new-provider"));
         std::fs::remove_dir_all(&root).unwrap();
     }
     #[test]
