@@ -10,7 +10,7 @@ import { useToast } from "@/components/ui/Toast"
 import { Tip } from "@/components/ui/Tip"
 import { useUpdate } from "@/components/panel/UpdateContext"
 
-export const REPO_URL = "https://github.com/haishishushu/Jolu"
+export const REPO_URL = "https://github.com/meilule/Jolu"
 
 /**
  * 内容区固定页头（Jolu.pen 画板 01「内容区固定页头」，高 64）：

@@ -36,10 +36,10 @@ export function verifyRelease({ version, tag, manifest, assets }) {
     if (typeof url !== "string") throw new Error("更新清单缺少下载地址")
     const parsed = new URL(url)
     if (parsed.origin !== "https://github.com" || parsed.username || parsed.password || parsed.search || parsed.hash
-      || !parsed.pathname.startsWith("/haishishushu/Jolu/releases/download/")) {
+      || !parsed.pathname.startsWith("/meilule/Jolu/releases/download/")) {
       throw new Error(`更新清单下载地址必须来自官方仓库的 HTTPS 发行资源：${url}`)
     }
-    const marker = `/haishishushu/Jolu/releases/download/${tag}/`
+    const marker = `/meilule/Jolu/releases/download/${tag}/`
     if (!parsed.pathname.startsWith(marker)) throw new Error(`更新清单下载地址指向了其他发行版：${url}`)
     const name = decodeURIComponent(parsed.pathname.slice(marker.length))
     if (!name.startsWith(prefix) || !names.has(name)) {

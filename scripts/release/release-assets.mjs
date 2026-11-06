@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFi
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
-const REPO_DOWNLOAD = "https://github.com/haishishushu/Jolu/releases/download"
+const REPO_DOWNLOAD = "https://github.com/meilule/Jolu/releases/download"
 
 /** 各构建平台在 bundle 目录下的产物：子目录、匹配规则、发行资源后缀、是否带更新签名 */
 export const PLATFORM_ASSETS = {

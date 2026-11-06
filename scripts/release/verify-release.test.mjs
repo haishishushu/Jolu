@@ -16,8 +16,8 @@ const signature = Buffer.from("untrusted comment: signature from test key\n" + B
 const manifest = {
   version,
   platforms: {
-    "windows-x86_64": { signature, url: `https://github.com/haishishushu/Jolu/releases/download/${tag}/${prefix}Windows-x86_64-Setup.exe` },
-    "linux-x86_64": { signature, url: `https://github.com/haishishushu/Jolu/releases/download/${tag}/${prefix}Linux-x86_64.AppImage` },
+    "windows-x86_64": { signature, url: `https://github.com/meilule/Jolu/releases/download/${tag}/${prefix}Windows-x86_64-Setup.exe` },
+    "linux-x86_64": { signature, url: `https://github.com/meilule/Jolu/releases/download/${tag}/${prefix}Linux-x86_64.AppImage` },
   },
 }
 

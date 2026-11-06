@@ -9,4 +9,4 @@ https://developer.microsoft.com/microsoft-edge/webview2/
 
 更新：此版本停用应用内更新，避免启动安装器。请退出 Jolu，下载新版 Portable ZIP，
 解压并替换旧程序；保存在用户目录中的数据不受影响。
-下载地址：https://github.com/haishishushu/Jolu/releases/latest
+下载地址：https://github.com/meilule/Jolu/releases/latest

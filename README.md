@@ -6,10 +6,10 @@
 
 额度常驻桌面灵动岛 · 每日福利一键签到 · 额度用完自动等待、恢复后续跑
 
-[![Release](https://img.shields.io/github/v/release/haishishushu/Jolu?label=release&logo=github)](https://github.com/haishishushu/Jolu/releases/latest)
+[![Release](https://img.shields.io/github/v/release/meilule/Jolu?label=release&logo=github)](https://github.com/meilule/Jolu/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 
-[下载安装](https://github.com/haishishushu/Jolu/releases/latest) · [反馈问题](https://github.com/haishishushu/Jolu/issues)
+[下载安装](https://github.com/meilule/Jolu/releases/latest) · [反馈问题](https://github.com/meilule/Jolu/issues)
 
 简体中文 | [English](./README.en.md)
 
@@ -153,7 +153,7 @@
 
 ## 下载与安装
 
-在 [GitHub Releases](https://github.com/haishishushu/Jolu/releases) 下载 `Windows-x86_64-Setup.exe`，运行安装向导，完成后启动 Jolu。支持 Windows 10 / 11 x64。
+在 [GitHub Releases](https://github.com/meilule/Jolu/releases) 下载 `Windows-x86_64-Setup.exe`，运行安装向导，完成后启动 Jolu。支持 Windows 10 / 11 x64。
 
 - 每个版本拥有独立发行页，历史版本应从对应版本页下载。
 - 安装向导会创建开始菜单入口，并可创建桌面快捷方式；卸载默认保留应用数据。
@@ -264,7 +264,7 @@
 
 ## 更新与数据保留
 
-应用默认启动时检查一次更新，之后每 30 分钟检查；发现新版本会在后台下载并校验签名，页头出现绿色版本按钮，点击后自动安装并重启。也可以从 [GitHub Releases](https://github.com/haishishushu/Jolu/releases) 下载新版安装包直接覆盖安装。
+应用默认启动时检查一次更新，之后每 30 分钟检查；发现新版本会在后台下载并校验签名，页头出现绿色版本按钮，点击后自动安装并重启。也可以从 [GitHub Releases](https://github.com/meilule/Jolu/releases) 下载新版安装包直接覆盖安装。
 
 设置与统计保存在应用数据目录，覆盖安装会继续使用原目录。灵动岛连接、显示偏好、主窗口位置、自动化任务与运行记录都会持久化。
 
@@ -385,8 +385,8 @@ jolu/
 
 ## 反馈与许可证
 
-- [提交问题或建议](https://github.com/haishishushu/Jolu/issues)：请提供版本、操作系统、复现步骤、预期与实际结果；截图和日志请隐藏凭证。
-- [发行记录](https://github.com/haishishushu/Jolu/releases) · [路线图](./docs/plans/2026-10-21-jolu-development-roadmap.md)
+- [提交问题或建议](https://github.com/meilule/Jolu/issues)：请提供版本、操作系统、复现步骤、预期与实际结果；截图和日志请隐藏凭证。
+- [发行记录](https://github.com/meilule/Jolu/releases) · [路线图](./docs/plans/2026-10-21-jolu-development-roadmap.md)
 - 仓库原说明标注为 MIT，独立的 LICENSE 文件尚未补充。欢迎提交有明确问题描述和验证说明的改进。
 
 ## Community 社区
@@ -395,10 +395,10 @@ jolu/
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=haishishushu%2FJolu&amp;type=date&amp;legend=top-left">
+<a href="https://www.star-history.com/?repos=meilule%2FJolu&amp;type=date&amp;legend=top-left">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left&amp;theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" />
-    <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=meilule/Jolu&amp;type=date&amp;legend=top-left&amp;theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=meilule/Jolu&amp;type=date&amp;legend=top-left" />
+    <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=meilule/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
   </picture>
 </a>

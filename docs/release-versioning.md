@@ -10,6 +10,8 @@
 
 发行由 `.github/workflows/release.yml` 完成。
 
+正式发行仓库为 [meilule/Jolu](https://github.com/meilule/Jolu)。应用更新端点在 `backend/tauri.conf.json`，更新包下载地址由 `scripts/release/release-assets.mjs` 生成，并由 `scripts/release/verify-release.mjs` 限定为该仓库；迁移仓库时须同步修改这三处。工作流跟随当前检出的仓库发布，更新签名继续使用原有密钥。
+
 - `main` 的每次推送使用一个新的 `vX.Y.Z` 标签和同名 GitHub Release。发行版只上传该版本的安装包、签名与 `latest.json`。
 - 版本号取 `backend/tauri.conf.json`、已有 `vX.Y.Z` 标签与已有发行版（含草稿）中的最高版本，再按上述规则递增（`scripts/release/next-release-version.mjs`）。构建时以 `--config` 注入版本号，不改写仓库里的配置文件。
 - 维护者手动推送 `v*` 标签时，标签必须与 `backend/tauri.conf.json` 的版本一致，工作流按该版本发行。也可以用 `gh workflow run release.yml --ref vX.Y.Z` 对已有标签重新触发。发行标签不应强制改指向或复用到别的提交。

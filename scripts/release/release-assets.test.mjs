@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import test from "node:test"
 import { buildManifest, planAssets } from "./release-assets.mjs"
 import { verifyRelease } from "./verify-release.mjs"
@@ -38,7 +39,10 @@ test("planAssets：缺包、多包、缺签名或未知平台都失败", () => {
 test("buildManifest：四个更新平台指向本次发行资源，且能通过发布校验", () => {
   const manifest = buildManifest({ version: "0.1.0", tag: "v0.1.0", notes: "n", pubDate: "2026-10-27T00:00:00Z", readSignature: () => SIGNATURE })
   assert.deepEqual(Object.keys(manifest.platforms).sort(), ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"])
-  assert.equal(manifest.platforms["windows-x86_64"].url, "https://github.com/haishishushu/Jolu/releases/download/v0.1.0/Jolu-v0.1.0-Windows-x86_64-Setup.exe")
+  assert.equal(manifest.platforms["windows-x86_64"].url, "https://github.com/meilule/Jolu/releases/download/v0.1.0/Jolu-v0.1.0-Windows-x86_64-Setup.exe")
+  const config = JSON.parse(readFileSync(new URL("../../backend/tauri.conf.json", import.meta.url), "utf8"))
+  const repoUrl = manifest.platforms["windows-x86_64"].url.split("/releases/download/")[0]
+  assert.deepEqual(config.plugins.updater.endpoints, [`${repoUrl}/releases/latest/download/latest.json`])
   const files = [
     "Windows-x86_64-Setup.exe", "Windows-x86_64-Portable.zip", "macOS-arm64.dmg", "macOS-x86_64.dmg", "Linux-x86_64.AppImage", "Linux-x86_64.deb",
     "macOS-arm64.app.tar.gz", "macOS-x86_64.app.tar.gz",

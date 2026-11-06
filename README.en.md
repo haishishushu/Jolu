@@ -6,10 +6,10 @@
 
 Quota always on your desktop island · Daily rewards in one click · Tasks that wait out quota limits and resume on their own
 
-[![Release](https://img.shields.io/github/v/release/haishishushu/Jolu?label=release&logo=github)](https://github.com/haishishushu/Jolu/releases/latest)
+[![Release](https://img.shields.io/github/v/release/meilule/Jolu?label=release&logo=github)](https://github.com/meilule/Jolu/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 
-[Download](https://github.com/haishishushu/Jolu/releases/latest) · [Report an issue](https://github.com/haishishushu/Jolu/issues)
+[Download](https://github.com/meilule/Jolu/releases/latest) · [Report an issue](https://github.com/meilule/Jolu/issues)
 
 [简体中文](./README.md) | English
 
@@ -137,7 +137,7 @@ Volcengine Ark plan quotas require a control-plane AccessKey. Jolu does not stor
 
 ## Download and install
 
-Download `Windows-x86_64-Setup.exe` from [GitHub Releases](https://github.com/haishishushu/Jolu/releases), run the installer and launch Jolu. Windows 10 / 11 x64 is supported.
+Download `Windows-x86_64-Setup.exe` from [GitHub Releases](https://github.com/meilule/Jolu/releases), run the installer and launch Jolu. Windows 10 / 11 x64 is supported.
 
 - Every version has its own release page; download older versions from their own pages.
 - The installer creates a Start menu entry and can create a desktop shortcut; uninstalling keeps app data by default.
@@ -225,7 +225,7 @@ Local tokens, island deltas and official quotas therefore do not have to match. 
 
 ## Updates and data retention
 
-Jolu checks for updates at launch and then every 30 minutes. A new version is downloaded and signature-checked in the background; a green version button then appears in the page header, and clicking it installs the update and restarts the app. You can also download the new installer from [GitHub Releases](https://github.com/haishishushu/Jolu/releases) and install over the existing version.
+Jolu checks for updates at launch and then every 30 minutes. A new version is downloaded and signature-checked in the background; a green version button then appears in the page header, and clicking it installs the update and restarts the app. You can also download the new installer from [GitHub Releases](https://github.com/meilule/Jolu/releases) and install over the existing version.
 
 Settings and statistics live in the app data folder, which an in-place install keeps using. Island connections, display preferences, the main window position, automation tasks and run records all persist.
 
@@ -346,8 +346,8 @@ The collector reads local records incrementally and de-duplicates them into SQLi
 
 ## Feedback and license
 
-- [Open an issue](https://github.com/haishishushu/Jolu/issues): include the version, OS, steps to reproduce, expected and actual results; hide credentials in screenshots and logs.
-- [Releases](https://github.com/haishishushu/Jolu/releases) · [Roadmap](./docs/plans/2026-10-21-jolu-development-roadmap.md)
+- [Open an issue](https://github.com/meilule/Jolu/issues): include the version, OS, steps to reproduce, expected and actual results; hide credentials in screenshots and logs.
+- [Releases](https://github.com/meilule/Jolu/releases) · [Roadmap](./docs/plans/2026-10-21-jolu-development-roadmap.md)
 - The original repository description says MIT; a separate LICENSE file has not been added yet. Improvements with a clear problem description and verification notes are welcome.
 
 ## Community
@@ -356,10 +356,10 @@ The collector reads local records incrementally and de-duplicates them into SQLi
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=haishishushu%2FJolu&amp;type=date&amp;legend=top-left">
+<a href="https://www.star-history.com/?repos=meilule%2FJolu&amp;type=date&amp;legend=top-left">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left&amp;theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" />
-    <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=haishishushu/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=meilule/Jolu&amp;type=date&amp;legend=top-left&amp;theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=meilule/Jolu&amp;type=date&amp;legend=top-left" />
+    <img alt="Jolu Star History" src="https://api.star-history.com/chart?repos=meilule/Jolu&amp;type=date&amp;legend=top-left" width="100%" />
   </picture>
 </a>
