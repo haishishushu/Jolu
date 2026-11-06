@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils"
 import { PROVIDERS, connectionProviderId, connectionProviderEntry, editSaveState, fallsBackToManualModel, modelFetchErrorText, protocolLabel, providerEntry, requestGate, canStartVerify, modelBusyAfter, validateConnectionName, type ProviderId, type ModelBusy } from "@/lib/providerCatalog"
 import { accountQueries, quotaValue, subscriptionDisplay, resetCreditsText, filterAccounts, formatMoney, formatResetAt, formatSyncedAt, quotaTitle, redactAccountMessage } from "@/lib/accountDisplay"
 import { accountCardPolicy } from "@/lib/accountCardPolicy"
+import { isPlanWindowKey } from "@/lib/providers/registry"
 import { remainingPercent } from "@/lib/quota"
 import { removeAccounts, removeAccountWithReplacement } from "@/lib/accountActions"
 import { useConnections } from "@/hooks/useConnections"
@@ -17,6 +18,7 @@ import { SelectField } from "@/components/ui/SelectField"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
 import { JoluButton } from "@/components/ui/JoluButton"
 import { ModelPicker } from "@/components/providers/ConnectDialog"
+import { ZcodeBucketQuota } from "@/components/providers/ZcodeBucketQuota"
 import { AccountBatchToolbar, BatchAccountDeleteDialog, type BatchAccountTarget } from "@/components/providers/AccountBatchControls"
 import { Tip } from "@/components/ui/Tip"
 import { useToast } from "@/components/ui/Toast"
@@ -487,10 +489,15 @@ function SubscriptionMetrics({ account, quota, compact=false, limit=2 }: { accou
   const unauthorized = state?.state === "unauthorized"
   const policy=accountCardPolicy(account,state)
   const windows=compact ? policy.windows.slice(0,limit) : policy.windows
+  // 有桶的 ZCode 账号走按桶渲染（方案 A）：套餐窗口（5h / 7d）不进来，其它平台仍用 QuotaBar。
+  // 同一连接若同时返回套餐窗口与日额度桶，套餐窗口继续用原 QuotaBar，不丢窗口。
+  const hasBuckets=account.platformId === "zcode" && policy.windows.some(window=>!isPlanWindowKey(window.key))
+  const restWindows=hasBuckets ? policy.windows.filter(window=>isPlanWindowKey(window.key)) : windows
   return <>
-    {policy.plan && (compact ? <span className="truncate text-[10px] font-medium leading-4 text-jolu-text" title={policy.plan}>{policy.plan}</span> : <Stat label="等级 / 套餐" value={policy.plan} />)}
-    {windows.length > 0 && <div className="grid grid-cols-1 gap-2">{windows.map(window=><QuotaBar key={window.key} window={window} compact={compact} showReset={!compact} />)}</div>}
-    {compact && policy.windows.length > windows.length && <span className="text-[10px] text-jolu-muted">共 {policy.windows.length} 项额度，完整内容见详情</span>}
+    {policy.plan && !hasBuckets && (compact ? <span className="truncate text-[10px] font-medium leading-4 text-jolu-text" title={policy.plan}>{policy.plan}</span> : <Stat label="等级 / 套餐" value={policy.plan} />)}
+    {hasBuckets && <ZcodeBucketQuota windows={policy.windows} plan={policy.plan} />}
+    {restWindows.length > 0 && <div className="grid grid-cols-1 gap-2">{restWindows.map(window=><QuotaBar key={window.key} window={window} compact={compact} showReset={!compact} />)}</div>}
+    {!hasBuckets && compact && policy.windows.length > windows.length && <span className="text-[10px] text-jolu-muted">共 {policy.windows.length} 项额度，完整内容见详情</span>}
     {state?.state !== "ok" && <div className={cn("rounded-lg bg-jolu-side px-2 py-1.5 text-[11px] text-jolu-muted",compact&&"line-clamp-2")}>
       {quota.loading && !state ? "正在读取额度…" : state ? `额度 · ${unauthorized ? "账号认证已失效，重新登录后同步" : hidden ? redactAccountMessage(state.reason) : state.reason}` : "额度尚未查询"}
     </div>}

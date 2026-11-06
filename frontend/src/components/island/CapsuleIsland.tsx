@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { PlatformLogo } from "@/components/brand/PlatformLogo"
+import { ZcodeBucketQuota } from "@/components/providers/ZcodeBucketQuota"
 import { Bot, type BotRing } from "./Bot"
 import { AnimatedTokens } from "./TokenDelta"
 import { SessionList } from "./SessionList"
@@ -12,6 +13,7 @@ import { botExpression, BOT_NAMES } from "@/lib/botExpression"
 import { carriedDeltaSegment, type CarriedDeltaSource } from "@/lib/carriedDelta"
 import { quotaRowsFor } from "@/lib/authQuotaRows"
 import { capsuleQuotaChips, CHIP_NAME_MAX_WIDTH, compactQuotaNumber, type CapsuleChipWindow } from "@/lib/capsuleQuotaChips"
+import { islandBucketQuotaView } from "@/lib/islandQuotaBuckets"
 import { quotaRings } from "@/lib/quotaRings"
 import { listenEvent } from "@/lib/api"
 import { useLiveCount } from "@/lib/liveCounts"
@@ -169,6 +171,23 @@ export function CapsuleIsland({
     }))
   }, [data.quotas, quotaRows])
   const { chips: quotaChipList, more: quotaChipMore } = useMemo(() => capsuleQuotaChips(chipWindows), [chipWindows])
+  /**
+   * 展开卡片要不要把旧整句（`剩余额度 · 还剩 2d 9h 后重置 / 剩余 500000000 token`）换成按桶小卡。
+   *
+   * 判定与数据都在 `lib/islandQuotaBuckets.ts`：只有 ZCode 本机登录（auth）那份纯日额度桶列表
+   * 才走桶卡；套餐窗口（5h / 7d）、其它平台、API Key 计量、无窗口、查询失败 / 401 / 需重登
+   * 一律返回 null，继续显示原来的整句。视觉复用主窗口的 `ZcodeBucketQuota`（`size="island"`）。
+   */
+  const bucketView = useMemo(
+    () => islandBucketQuotaView({
+      platform: data.platform,
+      kind: data.kind,
+      windows: data.quotas,
+      queryFailed: data.queryFailed,
+      unavailable: Boolean(data.unavailable),
+    }),
+    [data.platform, data.kind, data.quotas, data.queryFailed, data.unavailable],
+  )
 
   const running = data.sessions?.filter((s) => s.state === "running").length ?? 0
   // 数据层（useIslandWindowModel）已按 §5.8 的三信号（running 会话 / 网关请求在途 / 最近活跃窗口内仍有写入）
@@ -495,6 +514,10 @@ export function CapsuleIsland({
         </button>
       )
     })
+  ) : bucketView ? (
+    // 按桶的日额度（ZCode 本机登录那类）：小卡与主窗口同一份组件、同一套口径，
+    // 图例栏只有 ~186px，固定逐行（两列会把桶名压成省略号，见汇报里的确认点）。
+    <ZcodeBucketQuota view={bucketView} plan={null} size="island" columns={1} />
   ) : data.remainingMetrics ? (
     data.remainingMetrics.rows.length > 0
       ? data.remainingMetrics.rows.map((row, i) => (
